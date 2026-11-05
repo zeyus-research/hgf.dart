@@ -64,11 +64,18 @@ FIELDS = (
     "volatility_prediction_error",
     "effective_precision",
     "nus",
+    # categorical-state nodes
+    "kl_divergence",
+    "surprise",
 )
 
-# Vector-valued fields of ef-state nodes (``mean`` too when the node is
-# multivariate), written to the fixture's ``vector_trajectories``.
-VECTOR_FIELDS = ("mean", "xis", "observation_ss")
+# Vector-valued fields of ef-state and categorical-state nodes (``mean`` too
+# when the node is multivariate), written to the fixture's
+# ``vector_trajectories``.
+VECTOR_FIELDS = ("mean", "xis", "observation_ss", "alpha")
+
+# pyhgf node types with vector-valued attributes (ef-state, categorical-state).
+VECTOR_NODE_TYPES = (3, 5)
 
 JAX_COUPLING_FNS = {
     "tanh": jnp.tanh,
@@ -312,6 +319,35 @@ def ef_mixed_inputs() -> dict:
     return spec
 
 
+def categorical_state(
+    n_categories: int | None = 3,
+    volatility_updates: str = "unbounded",
+    mean_field: bool = False,
+) -> dict:
+    """A categorical-state node on its own: pyhgf adds one binary HGF per
+    category (binary node, continuous value parent) and a shared volatility
+    parent, 2n + 2 nodes in all. ``None`` keeps pyhgf's default of 4."""
+    node: dict = {"kind": "categorical-state"}
+    if n_categories is not None:
+        node["params"] = {"n_categories": n_categories}
+    network: dict = {"volatility_updates": volatility_updates}
+    if mean_field:
+        network["mean_field_updates"] = True
+    return {"network": network, "nodes": [node]}
+
+
+def categorical_mixed() -> dict:
+    """A categorical node (nodes 0-7) followed by a continuous 2-level HGF
+    (nodes 8-9). The other order crashes pyhgf: the binary nodes then inherit
+    the continuous parent's posterior update (upstream P7)."""
+    spec = categorical_state(3)
+    spec["nodes"] += [
+        {"kind": "continuous-state", "params": {"precision": 1e4}},
+        {"kind": "continuous-state", "value_children": [8], "params": {"tonic_volatility": -6.0}},
+    ]
+    return spec
+
+
 # ---------------------------------------------------------------------------
 # Builders
 # ---------------------------------------------------------------------------
@@ -439,6 +475,8 @@ def rs_supported(spec: dict, observed=None) -> bool:
             # rshgf's ef-state has only the univariate fixed-rate update,
             # without missing observations.
             return False
+        if node["kind"] == "categorical-state":
+            return False  # no nodalised categorical node in rshgf
         if node.get("coupling_fn", "linear") not in RS_COUPLING_FNS:
             return False
         for key in ("value_parents", "value_children", "volatility_parents", "volatility_children"):
@@ -480,7 +518,7 @@ def _series(arr) -> list:
 
 
 def jax_trajectories(net: Network) -> tuple[dict, dict]:
-    """Scalar fields per node, and the vector fields of ef-state nodes
+    """Scalar fields per node, and the vector fields of ef/categorical nodes
     (``{node: {field: [[...] per trial]}}``)."""
     out, vectors = {}, {}
     for idx, traj in net.node_trajectories.items():
@@ -494,8 +532,10 @@ def jax_trajectories(net: Network) -> tuple[dict, dict]:
                     fields[field] = _series(values)
             elif "temp" in traj and field in traj["temp"]:
                 fields[field] = _series(traj["temp"][field])
-        if net.edges[idx].node_type == 3:
+        if net.edges[idx].node_type in VECTOR_NODE_TYPES:
             for field in VECTOR_FIELDS:
+                if field not in traj:
+                    continue
                 values = np.asarray(traj[field], dtype=np.float64)
                 if values.ndim == 2:
                     vfields[field] = [_series(row) for row in values]
@@ -596,6 +636,19 @@ def usdchf() -> np.ndarray:
 def binary_u() -> np.ndarray:
     u, _ = load_data("binary")
     return np.asarray(u, dtype=np.float64)
+
+
+def categories(n_trials: int, n_categories: int, seed: int = 7) -> np.ndarray:
+    """One-hot draws (``n_trials x n_categories``) from a categorical
+    distribution that changes twice: a learning, a reversal, a flat phase."""
+    rng = np.random.default_rng(seed)
+    p = np.linspace(1.0, 0.2, n_categories)
+    probs = [p / p.sum(), p[::-1] / p.sum(), np.full(n_categories, 1.0 / n_categories)]
+    third = -(-n_trials // 3)
+    draws = np.concatenate(
+        [rng.choice(n_categories, size=third, p=q) for q in probs]
+    )[:n_trials]
+    return np.eye(n_categories)[draws]
 
 
 def missing_mask(n: int, n_inputs: int = 1) -> np.ndarray:
@@ -756,6 +809,40 @@ def scenarios() -> list[dict]:
             "spec": ef_mixed_inputs(),
             "inputs": np.stack([y, y, y[::-1] * 0.5 + 0.3, y[::-1]], axis=1),
             "observed": missing_mask(len(y), 3),
+        }
+    )
+
+    # Categorical state nodes (JAX only: rshgf has no nodalised version).
+    cat3 = categories(300, 3)
+    out.append({"name": "categorical_3", "spec": categorical_state(3), "inputs": cat3})
+    out.append(
+        {"name": "categorical_4_default", "spec": categorical_state(None), "inputs": categories(300, 4)}
+    )
+    for mode in ("eHGF", "standard"):
+        out.append(
+            {"name": f"categorical_3_{mode}", "spec": categorical_state(3, mode), "inputs": cat3}
+        )
+    out.append(
+        {
+            "name": "categorical_3_mean_field",
+            "spec": categorical_state(3, mean_field=True),
+            "inputs": cat3,
+        }
+    )
+    out.append(
+        {
+            "name": "categorical_3_missing",
+            "spec": categorical_state(3),
+            "inputs": cat3,
+            "observed": missing_mask(len(cat3)),
+        }
+    )
+    out.append(
+        {
+            "name": "categorical_mixed",
+            "spec": categorical_mixed(),
+            "inputs": np.hstack([cat3, y[: len(cat3), None]]),
+            "observed": missing_mask(len(cat3), 2)[:, ::-1],
         }
     )
     return out

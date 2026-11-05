@@ -10,6 +10,7 @@ import 'types.dart';
 part 'batch/batch_network.dart';
 part 'batch/batch_updates.dart';
 part 'update_sequence.dart';
+part 'updates/categorical.dart';
 part 'updates/exponential.dart';
 part 'updates/prediction.dart';
 part 'updates/prediction_error.dart';
@@ -29,11 +30,14 @@ const int _kPredictionErrorBinary = 9;
 const int _kPredictionErrorEfFixed = 10;
 const int _kPredictionErrorEfDynamic = 11;
 const int _kPosteriorEfDynamic = 12;
+const int _kPredictionErrorCategorical = 13;
+const int _kPosteriorCategorical = 14;
 
 const int _kindContinuous = 0;
 const int _kindBinary = 1;
 const int _kindConstant = 2;
 const int _kindEf = 3;
+const int _kindCategorical = 4;
 
 /// `_couplingFn` code of a [CustomCoupling] (named ones use their index).
 const int _kCustomCoupling = 255;
@@ -53,9 +57,12 @@ final class _NodeDef {
   final Coupling coupling;
   final Map<NodeField, double> params;
 
-  /// ef-state only: the dimension of the observations, and the initial
-  /// sufficient statistics (`null`: pyhgf's default).
+  /// The number of input columns: an ef-state node's observation dimension,
+  /// a categorical-state node's number of categories.
   int dimension = 1;
+
+  /// ef-state only: the initial sufficient statistics (`null`: pyhgf's
+  /// default).
   List<double>? xis;
 
   final List<int> valueParents = [];
@@ -220,6 +227,12 @@ class Network {
         'learning mode)',
       );
     }
+    if (kind == NodeKind.categoricalState) {
+      throw ArgumentError(
+        'Add categorical-state nodes with addCategoricalState (it also adds '
+        'their binary HGFs)',
+      );
+    }
     if (kind == NodeKind.binaryState &&
         (volatilityParents != null || volatilityChildren != null)) {
       throw ArgumentError('Binary state nodes take value edges only');
@@ -277,6 +290,12 @@ class Network {
             throw ArgumentError(
               'Node $other is an ef-state node, which only takes value '
               'parents',
+            );
+          }
+          if (o.kind == NodeKind.categoricalState) {
+            throw ArgumentError(
+              'Node $other is a categorical state node; its edges are set '
+              'by addCategoricalState',
             );
           }
           if (!theirs(o).contains(id)) {
@@ -395,6 +414,95 @@ class Network {
       for (var c = 0; c <= r; c++) r == c ? 1.0 : 0.0,
   ];
 
+  /// Add a categorical state node (pyhgf's `categorical-state`): an input
+  /// node observing one of [nCategories] categories, as [nCategories] input
+  /// columns (one-hot; `1` marks the category observed).
+  ///
+  /// As in pyhgf, the node comes with one binary HGF per category and a
+  /// shared volatility parent, `2n + 2` nodes in all, in this order (with `c`
+  /// the categorical node's index and `n` = [nCategories]):
+  ///
+  /// - `c`: the categorical node;
+  /// - `c + 1 .. c + n`: binary nodes, its value parents, one per category;
+  /// - `c + n + 1 .. c + 2n`: continuous nodes, the value parent of each
+  ///   binary node in turn;
+  /// - `c + 2n + 1`: a continuous node, the volatility parent of all of
+  ///   those.
+  ///
+  /// Each trial, every binary node observes its category's indicator, the
+  /// binary HGFs update as usual, and the categorical node then derives a
+  /// Dirichlet distribution over the categories ([VectorField.alpha]) from
+  /// how much each one learned; see [NodeField.klDivergence] and
+  /// [NodeField.surprise] for what it records.
+  ///
+  /// The other parameters set the initial beliefs of the implied nodes;
+  /// their defaults are pyhgf's: binary nodes `mean` [binaryMean] (`1/n`) and
+  /// `precision` [binaryPrecision]; value parents `mean` [valueMean]
+  /// (`−ln(n − 1)`, so that `σ(mean) = 1/n`), `precision` [valuePrecision],
+  /// `tonicVolatility` [valueTonicVolatility]; the volatility parent likewise.
+  /// pyhgf ignores its `binary_parameters` argument and always uses these
+  /// defaults. Change any parameter later with [setInitial].
+  ///
+  /// Unlike pyhgf, several categorical nodes can share a network (call this
+  /// once per node): pyhgf's `n_nodes > 1` builds a broken graph.
+  Network addCategoricalState({
+    int nCategories = 4,
+    double? binaryMean,
+    double binaryPrecision = 1.0,
+    double? valueMean,
+    double valuePrecision = 1.0,
+    double valueTonicVolatility = -4.0,
+    double volatilityMean = 0.0,
+    double volatilityPrecision = 1.0,
+    double volatilityTonicVolatility = -4.0,
+  }) {
+    if (nCategories < 2) {
+      throw ArgumentError.value(
+        nCategories,
+        'nCategories',
+        'Must be at least 2',
+      );
+    }
+    final n = nCategories;
+    final c = _defs.length;
+    final cat = _NodeDef(NodeKind.categoricalState, CouplingFn.linear, {
+      NodeField.mean: 1.0 / n,
+    })..dimension = n;
+    _defs.add(cat);
+    for (var i = 0; i < n; i++) {
+      // Wired here rather than through addNodes, which rejects edges to
+      // categorical nodes.
+      final b = _defs.length;
+      _defs.add(
+        _NodeDef(NodeKind.binaryState, CouplingFn.linear, {
+            NodeField.mean: binaryMean ?? 1.0 / n,
+            NodeField.precision: binaryPrecision,
+          })
+          ..valueChildren.add(c)
+          ..valueChildStrengths.add(1.0),
+      );
+      cat
+        ..valueParents.add(b)
+        ..valueParentStrengths.add(1.0);
+    }
+    for (var i = 0; i < n; i++) {
+      addNodes(
+        valueChildren: [c + 1 + i],
+        mean: valueMean ?? -math.log(n - 1),
+        precision: valuePrecision,
+        tonicVolatility: valueTonicVolatility,
+      );
+    }
+    addNodes(
+      volatilityChildren: [for (var i = 0; i < n; i++) c + n + 1 + i],
+      mean: volatilityMean,
+      precision: volatilityPrecision,
+      tonicVolatility: volatilityTonicVolatility,
+    );
+    _compiled = false;
+    return this;
+  }
+
   // ---------------------------------------------------------------------------
   // Compiled representation
   // ---------------------------------------------------------------------------
@@ -408,10 +516,10 @@ class Network {
 
   // Input columns: input k reads `_inputDim[k]` values from column
   // `_inputCol[k]` of each data row (more than one for a multivariate
-  // ef-state input); `_nInputColumns` is the row width.
+  // ef-state input or a categorical one); `_nInputColumns` is the row width.
   Int32List _inputDim = _i32, _inputCol = _i32;
   int _nInputColumns = 0;
-  bool _hasEfInputs = false;
+  bool _hasVectorInputs = false;
 
   // CSR edge lists. Strengths are stored on the side that reads them: a
   // child's value/volatility *parents* carry the child-side strengths
@@ -438,14 +546,23 @@ class Network {
       _effectivePrecision = _f64,
       _valuePredictionError = _f64,
       _volatilityPredictionError = _f64,
-      _nus = _f64;
+      _nus = _f64,
+      _klDivergence = _f64,
+      _surprise = _f64;
 
   // Vector side store, outside the scalar hot loop: one CSR-like array per
   // [VectorField] (node i's vector is `[start[i], start[i + 1])`), read only
   // by kind-specific steps. `xis` and `observation_ss` share offsets.
-  Int32List _vMeanStart = _i32, _ssStart = _i32;
-  Float64List _vMean = _f64, _xis = _f64, _ss = _f64;
-  Float64List _vMeanInitial = _f64, _xisInitial = _f64, _ssInitial = _f64;
+  Int32List _vMeanStart = _i32, _ssStart = _i32, _alphaStart = _i32;
+  Float64List _vMean = _f64, _xis = _f64, _ss = _f64, _alpha = _f64;
+  Float64List _vMeanInitial = _f64,
+      _xisInitial = _f64,
+      _ssInitial = _f64,
+      _alphaInitial = _f64;
+
+  // Scratch for the categorical posterior (the new α, before the KL
+  // divergence from the old one), sized to the most categories.
+  Float64List _alphaScratch = _f64;
 
   // Initial state: all fields, field-major (`field.index * n + node`).
   Float64List _initial = _f64;
@@ -481,6 +598,7 @@ class Network {
         NodeKind.binaryState => _kindBinary,
         NodeKind.constantState => _kindConstant,
         NodeKind.efState => _kindEf,
+        NodeKind.categoricalState => _kindCategorical,
       };
       if (d.kind == NodeKind.constantState && d.valueChildren.isEmpty) {
         throw StateError('Constant state node $i has no value children');
@@ -497,13 +615,15 @@ class Network {
     _inputDim = Int32List(inputs.length);
     _inputCol = Int32List(inputs.length);
     var col = 0;
-    _hasEfInputs = false;
+    _hasVectorInputs = false;
     for (var k = 0; k < inputs.length; k++) {
       final d = _defs[inputs[k]];
+      final vector =
+          d.kind == NodeKind.efState || d.kind == NodeKind.categoricalState;
       _inputCol[k] = col;
-      _inputDim[k] = d.kind == NodeKind.efState ? d.dimension : 1;
+      _inputDim[k] = vector ? d.dimension : 1;
       col += _inputDim[k];
-      if (d.kind == NodeKind.efState) _hasEfInputs = true;
+      if (vector) _hasVectorInputs = true;
     }
     _nInputColumns = col;
     _compileVectors();
@@ -558,6 +678,8 @@ class Network {
     _valuePredictionError = Float64List(n);
     _volatilityPredictionError = Float64List(n);
     _nus = Float64List(n);
+    _klDivergence = Float64List(n);
+    _surprise = Float64List(n);
 
     assert(UpdateStep.predictionContinuous.index == _kPredictionContinuous);
     assert(UpdateStep.predictionErrorBinary.index == _kPredictionErrorBinary);
@@ -587,13 +709,22 @@ class Network {
   /// Offsets and initial values of the vector side store.
   void _compileVectors() {
     final n = _n;
-    final mStart = Int32List(n + 1), sStart = Int32List(n + 1);
+    final mStart = Int32List(n + 1),
+        sStart = Int32List(n + 1),
+        aStart = Int32List(n + 1);
+    var maxCategories = 0;
     for (var i = 0; i < n; i++) {
       final d = _defs[i];
       final ef = d.kind == NodeKind.efState;
-      mStart[i + 1] = mStart[i] + (ef ? d.dimension : 0);
+      final cat = d.kind == NodeKind.categoricalState;
+      mStart[i + 1] = mStart[i] + (ef || cat ? d.dimension : 0);
       sStart[i + 1] =
           sStart[i] + (ef ? _efSufficientStatisticsCount(d.dimension) : 0);
+      aStart[i + 1] = aStart[i] + (cat ? d.dimension : 0);
+      if (cat) {
+        maxCategories = math.max(maxCategories, d.dimension);
+        _checkCategoricalParents(i, d);
+      }
       if (!ef) continue;
       final vp = d.valueParents;
       if (vp.isNotEmpty &&
@@ -616,15 +747,47 @@ class Network {
     }
     _vMeanStart = mStart;
     _ssStart = sStart;
+    _alphaStart = aStart;
     _vMean = Float64List(mStart[n]);
     _xis = Float64List(sStart[n]);
     _ss = Float64List(sStart[n]);
+    _alpha = Float64List(aStart[n]);
     _vMeanInitial = Float64List(mStart[n]);
     _ssInitial = Float64List(sStart[n]);
     _xisInitial = Float64List(sStart[n]);
+    // α starts at 1 (a flat Dirichlet), the mean at 1/n per category.
+    _alphaInitial = Float64List(aStart[n])..fillRange(0, aStart[n], 1.0);
+    _alphaScratch = Float64List(maxCategories);
     for (var i = 0; i < n; i++) {
-      final xis = _defs[i].xis;
+      final d = _defs[i];
+      final xis = d.xis;
       if (xis != null) _xisInitial.setAll(sStart[i], xis);
+      if (d.kind == NodeKind.categoricalState) {
+        _vMeanInitial.fillRange(mStart[i], mStart[i + 1], 1.0 / d.dimension);
+      }
+    }
+  }
+
+  /// A categorical node's value parents must be one binary node per
+  /// category, each with a continuous (first) value parent: the posterior
+  /// reads that parent's mean.
+  void _checkCategoricalParents(int i, _NodeDef d) {
+    if (d.valueParents.length != d.dimension) {
+      throw StateError(
+        'Categorical state node $i needs one binary value parent per '
+        'category (${d.dimension}), has ${d.valueParents.length}',
+      );
+    }
+    for (final b in d.valueParents) {
+      final bd = _defs[b];
+      if (bd.kind != NodeKind.binaryState ||
+          bd.valueParents.isEmpty ||
+          _defs[bd.valueParents.first].kind != NodeKind.continuousState) {
+        throw StateError(
+          'Value parent $b of categorical state node $i must be a binary '
+          'node whose first value parent is a continuous node',
+        );
+      }
     }
   }
 
@@ -689,11 +852,11 @@ class Network {
         throw StateError('Bad input columns');
       }
       final i = _inputs[k];
-      if (_kind[i] == _kindEf &&
-          _vMeanStart[i + 1] - _vMeanStart[i] != _inputDim[k]) {
-        throw StateError('Bad ef-state input dimension');
+      final vector = _kind[i] == _kindEf || _kind[i] == _kindCategorical;
+      if (vector && _vMeanStart[i + 1] - _vMeanStart[i] != _inputDim[k]) {
+        throw StateError('Bad vector input dimension');
       }
-      if (_kind[i] != _kindEf && _inputDim[k] != 1) {
+      if (!vector && _inputDim[k] != 1) {
         throw StateError('Bad input dimension');
       }
       col += _inputDim[k];
@@ -702,6 +865,7 @@ class Network {
     for (final (start, len) in [
       (_vMeanStart, _vMean.length),
       (_ssStart, _ss.length),
+      (_alphaStart, _alpha.length),
     ]) {
       if (start.length != n + 1 || start[0] != 0 || start[n] != len) {
         throw StateError('Corrupt vector offsets');
@@ -713,8 +877,27 @@ class Network {
     if (_xis.length != _ss.length ||
         _xisInitial.length != _ss.length ||
         _ssInitial.length != _ss.length ||
-        _vMeanInitial.length != _vMean.length) {
+        _vMeanInitial.length != _vMean.length ||
+        _alphaInitial.length != _alpha.length) {
       throw StateError('Bad vector store');
+    }
+    for (var i = 0; i < n; i++) {
+      final len = _alphaStart[i + 1] - _alphaStart[i];
+      if (_kind[i] != _kindCategorical) {
+        if (len != 0) throw StateError('Bad categorical vector lengths');
+        continue;
+      }
+      if (len != _vMeanStart[i + 1] - _vMeanStart[i] ||
+          len != _vpStart[i + 1] - _vpStart[i] ||
+          len > _alphaScratch.length) {
+        throw StateError('Bad categorical vector lengths');
+      }
+      for (var e = _vpStart[i]; e < _vpStart[i + 1]; e++) {
+        final b = _vpIdx[e];
+        if (_kind[b] != _kindBinary || _vpStart[b + 1] == _vpStart[b]) {
+          throw StateError('Bad categorical parents');
+        }
+      }
     }
     for (var i = 0; i < n; i++) {
       if (_kind[i] != _kindEf) continue;
@@ -785,6 +968,7 @@ class Network {
       NodeField.observed: 1.0,
       NodeField.nus: 3.0,
     },
+    NodeKind.categoricalState => const {NodeField.observed: 1.0},
   };
 
   UpdateSequence? _updateSequence;
@@ -797,7 +981,8 @@ class Network {
 
   /// Indexes of the input nodes (nodes without children), which receive the
   /// observation columns in order: one column each, except an ef-state
-  /// input, which takes `dimension` consecutive columns.
+  /// input, which takes `dimension` consecutive columns, and a categorical
+  /// one, which takes one per category.
   List<int> get inputIdxs {
     build();
     return _inputIdxsView;
@@ -806,7 +991,8 @@ class Network {
   List<int> _inputIdxsView = const [];
 
   /// Width of one row of input data: the number of [inputIdxs], plus
-  /// `dimension - 1` per multivariate ef-state input.
+  /// `dimension - 1` per multivariate ef-state input and `n - 1` per
+  /// categorical input with `n` categories.
   int get nInputColumns {
     build();
     return _nInputColumns;
@@ -833,6 +1019,8 @@ class Network {
     NodeField.valuePredictionError => _valuePredictionError,
     NodeField.volatilityPredictionError => _volatilityPredictionError,
     NodeField.nus => _nus,
+    NodeField.klDivergence => _klDivergence,
+    NodeField.surprise => _surprise,
   };
 
   @pragma('vm:prefer-inline')
@@ -840,6 +1028,7 @@ class Network {
   Int32List _vectorStart(VectorField f) => switch (f) {
     VectorField.mean => _vMeanStart,
     VectorField.xis || VectorField.observationSs => _ssStart,
+    VectorField.alpha => _alphaStart,
   };
 
   @pragma('vm:prefer-inline')
@@ -848,12 +1037,14 @@ class Network {
     VectorField.mean => _vMean,
     VectorField.xis => _xis,
     VectorField.observationSs => _ss,
+    VectorField.alpha => _alpha,
   };
 
   Float64List _vectorInitial(VectorField f) => switch (f) {
     VectorField.mean => _vMeanInitial,
     VectorField.xis => _xisInitial,
     VectorField.observationSs => _ssInitial,
+    VectorField.alpha => _alphaInitial,
   };
 
   /// Length of [node]'s [field] vector (0 if the node has none).
@@ -1266,8 +1457,10 @@ class Network {
   }) {
     build();
     if (nTime < 0) throw ArgumentError.value(nTime, 'nTime');
-    if (_hasEfInputs) {
-      throw UnsupportedError('sample() does not support ef-state inputs yet');
+    if (_hasVectorInputs) {
+      throw UnsupportedError(
+        'sample() does not support ef-state or categorical inputs yet',
+      );
     }
     final nIn = _inputs.length;
     if (timeSteps != null && timeSteps.length != nTime) {
@@ -1365,8 +1558,13 @@ class Network {
     }
   }
 
-  int get _stateLength =>
-      NodeField.values.length * _n + _vMean.length + _xis.length + _ss.length;
+  int get _stateLength {
+    var len = NodeField.values.length * _n;
+    for (final f in VectorField.values) {
+      len += _vector(f).length;
+    }
+    return len;
+  }
 
   /// Convenience for a single input node: filter [series].
   Trajectories inputSeries(
@@ -1467,8 +1665,8 @@ class Network {
       }
     }
     final inputs = _inputs;
-    if (_hasEfInputs) {
-      _observeWithEf(data, observed, dataOffset, observedOffset);
+    if (_hasVectorInputs) {
+      _observeVectors(data, observed, dataOffset, observedOffset);
     } else {
       // One column per input, so observedOffset == dataOffset.
       for (var k = 0; k < inputs.length; k++) {
@@ -1512,14 +1710,18 @@ class Network {
         _predictionErrorEfDynamic(node);
       case _kPosteriorEfDynamic:
         _posteriorEfDynamic(node);
+      case _kPredictionErrorCategorical:
+        _predictionErrorCategorical(node);
+      case _kPosteriorCategorical:
+        _posteriorCategorical(node);
     }
   }
 
-  /// The observation step when some inputs are ef-state nodes: those take
-  /// `dimension` columns into their [VectorField.mean] (and the first into
-  /// the scalar mean).
+  /// The observation step when some inputs are ef-state or categorical
+  /// nodes: those take their columns into their [VectorField.mean] (and the
+  /// first into the scalar mean).
   @pragma('vm:unsafe:no-bounds-checks')
-  void _observeWithEf(
+  void _observeVectors(
     Float64List data,
     Float64List? observed,
     int dataOffset,
@@ -1530,7 +1732,8 @@ class Network {
       final idx = inputs[k];
       final c = dataOffset + inputCol[k];
       _mean[idx] = data[c];
-      if (_kind[idx] == _kindEf) {
+      final kind = _kind[idx];
+      if (kind == _kindEf || kind == _kindCategorical) {
         final s = _vMeanStart[idx];
         _vMean.setRange(s, s + inputDim[k], data, c);
       }

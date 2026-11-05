@@ -9,9 +9,13 @@ export 'src/math.dart'
     show
         binarySurprise,
         binarySurpriseFinitePrecision,
+        digamma,
+        dirichletKullbackLeibler,
+        gammaSign,
         gaussianDensity,
         gaussianSurprise,
         lambertW0,
+        logGamma,
         logAddExp,
         sigmoid,
         sigmoidInverseTemperature;

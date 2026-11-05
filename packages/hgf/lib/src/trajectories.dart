@@ -109,7 +109,7 @@ final class Trajectories {
   (Int32List, Float64List) _vectorParts(VectorField field) {
     final start = _vStart[field];
     if (start == null) {
-      throw ArgumentError.value(field, 'field', 'Not recorded');
+      throw ArgumentError.value(field.name, 'field', 'Not recorded');
     }
     return (start, _vData[field]!);
   }
@@ -135,7 +135,7 @@ final class Trajectories {
   Float64List _column(NodeField field) {
     final c = _data[field];
     if (c == null) {
-      throw ArgumentError.value(field, 'field', 'Not recorded');
+      throw ArgumentError.value(field.name, 'field', 'Not recorded');
     }
     return c;
   }
@@ -148,13 +148,16 @@ final class Trajectories {
   ///
   /// Needs `mean`, `expectedMean` (and for continuous nodes
   /// `expectedPrecision`) to have been recorded. Not defined (all NaN) for
-  /// constant and ef-state nodes, which pyhgf leaves out.
+  /// constant, ef-state and categorical nodes, which pyhgf leaves out (a
+  /// categorical node records its own [NodeField.surprise]).
   Float64List nodeSurprise(int node) {
     RangeError.checkValidIndex(node, null, 'node', nNodes);
     final ks = kinds;
     if (ks == null) throw StateError('Node kinds are unknown');
     final out = Float64List(nTime);
-    if (ks[node] == NodeKind.constantState || ks[node] == NodeKind.efState) {
+    if (ks[node] == NodeKind.constantState ||
+        ks[node] == NodeKind.efState ||
+        ks[node] == NodeKind.categoricalState) {
       return out..fillRange(0, nTime, double.nan);
     }
     final x = series(node, NodeField.mean);
@@ -171,6 +174,7 @@ final class Trajectories {
         }
       case NodeKind.constantState:
       case NodeKind.efState:
+      case NodeKind.categoricalState:
         break; // handled above
     }
     return out;

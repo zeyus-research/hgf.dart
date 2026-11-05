@@ -199,3 +199,140 @@ double sigmoidInverseTemperature(double x, double inverseTemperature) {
   final a = math.pow(x, inverseTemperature).toDouble();
   return a / (a + math.pow(1.0 - x, inverseTemperature).toDouble());
 }
+
+/// Lanczos coefficients (g = 7, n = 9) for [logGamma].
+const List<double> _lanczos = [
+  0.99999999999980993,
+  676.5203681218851,
+  -1259.1392167224028,
+  771.32342877765313,
+  -176.61502916214059,
+  12.507343278686905,
+  -0.13857109526572012,
+  9.9843695780195716e-6,
+  1.5056327351493116e-7,
+];
+
+/// `½ ln(2π)`.
+const double _halfLog2Pi = 0.9189385332046728;
+
+/// `ln |Γ(x)|`: the Lanczos approximation for `x ≥ ½`, the reflection
+/// formula below. `+∞` at the poles (0, −1, −2, ...) and at `±∞`; the sign of
+/// Γ is [gammaSign].
+double logGamma(double x) {
+  if (x.isNaN) return x;
+  if (x.isInfinite) return double.infinity;
+  if (x < 0.5) {
+    final fl = x.floorToDouble();
+    if (x == fl) return double.infinity;
+    // Γ(x) Γ(1 − x) = π / sin(πx); |sin(πx)| = sin(π (x − ⌊x⌋)).
+    return math.log(math.pi / math.sin(math.pi * (x - fl))) - logGamma(1.0 - x);
+  }
+  final z = x - 1.0;
+  var a = _lanczos[0];
+  for (var i = 1; i < _lanczos.length; i++) {
+    a += _lanczos[i] / (z + i);
+  }
+  final t = z + 7.5;
+  return _halfLog2Pi + (z + 0.5) * math.log(t) - t + math.log(a);
+}
+
+/// The sign of Γ(x): `1` for `x > 0`, `(−1)^⌈−x⌉` for negative non-integers,
+/// NaN at the poles, at `−∞` and for NaN.
+double gammaSign(double x) {
+  if (x > 0.0) return 1.0;
+  final fl = x.floorToDouble();
+  if (x.isNaN || x.isInfinite || x == fl) return double.nan;
+  return fl % 2.0 == 0.0 ? 1.0 : -1.0;
+}
+
+// Asymptotic-series coefficients of [digamma] (B₂ₖ / 2k).
+const double _psi1 = 1.0 / 12.0;
+const double _psi2 = 1.0 / 120.0;
+const double _psi3 = 1.0 / 252.0;
+const double _psi4 = 1.0 / 240.0;
+const double _psi5 = 1.0 / 132.0;
+const double _psi6 = 691.0 / 32760.0;
+const double _psi7 = 1.0 / 12.0;
+
+/// The digamma function ψ(x) = d/dx ln Γ(x): the recurrence
+/// `ψ(x) = ψ(x + 1) − 1/x` up to `x ≥ 10`, then the asymptotic series, and
+/// the reflection formula for `x ≤ 0`. NaN at the poles (0, −1, ...) and at
+/// `−∞`.
+double digamma(double x) {
+  if (x.isNaN || x == double.negativeInfinity) return double.nan;
+  if (x == double.infinity) return x;
+  var result = 0.0;
+  if (x <= 0.0) {
+    final fl = x.floorToDouble();
+    if (x == fl) return double.nan;
+    // ψ(x) = ψ(1 − x) − π / tan(πx), and tan has period π.
+    result = -math.pi / math.tan(math.pi * (x - fl));
+    x = 1.0 - x;
+  }
+  while (x < 10.0) {
+    result -= 1.0 / x;
+    x += 1.0;
+  }
+  final inv2 = 1.0 / (x * x);
+  return result +
+      math.log(x) -
+      0.5 / x -
+      inv2 *
+          (_psi1 -
+              inv2 *
+                  (_psi2 -
+                      inv2 *
+                          (_psi3 -
+                              inv2 *
+                                  (_psi4 -
+                                      inv2 *
+                                          (_psi5 -
+                                              inv2 *
+                                                  (_psi6 - inv2 * _psi7))))));
+}
+
+/// `ln(Γ(a) / Γ(b))`, NaN when the ratio is negative (as `jnp.log` of it).
+double _logGammaRatio(double a, double b) {
+  final sa = gammaSign(a), sb = gammaSign(b);
+  if (sa != sb) return double.nan; // also when either is NaN
+  return logGamma(a) - logGamma(b);
+}
+
+/// KL divergence `KL[P ‖ Q]` of the Dirichlet distribution `Q = Dir(alpha2)`
+/// from `P = Dir(alpha1)`. Mirrors `pyhgf.math.dirichlet_kullback_leibler`,
+/// in log space: pyhgf takes the log of a ratio of Γ values, which is NaN
+/// once a Γ overflows (concentrations summing to more than ~171); here those
+/// cases stay finite.
+double dirichletKullbackLeibler(List<double> alpha1, List<double> alpha2) {
+  if (alpha1.length != alpha2.length) {
+    throw ArgumentError('alpha1 and alpha2 must have the same length');
+  }
+  final a1 = Float64List.fromList(alpha1), a2 = Float64List.fromList(alpha2);
+  return dirichletKlAt(a1, 0, a2, 0, a1.length);
+}
+
+/// [dirichletKullbackLeibler] of `alpha1[o1 ..< o1 + n]` and
+/// `alpha2[o2 ..< o2 + n]`, for the engine (not exported). The three terms
+/// are summed separately, as in pyhgf.
+double dirichletKlAt(
+  Float64List alpha1,
+  int o1,
+  Float64List alpha2,
+  int o2,
+  int n,
+) {
+  var sum1 = 0.0, sum2 = 0.0;
+  for (var i = 0; i < n; i++) {
+    sum1 += alpha1[o1 + i];
+    sum2 += alpha2[o2 + i];
+  }
+  final psiSum1 = digamma(sum1);
+  var gammas = 0.0, digammas = 0.0;
+  for (var i = 0; i < n; i++) {
+    final a = alpha1[o1 + i], b = alpha2[o2 + i];
+    gammas += _logGammaRatio(b, a);
+    digammas += (a - b) * (digamma(a) - psiSum1);
+  }
+  return _logGammaRatio(sum1, sum2) + gammas + digammas;
+}

@@ -72,13 +72,15 @@ List<String> batchMismatches(Map<String, Object?> fixture) {
       : Float64List.fromList(series(fixture['time_steps']));
 
   final template = build();
-  if ([
+  final unbatched = {NodeKind.efState, NodeKind.categoricalState}.intersection({
     for (var i = 0; i < template.nNodes; i++) template.kindOf(i),
-  ].contains(NodeKind.efState)) {
-    // No batched ef-state kernels yet: the batch must refuse the network.
+  });
+  if (unbatched.isNotEmpty) {
+    // No batched kernels for the vector-valued kinds yet: the batch must
+    // refuse the network.
     try {
       BatchNetwork(template, batchElements);
-      return ['$name: BatchNetwork accepted an ef-state network'];
+      return ['$name: BatchNetwork accepted a network with $unbatched'];
     } on UnsupportedError {
       return const [];
     }

@@ -12,7 +12,14 @@ enum NodeKind {
   /// that tracks the expected sufficient statistics `xis` of a (multivariate)
   /// normal distribution of its observations. Add it with
   /// `Network.addEfState`; see [EfLearning] for how its learning rate is set.
-  efState('ef-state');
+  efState('ef-state'),
+
+  /// A categorical state node (pyhgf's `categorical-state`): an input node
+  /// that observes one of `n` categories (one-hot, `n` input columns) and
+  /// tracks the probability of each with its own binary HGF, plus a
+  /// Dirichlet distribution ([VectorField.alpha]) implied by how much those
+  /// HGFs learn. Add it with `Network.addCategoricalState`.
+  categoricalState('categorical-state');
 
   const NodeKind(this.pyhgfName);
 
@@ -72,7 +79,19 @@ enum NodeField {
   /// The learning-rate parameter ν of an ef-state node: `xis` moves by
   /// `1 / (1 + ν)` of its prediction error. Fixed, or implied by the
   /// continuous nodes tracking the sufficient statistics (see [EfLearning]).
-  nus('nus');
+  nus('nus'),
+
+  /// A categorical-state node's Bayesian surprise: the KL divergence from
+  /// the Dirichlet distribution before the last observation to the one
+  /// after it ([VectorField.alpha]).
+  klDivergence('kl_divergence'),
+
+  /// A categorical-state node's surprise at the last observation: the sum
+  /// over categories of the `binarySurprise` of each category's indicator
+  /// under its binary node's prediction. (Not the surprise that
+  /// `Trajectories.nodeSurprise` computes, which pyhgf leaves out for this
+  /// kind.)
+  surprise('surprise');
 
   const NodeField(this.pyhgfName);
 
@@ -93,6 +112,12 @@ enum NodeField {
 enum VectorField {
   /// An ef-state node's observation (length `dimension`). For
   /// `dimension == 1` the scalar [NodeField.mean] holds the same value.
+  ///
+  /// A categorical-state node's observation (length `n`, one indicator per
+  /// category) until its posterior step, which replaces it with each
+  /// category's updated probability, `sigmoid` of the binary HGF's value
+  /// parent (as pyhgf does). The scalar [NodeField.mean] mirrors the first
+  /// entry.
   mean('mean'),
 
   /// An ef-state node's expected sufficient statistics ξ: for dimension `d`,
@@ -101,7 +126,11 @@ enum VectorField {
 
   /// The sufficient statistics of the last observation (same layout as
   /// [xis]).
-  observationSs('observation_ss');
+  observationSs('observation_ss'),
+
+  /// A categorical-state node's Dirichlet concentration parameters α, one
+  /// per category (initially all 1).
+  alpha('alpha');
 
   const VectorField(this.pyhgfName);
 
@@ -226,7 +255,19 @@ enum UpdateStep {
   posteriorEfDynamic(
     'posterior_update_exponential_family_dynamic',
     'posterior_update_exponential_family_dynamic',
-  );
+  ),
+
+  /// A categorical-state node passes each category's indicator (and its
+  /// `observed` flag) to that category's binary node.
+  predictionErrorCategorical(
+    'categorical_state_prediction_error',
+    'categorical_state_prediction_error',
+  ),
+
+  /// A categorical-state node, at the end of the sweep: the implied
+  /// Dirichlet α from how much each binary HGF learned, its KL divergence
+  /// and the surprise.
+  posteriorCategorical('categorical_state_update', 'categorical_state_update');
 
   const UpdateStep(this.rshgfName, this.pyhgfName);
 

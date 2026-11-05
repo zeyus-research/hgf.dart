@@ -47,6 +47,10 @@ final class NetworkSpec {
         _addEfState(network, node);
         continue;
       }
+      if (node['kind'] == NodeKind.categoricalState.pyhgfName) {
+        _addCategoricalState(network, node);
+        continue;
+      }
       final params = <NodeField, double>{
         for (final e
             in ((node['params'] as Map<String, Object?>?) ?? const {}).entries)
@@ -125,6 +129,67 @@ final class NetworkSpec {
       xis: (params['xis'] as List<Object?>?)
           ?.map((x) => (x as num).toDouble())
           .toList(),
+    );
+  }
+
+  /// A categorical-state node takes pyhgf's `n_categories` (default 4),
+  /// and optionally `binary_parameters` with pyhgf's keys (`mean_1`,
+  /// `precision_1`, `mean_2`, `precision_2`, `tonic_volatility_2`, `mean_3`,
+  /// `precision_3`, `tonic_volatility_3`), which pyhgf itself ignores.
+  /// Edges are implied; `n_nodes` must be 1 (pyhgf's `n_nodes > 1` builds a
+  /// broken graph; list one node per categorical node instead).
+  static void _addCategoricalState(Network network, Map<String, Object?> node) {
+    for (final key in const [
+      'value_parents',
+      'value_children',
+      'volatility_parents',
+      'volatility_children',
+      'coupling_fn',
+    ]) {
+      if (node[key] != null) {
+        throw FormatException('categorical-state nodes take no "$key"');
+      }
+    }
+    if (((node['n_nodes'] as int?) ?? 1) != 1) {
+      throw const FormatException(
+        'categorical-state nodes take no "n_nodes" (pyhgf builds a broken '
+        'graph for n_nodes > 1); list one node per categorical node',
+      );
+    }
+    final params = (node['params'] as Map<String, Object?>?) ?? const {};
+    for (final key in params.keys) {
+      if (key != 'n_categories' && key != 'binary_parameters') {
+        throw FormatException('Unknown categorical-state parameter "$key"');
+      }
+    }
+    final bp =
+        (params['binary_parameters'] as Map<String, Object?>?) ?? const {};
+    const known = {
+      'mean_1',
+      'precision_1',
+      'mean_2',
+      'precision_2',
+      'tonic_volatility_2',
+      'mean_3',
+      'precision_3',
+      'tonic_volatility_3',
+    };
+    for (final key in bp.keys) {
+      if (!known.contains(key)) {
+        throw FormatException('Unknown binary_parameters key "$key"');
+      }
+    }
+    double? p(String key) => (bp[key] as num?)?.toDouble();
+    network.addCategoricalState(
+      nCategories: (params['n_categories'] as int?) ?? 4,
+      binaryMean: p('mean_1'),
+      binaryPrecision: p('precision_1') ?? 1.0,
+      valueMean: p('mean_2'),
+      valuePrecision: p('precision_2') ?? 1.0,
+      valueTonicVolatility: p('tonic_volatility_2') ?? -4.0,
+      volatilityMean: p('mean_3') ?? 0.0,
+      volatilityPrecision: p('precision_3') ?? 1.0,
+      volatilityTonicVolatility: p('tonic_volatility_3') ?? -4.0,
     );
   }
 
