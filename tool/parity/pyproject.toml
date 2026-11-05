@@ -1,0 +1,15 @@
+[project]
+name = "hgf-dart-parity"
+version = "0.0.0"
+description = "Generates pyhgf reference fixtures and Python-side benchmarks for hgf.dart"
+requires-python = ">=3.12,<3.14"
+dependencies = ["pyhgf"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+# The sibling pyhgf checkout (../pyhgf next to hgf.dart). Built non-editable so
+# nothing is written into its source tree except cargo's target/ (redirected
+# with CARGO_TARGET_DIR, see README).
+pyhgf = { path = "../../../pyhgf", editable = false }

@@ -1,0 +1,14 @@
+# Pure-Rust timing of pyhgf's rshgf nodalised engine (no Python in the loop).
+# Built by `dart run tool/bench_compare.dart --rust`, which copies pyhgf's
+# Cargo.lock here first (rshgf needs its pinned ndarray/numpy versions).
+[package]
+name = "rs_native_bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rshgf = { path = "../../../pyhgf" }
+
+[profile.release]
+opt-level = 3

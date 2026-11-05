@@ -1,0 +1,37 @@
+# Dart / Flutter
+.dart_tool/
+.packages
+build/
+doc/api/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.dart.js
+*.js.deps
+*.js.map
+*.wasm
+*.mjs
+
+# FVM version cache
+.fvm/
+
+# Editors / OS
+.idea/
+*.iml
+.DS_Store
+
+# Logs and caches
+*.log
+.cache/
+.env*
+
+# Python parity tooling
+tool/parity/.venv/
+__pycache__/
+
+# Benchmark outputs
+bench*.json
+!packages/*/benchmark/**/*.json
+
+# Native Rust benchmark (lockfile copied from ../pyhgf at build time)
+tool/rs_native_bench/Cargo.lock
+tool/rs_native_bench/target/

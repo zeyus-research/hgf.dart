@@ -1,0 +1,68 @@
+## Unreleased
+
+- Exponential-family state nodes (`NodeKind.efState`, `Network.addEfState`):
+  univariate or multivariate normal sufficient statistics, with a fixed
+  learning rate (`nus`) or HGF learning (`EfLearning.hgf1/2/3`, which adds
+  pyhgf's implied continuous nodes). Checked against pyhgf JAX on 11 new
+  fixtures (VM, dart2js, dart2wasm, `-O4`).
+- Vector-valued attributes: `VectorField` (`mean`, `xis`,
+  `observation_ss`), `Network.getVector` / `setVector` / `getInitialVector`
+  / `setInitialVector` / `vectorLength`, recorded in `Trajectories`
+  (`vectorFields`, `vectorSeries`, `vectorAt`, and in `toJson`).
+  `NodeField.nus`.
+- Inputs may span several columns: `Network.nInputColumns`. **Breaking for
+  networks with multivariate inputs only:** `observed` is one flag per input
+  node (`nTime × nInputs`), as in pyhgf; unchanged otherwise.
+- `UpdateStep.pyhgfName`: the JAX function name of each step. The parity
+  tests now also check the update order against pyhgf's JAX schedule.
+- `BatchNetwork`: B copies of a `Network` run in lock step, with
+  per-element initial values (`setInitial`, `setInitialAt`) and coupling
+  strengths (`setValueCoupling`, `setVolatilityCoupling`), shared or
+  per-element observations, `inputData` / `surprise` (per-element totals and
+  per-trial) / `step`. Each element matches `Network` bit for bit (checked on
+  every fixture on the VM, dart2js and dart2wasm, including `-O4`).
+  The update steps run stage by stage over blocks of elements, so the CPU
+  overlaps the elements' exps and divisions. Per element-trial that is
+  1.4–1.9× faster than looping a `Network` on AOT, and 1.2–1.5× on Wasm.
+  No trajectory recording yet.
+- `ResponseFunction.batchSurprise` (implemented by every built-in model) and
+  `ResponseFunction.fn(..., batch:)`.
+- `Network.setValueCoupling` / `setVolatilityCoupling`, to change a coupling
+  strength (e.g. a fitted κ) after building.
+- Surprise and response functions: `gaussianSurprise`, `binarySurprise`,
+  `binarySurpriseFinitePrecision`, `gaussianDensity`,
+  `sigmoidInverseTemperature`; the `ResponseFunction` interface with ports of
+  `pyhgf.response` and a `GaussianResponse` model; `Network.surprise` (no
+  recording, optional per-trial output); `inputData(response:)`;
+  `Trajectories.nodeSurprise` / `totalSurprise` / `responseSurprise`.
+  Checked against pyhgf on every fixture (VM, dart2js, dart2wasm).
+- `NodeKind.constantState` (pyhgf's bias node).
+- Custom value-coupling functions: the `Coupling` interface (implemented by
+  `CouplingFn`) and `CustomCoupling` with user g, g', g'' and a
+  finite-difference `check()`; `NetworkSpec.build(couplings: ...)` resolves
+  them by name. No cost on the named functions.
+- Generative mode: `Network.sample` (pyhgf's `sample`), and
+  `saveState`/`restoreState` (`NetworkState`).
+- `Network.inputIdxs` no longer allocates on each call.
+- `Network.ehgfMgfCorrection` (spec key `ehgf_mgf_correction`), opt-in and
+  **diverging from pyhgf 0.3.2**: adds the relaxed prediction's
+  `Σ κ²/(2π̂)` terms to the eHGF volatility re-prediction. Without them,
+  relaxed eHGF diverges on 3-level continuous HGFs. Checked against pyhgf
+  JAX patched with the same change; see the README and
+  `example/ehgf_mgf_correction.dart`.
+- `inputData(into: traj)` re-records into an existing `Trajectories` of the
+  same shape. Recording is staged in blocks: on AOT about 2× cheaper, and 6×
+  with `into:`.
+- Faster on Wasm: the unbounded update does fewer exp/log calls, dart2wasm
+  builds use a table-driven exp, and hot-path columns are no longer boxed.
+  On the 3-level 10k series, AOT went 13.8 → 9.2 ms and Wasm 24.2 → 13.6 ms.
+
+## 0.1.0-dev.1
+
+- Initial feasibility spike: nodalised continuous and binary HGF engine
+  (standard, eHGF and unbounded volatility updates; relaxed and mean-field
+  value coupling; non-linear coupling functions; missing observations;
+  irregular time steps), checked against pyhgf to 1e-9 on the VM, dart2js
+  and dart2wasm.
+- `Network.inputData` / `step` / `predict` / `reset` / `setInitial`,
+  `Trajectories` (CSV/JSON export), `NetworkSpec` (JSON networks).

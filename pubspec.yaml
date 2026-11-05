@@ -1,0 +1,91 @@
+name: hgf_metapackage
+publish_to: none
+homepage: https://zeyus.com/
+repository: https://github.com/NexusDynamic/hgf.dart
+
+environment:
+  sdk: ^3.10.0
+
+workspace:
+  - packages/hgf
+
+dev_dependencies:
+  melos: ^8.2.2
+
+melos:
+  packages:
+    - packages/**
+    - apps/**
+  command:
+    version:
+      branch: main
+  scripts:
+    lint:all:
+      steps:
+        - analyze
+        - format-check
+      description: Run all static analysis checks.
+    analyze:
+      exec: dart analyze . --fatal-infos
+      description: Run `dart analyze` for all packages.
+    format:
+      exec: dart format .
+      description: Run `dart format` for all packages.
+    format-check:
+      exec: dart format . --set-exit-if-changed
+      description: Run `dart format` checks for all packages.
+    test:dart:
+      # Exit code 79 is "no tests ran" (all of a package's tests excluded by tag).
+      # `\$` because melos runs this through a second (outer) shell.
+      exec:
+        command: dart test --exclude-tags "performance,benchmark" 2>&1 || [ \$? -eq 79 ]
+        concurrency: 1
+      packageFilters:
+        dirExists: test
+        flutter: false
+      description: Run `dart test` for pure-Dart packages (no performance/benchmark tags).
+    test:parity:
+      exec:
+        command: dart test --tags parity 2>&1 || [ \$? -eq 79 ]
+        concurrency: 1
+      packageFilters:
+        dirExists: test
+        flutter: false
+      description: Run the pyhgf parity suites against the JSON fixtures.
+    test:web:
+      # Chrome is found via CHROME_EXECUTABLE (e.g. /usr/bin/chromium).
+      exec:
+        command: >-
+          dart test -p node,chrome --tags parity 2>&1 &&
+          dart test -p chrome -c dart2wasm --tags parity 2>&1 || [ \$? -eq 79 ]
+        concurrency: 1
+      packageFilters:
+        dirExists: test
+        flutter: false
+      description: >-
+        Run the parity suites on the web compilers: dart2js (Node, Chrome) and
+        dart2wasm (Chrome). See also test:wasm-release (-O4).
+    test:wasm-release:
+      # `dart test -c dart2wasm` can't pass -O4, so the parity suite is also
+      # compiled as a standalone app with the release flags and run under Node.
+      exec:
+        command: >-
+          dart compile wasm -O4 tool/parity_check.dart -o .dart_tool/parity_check.wasm &&
+          node ../../tool/web/run_wasm.mjs .dart_tool/parity_check.wasm
+        concurrency: 1
+      packageFilters:
+        fileExists: tool/parity_check.dart
+      description: Run the parity suite on a dart2wasm -O4 (release) build under Node.
+    test:
+      steps:
+        - melos run test:dart --no-select
+      description: Run all default tests.
+    fixtures:
+      run: cd tool/parity && uv run python gen_fixtures.py
+      description: Regenerate the pyhgf parity fixtures (needs ../pyhgf and uv).
+    bench:
+      run: dart run tool/bench_compare.dart --rust
+      description: >-
+        Run the same scenarios on Dart (AOT, JIT, JS, Wasm), pyhgf (JAX and
+        rshgf via Python) and rshgf linked natively; print a comparison table
+        and write docs/benchmark_results.md.
