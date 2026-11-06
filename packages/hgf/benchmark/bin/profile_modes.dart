@@ -12,7 +12,8 @@
 ///       ../../tool/web/run_wasm.mjs /tmp/pm.wasm unbounded
 ///
 /// An optional first argument picks one mode (`standard`, `eHGF`,
-/// `unbounded`, `floor`, `response`, `record`) and runs it longer, which
+/// `unbounded`, `floor`, `response`, `record`, `ef`, `categorical`) and
+/// runs it longer, which
 /// keeps the profile focused.
 library;
 
@@ -117,6 +118,32 @@ void main(List<String> args) {
         for (var j = 0; j < dimension; j++) {
           u[t * dimension + j] = data[t] * (j + 1);
         }
+      }
+      _checkFinite(net, u, label.trim());
+      final ms = medianMs(
+        () => net.inputData(u, record: false),
+        repeat: repeat,
+        warmup: 5,
+      );
+      print('$label${nsPerTrial(ms)}');
+    }
+  }
+
+  if (only == null || only == 'categorical') {
+    // A categorical node: n binary HGFs (unbounded updates on the shared
+    // volatility parent) plus the Dirichlet posterior (2n lgamma/digamma
+    // terms for the KL divergence).
+    for (final (label, n) in [
+      ('categorical, n=3       ', 3),
+      ('categorical, n=8       ', 8),
+    ]) {
+      final net = Network()
+        ..addCategoricalState(nCategories: n)
+        ..build();
+      final u = Float64List(data.length * n);
+      for (var t = 0; t < data.length; t++) {
+        // A deterministic, uneven category sequence driven by the series.
+        u[t * n + ((data[t] * 1e4).floor() % n + t % 2) % n] = 1.0;
       }
       _checkFinite(net, u, label.trim());
       final ms = medianMs(

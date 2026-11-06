@@ -5,11 +5,12 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-05, after W4 and ef-state)
+## Where things stand (2026-11-06, after W4, ef-state and categorical)
 
 - `packages/hgf` covers:
-  - continuous, binary, constant (bias) and exponential-family (`ef-state`)
-    nodes, the latter with fixed or HGF-implied (`hgf-1/2/3`) learning;
+  - continuous, binary, constant (bias), exponential-family (`ef-state`)
+    nodes, the latter with fixed or HGF-implied (`hgf-1/2/3`) learning,
+    and categorical nodes (`categorical-state`);
   - standard, eHGF and unbounded volatility updates, relaxed or mean-field;
   - named and custom coupling functions, missing observations, irregular
     time steps;
@@ -19,8 +20,9 @@ supersedes its phase list.
     data, bit-identical to `Network` (W4);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
-- 360 tests pass. Parity with float64 pyhgf JAX holds to 1e-9 on 48 fixtures
-  (3 of them against a patched pyhgf, see `ehgfMgfCorrection`; 11 ef-state),
+- 414 tests pass. Parity with float64 pyhgf JAX holds to 1e-9 on 55 fixtures
+  (3 of them against a patched pyhgf, see `ehgfMgfCorrection`; 11 ef-state,
+  7 categorical),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
   `BatchNetwork` matches `Network` bit for bit on all of them, on the same
   four targets.
@@ -145,13 +147,56 @@ major rewrite.** Concretely:
       filter modes within noise; recording 3–7% slower, not fully pinned
       down (the vector-recording hook explains part; it now sits in `_run`
       as a never-inlined call behind a loop-invariant flag).
-  - [ ] categorical-state (expands to `3n + 2` nodes in pyhgf)
+  - [x] categorical-state. Done 2026-11-06, following JAX (rshgf has no
+        nodalised categorical node). `Network.addCategoricalState(nCategories,
+        ...)` adds pyhgf's `2n + 2` nodes in pyhgf's order: the categorical
+        input, n binary nodes (its value parents), their n continuous value
+        parents, one shared volatility parent (pyhgf's docstring says
+        `3n + 2`). 7 fixtures: n = 3 under unbounded / eHGF / standard /
+        mean-field updates, n = 4 (pyhgf's default), missing observations,
+        and a categorical node followed by a continuous HGF.
+    - **Vector store:** `VectorField.alpha` (own offsets); the categorical
+      node's `VectorField.mean` holds the one-hot observation until its
+      posterior replaces it with σ(μ) of each value parent, as pyhgf does.
+      Scalar `NodeField.klDivergence` and `NodeField.surprise` (not in the
+      default recorded fields: record them explicitly).
+    - **Steps:** `predictionErrorCategorical` (indicators and `observed` to
+      the binary nodes) and `posteriorCategorical` (α from ν = δ/Δ − 1, KL
+      divergence, summed binary surprise), deferred to the end through the
+      same replayed move loop as ef ([P3](upstream/README.md#p3)).
+    - **Math:** `logGamma` (Lanczos, g = 7), `gammaSign`, `digamma`
+      (recurrence + asymptotic series, reflection below 0),
+      `dirichletKullbackLeibler` in log space: equal to pyhgf's where
+      pyhgf's is finite, finite where pyhgf's Γ ratio overflows to NaN
+      ([P13](upstream/README.md#p13)).
+    - **Differences from pyhgf, all upstream bugs:** a categorical node may
+      follow a continuous one (pyhgf crashes: [P7](upstream/README.md#p7),
+      now reproduced); one node per `addCategoricalState` call, any number
+      of them (pyhgf's `n_nodes > 1` is broken,
+      [P10](upstream/README.md#p10)); the implied nodes take parameters
+      (pyhgf ignores `binary_parameters`, [P11](upstream/README.md#p11)).
+      Same as pyhgf: α = ±∞ on a missing observation
+      ([P12](upstream/README.md#p12)). `categorical_test.dart` checks that a
+      continuous HGF before the node, and a second categorical node after
+      it, leave its trajectories bit-identical.
+    - Not yet: `BatchNetwork` (rejects the step codes), `sample` (throws).
+    - Cost (`profile_modes.dart categorical`, ns/trial, AOT | Wasm -O4):
+      n = 3 1505 | 2360, n = 8 4806 | 7952. pyhgf JAX f64 (recording):
+      6192 (n = 3), 20195 (n = 8); its jitted scan 5593 and 19377. The 2n + 2
+      lgamma and n + 1 digamma calls of the KL divergence are a sizeable
+      part; skip them when it isn't recorded, if that ever matters.
+    - **Regression check (A/B, pinned core):** AOT filter modes within
+      noise; AOT recording ~7% slower (278 → 296 ns/trial) with *fewer*
+      instructions and ~20% more branch misses, i.e. code layout, not work.
+      Moving the vector-kind step codes (10–14) out of the inlined
+      `_dispatch` into a never-inline `_dispatchVectorStep` recovered
+      ~4 ns (→ 292). Wasm -O4: every mode within noise of the baseline.
   - [ ] Dirichlet process (`dp-state`)
 
-  The last three need vector-valued attributes (`xis`, `alpha`, cluster
-  means, ...). Plan: one side store per vector field (offsets per node, as
-  CSR), plus `Trajectories` support for vector fields; these nodes are few
-  per network, so they can live outside the scalar hot path.
+  These need vector-valued attributes (`xis`, `alpha`, cluster means, ...):
+  one side store per vector field (offsets per node, as CSR), recorded in
+  `Trajectories`; these nodes are few per network, so they live outside the
+  scalar hot path.
 - [x] Custom coupling functions: `Coupling` interface, `CustomCoupling`
       (g, g', g'' plus a finite-difference `check()`), named in
       `NetworkSpec` via `build(couplings:)`. The named enum keeps its fast
@@ -422,11 +467,20 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
   - [ ] [P5](upstream/README.md#p5) `add_ef_state` ignores `xis`.
   - [ ] [P6](upstream/README.md#p6) ν = ±∞ on missing observations with HGF
         learning.
-  - [ ] [P7](upstream/README.md#p7) stale `update_fn` in the posterior pass
-        (code reading, not reproduced; recheck with dp-state).
+  - [ ] [P7](upstream/README.md#p7) stale `update_fn` in the posterior pass:
+        a categorical node after a continuous one crashes (reproduced
+        2026-11-06; recheck with dp-state's ef parents).
   - [ ] [P8](upstream/README.md#p8) JAX and rshgf order independent
         predictions differently (cosmetic).
   - [ ] [P9](upstream/README.md#p9) licence: MIT vs GPL-3.0.
+  - [ ] [P10](upstream/README.md#p10) `categorical-state` with `n_nodes > 1`
+        builds a broken graph.
+  - [ ] [P11](upstream/README.md#p11) `binary_parameters` ignored; docstring
+        says `3n + 2` nodes (it's `2n + 2`).
+  - [ ] [P12](upstream/README.md#p12) categorical α = ±∞ on missing
+        observations.
+  - [ ] [P13](upstream/README.md#p13) `dirichlet_kullback_leibler` NaN once
+        Σα > 171 (Γ overflows).
 - **rshgf**
   - [ ] [R1](upstream/README.md#r1) ef-state ignores `observed`; univariate
         fixed rate only.
@@ -468,11 +522,15 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
 ## Starting a new session
 
 Phase W is done apart from the optional SIMD variant and W5 (both AOT
-only). Phase 4: ef-state is done (2026-11-05). Next: **categorical-state**,
-then dp-state (which reads ef parents' `xis` and needs ef nodes with value
-children). Both reuse the vector side store; categorical's posterior goes
-through the same deferred-step move as ef's. New node kinds need a batched
-kernel too (or `BatchNetwork` rejects them; see the W4 notes).
+only). Phase 4: ef-state (2026-11-05) and categorical-state (2026-11-06)
+are done. Next: **dp-state**, which reads ef parents' `xis` and needs ef
+nodes with value children (a spec ef node can't declare edges yet), and
+changes which branches are active at run time (see the W constraints). It
+reuses the vector side store; its steps go in `_dispatchVectorStep`, out of
+the inlined hot switch. Watch for [P7](upstream/README.md#p7): pyhgf's
+stale `update_fn` will hit ef parents with children too. New node kinds
+need a batched kernel too (or `BatchNetwork` rejects them; see the W4
+notes).
 
 ```sh
 cd hgf.dart

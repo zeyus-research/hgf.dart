@@ -1,5 +1,19 @@
 ## Unreleased
 
+- Categorical state nodes (`NodeKind.categoricalState`,
+  `Network.addCategoricalState`): one-hot observations over `n`
+  categories, one binary HGF per category with a shared volatility parent
+  (pyhgf's `2n + 2` nodes), and the implied Dirichlet distribution
+  (`VectorField.alpha`), its KL divergence (`NodeField.klDivergence`) and
+  surprise (`NodeField.surprise`). Checked against pyhgf JAX on 7 new
+  fixtures (VM, dart2js, dart2wasm, `-O4`). Unlike pyhgf, several
+  categorical nodes can share a network, a categorical node can follow a
+  continuous one (pyhgf crashes), and the implied nodes take parameters.
+  `BatchNetwork` and `sample` don't take them yet.
+- `logGamma`, `gammaSign`, `digamma` and `dirichletKullbackLeibler` (in log
+  space: finite where pyhgf's overflows to NaN).
+- `Trajectories`: asking for a field that wasn't recorded now names it.
+
 - Exponential-family state nodes (`NodeKind.efState`, `Network.addEfState`):
   univariate or multivariate normal sufficient statistics, with a fixed
   learning rate (`nus`) or HGF learning (`EfLearning.hgf1/2/3`, which adds

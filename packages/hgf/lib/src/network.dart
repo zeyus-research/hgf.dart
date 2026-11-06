@@ -1704,6 +1704,22 @@ class Network {
         _predictionErrorContinuous(node);
       case _kPredictionErrorBinary:
         _predictionErrorBinary(node);
+      default:
+        _dispatchVectorStep(step, node);
+    }
+  }
+
+  /// The steps of the vector-valued node kinds (ef-state, categorical),
+  /// out of line: they are few per network, and keeping them out of the
+  /// inlined [_dispatch] keeps the scalar sweep's code compact. (Measured
+  /// on AOT: recording runs were ~7% slower after the categorical cases were
+  /// added inline, with fewer instructions but more branch misses, i.e. code
+  /// layout; out of line recovers about a quarter of that. The filter modes
+  /// and dart2wasm were unaffected either way.)
+  @pragma('vm:never-inline')
+  @pragma('wasm:never-inline')
+  void _dispatchVectorStep(int step, int node) {
+    switch (step) {
       case _kPredictionErrorEfFixed:
         _predictionErrorEfFixed(node);
       case _kPredictionErrorEfDynamic:

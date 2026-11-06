@@ -14,6 +14,9 @@ It is tested against pyhgf reference trajectories (float64 JAX and rshgf) to
   statistics of a univariate or multivariate normal, at a fixed learning
   rate or with the HGF-implied rate (`hgf-1/2/3` learning, Mathys & Weber
   2020).
+- Categorical state nodes (`addCategoricalState`): one-hot observations,
+  one binary HGF per category, and the implied Dirichlet distribution over
+  the categories with its KL divergence (Bayesian surprise).
 - Non-linear value coupling: `linear`, `relu`, `sigmoid`, `tanh`,
   `leaky_relu`, `gelu`, or your own `CustomCoupling` (g, g', g''), declared
   on the parent.
@@ -78,7 +81,7 @@ final nll = hgf.surprise(
 
 Observations for multiple inputs are row-major (`nTime × nInputColumns`),
 in `inputIdxs` order: one column per input, `dimension` columns for an
-ef-state input. `observed` flags are one per input node
+ef-state input, one per category for a categorical input. `observed` flags are one per input node
 (`nTime × nInputs`). Input nodes are the nodes without children.
 
 ```dart
@@ -87,6 +90,18 @@ ef-state input. `observed` flags are one per input node
 final ef = Network()..addEfState(dimension: 2, learning: EfLearning.hgf2);
 final traj = ef.inputData(xy)!;                       // xy: nTime × 2
 final xis = traj.vectorAt(0, VectorField.xis, 99);    // [E x, E y, E x², E xy, E y²]
+
+// Which of 3 options comes next? Node 0 is the categorical input; nodes
+// 1-3 are its binary HGFs, 4-6 their value parents, 7 the shared
+// volatility parent.
+final cat = Network()..addCategoricalState(nCategories: 3);
+final run = cat.inputData(
+  oneHot, // nTime × 3
+  fields: [...defaultRecordedFields, NodeField.klDivergence],
+)!;
+final p = run.vectorAt(0, VectorField.mean, t);       // P(category) after trial t
+final alpha = run.vectorAt(0, VectorField.alpha, t);  // implied Dirichlet
+final bayesianSurprise = run.series(0, NodeField.klDivergence);
 ```
 
 ## Performance
@@ -101,8 +116,16 @@ the full comparison.
 
 ## Differences from pyhgf
 
-- Not yet ported: categorical and Dirichlet nodes; per-child coupling
-  functions. `BatchNetwork` and `sample` don't take ef-state nodes yet.
+- Not yet ported: Dirichlet process nodes; per-child coupling functions.
+  `BatchNetwork` and `sample` don't take ef-state or categorical nodes yet.
+- Categorical nodes: `addCategoricalState` adds one node per call (pyhgf's
+  `n_nodes > 1` builds a broken graph), may follow other nodes (pyhgf
+  crashes when a continuous node comes first), and passes its parameters to
+  the implied binary HGFs (pyhgf ignores `binary_parameters`). The Dirichlet
+  KL divergence is computed in log space, so it stays finite where pyhgf's
+  overflows to NaN (concentrations summing past ~171). On a missing
+  observation, α is ±∞ as in pyhgf. See `docs/upstream/README.md`, P7 and
+  P10–P13.
 - An ef-state node with `dimension > 1` keeps its observation in
   `VectorField.mean`; the scalar `NodeField.mean` holds the first component.
   `addEfState(xis: ...)` sets the prior sufficient statistics (pyhgf ignores

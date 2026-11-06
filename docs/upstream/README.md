@@ -24,9 +24,13 @@ Checked against pyhgf `6be12eb4` (0.3.2) and Dart 3.13.7.
 | [P4](#p4) | pyhgf JAX | a parent of two ef-state nodes crashes the scheduler | medium: crash | [ ] |
 | [P5](#p5) | pyhgf JAX | `add_ef_state` ignores `xis` | low | [ ] |
 | [P6](#p6) | pyhgf JAX | ν = ±∞ on missing observations (HGF learning) | low | [ ] |
-| [P7](#p7) | pyhgf JAX | stale `update_fn` in the posterior pass (not reproduced) | unknown | [ ] |
+| [P7](#p7) | pyhgf JAX | stale `update_fn` in the posterior pass: a categorical node after a continuous one crashes | medium: crash | [ ] |
 | [P8](#p8) | pyhgf JAX vs rshgf | backends order independent predictions differently | cosmetic | [ ] |
 | [P9](#p9) | pyhgf | licence: MIT in `LICENSE`, GPL-3.0 in `pyproject.toml` | to settle | [ ] |
+| [P10](#p10) | pyhgf JAX | `categorical-state` with `n_nodes > 1` builds a broken graph | medium | [ ] |
+| [P11](#p11) | pyhgf JAX | `add_categorical_state` ignores `binary_parameters`; docstring says `3n + 2` nodes | low | [ ] |
+| [P12](#p12) | pyhgf JAX | categorical α = ±∞ on missing observations | low | [ ] |
+| [P13](#p13) | pyhgf JAX | `dirichlet_kullback_leibler` NaN once Σα > 171 (Γ overflows) | low | [ ] |
 | [R1](#r1) | rshgf | ef-state ignores `observed`; univariate fixed rate only | medium | [ ] |
 | [R2](#r2) | rshgf | hot-path costs (string compares, allocations, clones) | perf | [ ] |
 | [D1](#d1) | dart2wasm | a typed-data view anywhere slows reads of non-view lists | perf, ~10% | [ ] |
@@ -158,14 +162,31 @@ as pyhgf (the `ef_normal_hgf2_missing` fixture has the -inf values).
 
 ### P7
 
-**Stale `update_fn` in the posterior pass** (from reading
-`get_update_sequence.py:145`, not reproduced). `update_fn = None` is set once
-per pass, not per node, and the posterior branch only handles node types 2
-and 4. A node of another type with children (an ef-state node that is a
-value parent, as dp-state networks use) gets either no posterior step or the
-previous node's update function, depending on what ran earlier in the same
-pass. **Fix:** reset `update_fn` per node and handle every node type
-explicitly. Check again when porting dp-state.
+**Stale `update_fn` in the posterior pass: a categorical node added after a
+continuous one crashes** (`get_update_sequence.py:145`).
+Repro: [`pyhgf/categorical_after_continuous.py`](pyhgf/categorical_after_continuous.py).
+
+```
+categorical alone, binary nodes 1-3: [(1, 'binary_state_node_prediction_error'), ...]
+after a 2-level HGF, binary nodes 3-5: [(3, 'continuous_node_posterior_update'), (4, ...), (5, ...), (3, 'binary_state_node_prediction_error'), ...]
+input_data: KeyError 'value_coupling_children'
+```
+
+`update_fn = None` is set once per pass, not per node, and the posterior
+branch only assigns it for node types 2 and 4. A categorical node's binary
+nodes have a child, so they enter the posterior pass; when a continuous node
+was handled earlier in the same pass (the parent of a continuous input added
+before the categorical node), they inherit its
+`continuous_node_posterior_update`, which fails on the binary node's
+attributes. With the categorical node added first the pass reaches the
+binary nodes before any continuous one, and it works. The same would happen
+to any other node type with children (an ef-state node as a dp-state
+parent).
+**Fix:** reset `update_fn` per node and handle every node type explicitly.
+**hgf.dart:** only continuous nodes get posterior steps, so either order
+works; the `categorical_mixed` fixture uses the order pyhgf can run, and
+`categorical_test.dart` checks that a continuous HGF before the categorical
+node leaves the categorical part's trajectories bit-identical.
 
 ### P8
 
@@ -183,6 +204,74 @@ tests compare predictions to JAX as a set, and the update steps in order.
 **Licence mismatch:** `LICENSE` is MIT, `pyproject.toml` says
 `license = "GPL-3.0"`. hgf.dart is MIT, as in liblsl.dart. Worth settling
 before hgf.dart is published.
+
+### P10
+
+**`add_nodes(kind="categorical-state", n_nodes=2)` builds a broken graph**
+(`pyhgf/model/add_nodes.py:408`).
+Repro: [`pyhgf/categorical_n_nodes.py`](pyhgf/categorical_n_nodes.py): of
+16 nodes only node 0 is categorical; its binary parents 1-3 have no value
+parents, and node 4 (meant to be the second categorical node) is a binary
+node.
+
+`binary_idxs` is computed once, from the node count before the categorical
+nodes are inserted, and every categorical node gets the same list.
+**Fix:** compute the indexes per categorical node (or reject
+`n_nodes > 1`). **hgf.dart:** `addCategoricalState` adds one node per call,
+and any number of calls work; `NetworkSpec` rejects `n_nodes > 1`.
+
+### P11
+
+**`add_categorical_state` ignores `binary_parameters`**
+(`pyhgf/model/add_nodes.py:397`).
+Repro: [`pyhgf/categorical_binary_parameters.py`](pyhgf/categorical_binary_parameters.py)
+→ `asked for tonic_volatility_2 = -2, got [-4.0, -4.0, -4.0]`.
+
+The implied binary HGFs are built from a local dict of defaults; the user's
+dict is only stored on the categorical node, although the `add_nodes`
+docstring says it parametrises them. The same docstring gives the node count
+as `3n + 2`; it is `2n + 2`. **Fix:** merge the user's dict over the
+defaults. **hgf.dart:** `addCategoricalState` takes the parameters, and
+`NetworkSpec` reads `binary_parameters` (documented as a difference).
+
+### P12
+
+**A missing observation makes a categorical node's α ±∞**
+(`pyhgf/updates/posterior/categorical.py`).
+Repro: [`pyhgf/categorical_missing_alpha.py`](pyhgf/categorical_missing_alpha.py).
+
+```
+observed:      [1 1 1 0 1 1 1 1]
+alpha[3]:      [inf -inf -inf]
+kl_divergence: [0.754 0.086 0.102 nan nan 0.1 0.046 0.067]
+```
+
+`categorical_state_update` doesn't check `observed`. On a missing trial the
+binary HGFs get no prediction error, so Δ = σ(μ_p) − μ̂_b is exactly 0 and
+ν = δ/Δ − 1 = ±∞. The KL divergence is NaN on that trial and the next. The
+binary HGFs are unaffected, as is the next α (it doesn't depend on the old
+one). Like [P6](#p6). **Fix:** keep α, the mean and the surprise terms where
+`observed` is 0. **hgf.dart:** same as pyhgf (fixture
+`categorical_3_missing`).
+
+### P13
+
+**`dirichlet_kullback_leibler` is NaN once the concentrations sum past
+~171** (`pyhgf/math.py:337`).
+Repro: [`pyhgf/dirichlet_kl_overflow.py`](pyhgf/dirichlet_kl_overflow.py).
+
+```
+sum 180:  pyhgf nan  gammaln 0.04435376604050223
+omega2 = -8, precision 100: alpha sums up to 429; 21 of 500 trials past 171.6; KL NaN on 20
+```
+
+It takes `log(gamma(Σα₁) / gamma(Σα₂))`, and Γ overflows float64 above
+171.6. With pyhgf's default parameters a categorical node's α sums stay well
+below that (15-120 in the runs tried), but slowly learning binary HGFs (a
+confident prior on their value parents) get there. **Fix:** differences of
+`gammaln` (with `gammasgn` if negative α must give NaN as now).
+**hgf.dart:** computes it in log space with the sign of Γ, so it matches
+pyhgf wherever pyhgf is finite and stays finite here.
 
 ## rshgf
 
