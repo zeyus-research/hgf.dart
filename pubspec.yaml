@@ -8,6 +8,7 @@ environment:
 
 workspace:
   - packages/hgf
+  - packages/hgf_fit
   - packages/hgf_widgets
   - apps/hgf_playground
 
@@ -104,6 +105,17 @@ melos:
     fixtures:
       run: cd tool/parity && uv run python gen_fixtures.py
       description: Regenerate the pyhgf parity fixtures (needs ../pyhgf and uv).
+    bench:fit:
+      run: >-
+        cd packages/hgf_fit &&
+        dart compile exe benchmark/bin/fit_benchmark.dart -o .dart_tool/fit_benchmark &&
+        .dart_tool/fit_benchmark --out .dart_tool/fit_problem.json &&
+        cd ../../tool/parity &&
+        uv run python fit_map_jax.py ../../packages/hgf_fit/.dart_tool/fit_problem.json
+      description: >-
+        MAP fitting of pyhgf's parameter-recovery problem: hgf_fit (AOT) against
+        pyhgf + JAX gradients + SciPy L-BFGS-B. Pass agents with
+        `--agents N` by running the steps by hand.
     bench:
       run: dart run tool/bench_compare.dart --rust
       description: >-

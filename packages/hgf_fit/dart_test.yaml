@@ -1,0 +1,6 @@
+tags:
+  # Timing-sensitive; excluded from the default run.
+  performance:
+    timeout: 4x
+  benchmark:
+    timeout: 4x

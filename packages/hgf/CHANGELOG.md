@@ -1,5 +1,9 @@
 ## Unreleased
 
+- `sigmoidInverseTemperature` computes `σ(β · logit x)` instead of
+  `x^β / (x^β + (1 − x)^β)`: the same function (agrees to 1e-13 relative,
+  same values at 0 and 1), about 3x faster, which makes
+  `BinarySoftmaxInverseTemperature` ~25% cheaper per trial in a batch.
 - Read-only graph accessors: `Network.valueParentsOf`, `valueChildrenOf`,
   `volatilityParentsOf`, `volatilityChildrenOf`, their coupling strengths
   (`valueParentStrengthsOf`, `volatilityParentStrengthsOf`) and

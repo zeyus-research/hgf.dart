@@ -44,6 +44,23 @@ void main() {
       expect(sigmoidInverseTemperature(0.5, 7.0), closeTo(0.5, 1e-15));
       expect(sigmoidInverseTemperature(0.7, 3.0), greaterThan(0.7));
       expect(sigmoidInverseTemperature(0.7, 0.5), lessThan(0.7));
+      // The pow form pyhgf uses, across beliefs and temperatures.
+      for (final x in [1e-9, 0.01, 0.3, 0.5, 0.77, 0.999, 1 - 1e-9]) {
+        for (final beta in [0.2, 1.0, 2.0, 3.7, 10.1, 20.0]) {
+          final a = math.pow(x, beta).toDouble();
+          final ref = a / (a + math.pow(1.0 - x, beta).toDouble());
+          expect(
+            sigmoidInverseTemperature(x, beta),
+            closeTo(ref, 1e-13 * ref + 1e-300),
+            reason: 'x=$x beta=$beta',
+          );
+        }
+      }
+      for (final beta in [0.5, 1.0, 4.0]) {
+        expect(sigmoidInverseTemperature(0.0, beta), 0.0);
+        expect(sigmoidInverseTemperature(1.0, beta), 1.0);
+      }
+      expect(sigmoidInverseTemperature(0.3, 0.0), 0.5);
     });
 
     test('binarySurpriseFinitePrecision', () {

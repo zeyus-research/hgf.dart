@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-06, after the vector node kinds and the first playground)
+## Where things stand (2026-11-06, after the first fitting package)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -21,7 +21,7 @@ supersedes its phase list.
     data, bit-identical to `Network` (W4);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
-- 462 engine tests pass (plus 17 widget and 15 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+- 463 engine tests pass (plus 43 fitting, 17 widget and 15 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
   `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
@@ -34,6 +34,13 @@ supersedes its phase list.
   `vmap`; float32 `vmap` is still 1.65× faster (38 ms).
 - Performance on Wasm (`-O4`): about 1.6× slower than AOT in every update
   mode, which is about the speed of float64 JAX.
+
+- `packages/hgf_fit` (Phase 6, first part): MAP estimation of per-subject
+  parameters with priors and response models, every subject fitted in one
+  batched pass per optimiser step. On pyhgf's parameter-recovery problem it
+  is 3.2× (20 agents) to 5.4× (200 agents) faster than pyhgf + JAX
+  gradients + SciPy L-BFGS-B, single-threaded, and evaluates the same
+  objective to 3e-13.
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -568,18 +575,76 @@ First version done 2026-11-06.
 
 ### Phase 6: fitting probe (`packages/hgf_fit`)
 
-- [ ] Objective: total surprise (phase 4) plus response models.
-- [ ] Gradients, cheapest first:
-  1. central finite differences on the batched engine (W4): 2·k extra
-     forward passes for k parameters, which is cheap;
-  2. hand-written forward-mode tangents (a JVP of each update step),
-     if HMC needs exact gradients;
-  3. a dual-number engine variant. A generic numeric type would cost the
-     f64 fast path, so it would be a separate code path, perhaps generated.
-- [ ] Optimisers: L-BFGS and Nelder–Mead for MAP; then a minimal HMC/NUTS.
-- [ ] Parameter recovery on simulated data, compared with
-      `docs/source/notebooks/4-Parameter_recovery.ipynb`.
-- [ ] Export draws for ArviZ (netCDF is heavy; start with CSV/JSON).
+First part done 2026-11-06: MAP estimation.
+
+- [x] Objective: `HgfModel` (network + `ResponseModel` + free `Parameter`s)
+      and the negative log posterior `−log p(responses | x) − Σ log p(xᵢ)`,
+      evaluated for many (subject, point) pairs in one `BatchNetwork` pass
+      (`negLogPosterior`), with an optional Jacobian term for samplers.
+  - Parameters target node fields (`tonicVolatility`, initial `mean`,
+    input `precision`, …), value/volatility coupling strengths, or response
+    parameters; one parameter may set several targets.
+  - Priors: `Normal`, `TruncatedNormal` (normalised with an accurate
+    `log(Φ(b) − Φ(a))`), `Uniform`, `HalfNormal`, `LogNormal`, `GammaPrior`,
+    `Flat`; transforms (identity, log, logit) follow the support.
+  - Response models read their parameters per element (the built-ins in
+    `package:hgf` hold one fixed value): `GaussianReadout` (the user's first
+    priority; noise precision fittable), `BinarySoftmaxReadout` (β
+    fittable), `ObservationSurprise` (perceptual fit without responses),
+    `ResponseModel.fn` for custom ones. Each simulates responses too
+    (`HgfModel.simulate`, via `BatchNetwork.step`).
+  - Subjects may have their own series, missing observations, lengths and
+    time steps; elements are grouped into one batch per (length, time
+    steps).
+- [x] Gradients: central finite differences in the same pass
+      (`BatchedObjective`, `2k + 1` elements per gradient, one-sided where
+      the stencil hits `+∞`). Checked against a Richardson estimate to 1e-5.
+- [x] Optimisers: `Lbfgs` (Armijo backtracking with cubic interpolation,
+      gradient at every trial point so an accepted step costs no extra
+      pass) and `NelderMead` (adaptive coefficients; the reflection,
+      expansion and both contractions requested together, so one pass per
+      iteration). Both are `sync*` generators yielding evaluation requests:
+      `fitMap` advances every subject's optimiser in lock step and answers
+      all pending requests with one batched pass. `restarts:` adds starts
+      drawn from the priors.
+- [x] Parameter recovery on simulated data
+      (`example/parameter_recovery.dart`, tests): the notebook's 20 agents
+      give r = 0.95 for ω₂ and r = 0.92 for β (MAP; the notebook uses NUTS);
+      L-BFGS and Nelder–Mead agree. A continuous 2-level HGF with a Gaussian
+      readout recovers ω and the response precision, provided the inputs
+      are noisy enough: with input precision 1e2 the learning rate stays
+      near 1 whatever ω is, and ω isn't identifiable.
+- [x] Compared with pyhgf + JAX (`melos run bench:fit`): single thread,
+      AOT, binary 2-level, 320 trials.
+
+      | agents | hgf_fit L-BFGS | JAX f64 grad + SciPy L-BFGS-B | hgf_fit Nelder–Mead |
+      |---|---|---|---|
+      | 20 | 29 ms, 15 passes | 94 ms, 51 calls (+0.8 s compile) | 113 ms |
+      | 200 | 292 ms, 17 passes | 1566 ms, 126 calls | 1115 ms |
+
+      JAX's objective at hgf_fit's estimates equals hgf_fit's to 3e-13;
+      hgf_fit's optimum is equal or lower for every agent. Finite
+      differences cost `2k + 1` filters per gradient, so the lead narrows as
+      `k` grows; exact gradients (below) would remove that factor.
+  - Found on the way: `sigmoidInverseTemperature`'s two non-integer `pow`s
+    cost 46 ns per trial, more than the binary 2-level filter itself
+    (43 ns). Now `σ(β · logit x)` (in `package:hgf`, agrees to 1e-13).
+- [ ] Next:
+  - Laplace approximation: a finite-difference Hessian at the mode
+    (`(k+1)` gradient stencils, one pass) for standard errors, and the
+    log evidence for model comparison;
+  - HMC/NUTS on `BatchedObjective(jacobian: true)`; many chains or
+    subjects in one pass, the same lock-step trick;
+  - hierarchical (group-level) priors: the objective is then not separable
+    per subject;
+  - isolate-parallel passes (split a pass's elements across isolates; web
+    workers on the web);
+  - exact gradients, if NUTS needs them: hand-written forward-mode tangents
+    of each update step, or a dual-number engine variant (a generic numeric
+    type would cost the f64 fast path, so a separate, perhaps generated,
+    code path);
+  - export draws for ArviZ (CSV/JSON first; netCDF is heavy);
+  - a fitting view in the playground (fit the loaded CSV's responses).
 
 ### Phase 7: GPU probe (go/no-go)
 
@@ -690,8 +755,9 @@ vector kinds (`BatchNetwork` rejects them). Phase 5's first version is
 done (2026-11-06): `packages/hgf_widgets` and `apps/hgf_playground`, with
 views and presets for every node kind; see its open items. CI runs on
 every push, and the playground deploys to
-https://zeyus-research.github.io/hgf.dart/ from `main`. Then Phase 6
-(fitting).
+https://zeyus-research.github.io/hgf.dart/ from `main`. Phase 6 has
+started: `packages/hgf_fit` does MAP estimation (2026-11-06); see its open
+items (Laplace, HMC/NUTS, hierarchical priors).
 
 ```sh
 cd hgf.dart
@@ -699,6 +765,7 @@ melos bootstrap
 melos run test && melos run test:parity           # should be all green
 melos run test:wasm-release                       # parity at dart2wasm -O4
 melos run bench:playground                        # playground frame times (Wasm)
+melos run bench:fit                               # MAP fitting vs pyhgf + JAX
 (cd apps/hgf_playground && flutter run -d chrome --wasm)   # try it
 dart compile exe packages/hgf/benchmark/bin/profile_modes.dart -o /tmp/pm && \
   (cd packages/hgf && /tmp/pm)                    # ns/trial baseline per mode
