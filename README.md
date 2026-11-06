@@ -59,6 +59,7 @@ melos run fixtures               # regenerate pyhgf fixtures (needs ../pyhgf, uv
 melos run bench                  # benchmarks: Dart AOT/JIT/JS/Wasm vs JAX vs rshgf
 melos run build:playground       # playground web build (Wasm, -O4)
 melos run bench:playground       # its frame times in headless Chromium (uv + playwright)
+melos run bench:playground-fit   # its fitting view: times, frames, recovery
 ```
 
 Fixtures and benchmarks expect a pyhgf checkout next to this repository

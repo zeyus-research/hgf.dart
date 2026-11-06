@@ -1,20 +1,30 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:hgf/hgf.dart';
 import 'package:hgf_widgets/hgf_widgets.dart';
 
+import '../model/fitting.dart';
 import '../model/playground.dart';
 import '../model/presets.dart';
 import '../settings.dart';
+import 'fit_card.dart';
 import 'frame_stats.dart';
 import 'panels.dart';
 import 'playback_bar.dart';
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, required this.settings, required this.playground});
+  const HomePage({
+    super.key,
+    required this.settings,
+    required this.playground,
+    required this.fitting,
+  });
 
   final Settings settings;
   final Playground playground;
+  final Fitting fitting;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -28,6 +38,27 @@ class _HomePageState extends State<HomePage>
   final FrameStats _frames = FrameStats();
 
   Playground get pg => widget.playground;
+  Fitting get fit => widget.fitting;
+
+  /// Notifies when the fitted responses change (not on every fit update).
+  late final _responses = _Selected(fit, () => fit.revision);
+
+  (int, Float64List?)? _responseCache;
+
+  /// The fitted responses as plotted: binary choices just outside the
+  /// outcomes (1.05 / −0.05), so both stay visible.
+  Float64List? _shownResponses() {
+    final c = _responseCache;
+    if (c != null && c.$1 == fit.revision) return c.$2;
+    final r = fit.responses;
+    final shown = r == null || pg.preset.input != InputKind.binary
+        ? r
+        : Float64List.fromList([
+            for (final v in r) v.isNaN ? v : v * 1.1 - 0.05,
+          ]);
+    _responseCache = (fit.revision, shown);
+    return shown;
+  }
 
   @override
   void initState() {
@@ -41,6 +72,7 @@ class _HomePageState extends State<HomePage>
     _ticker.dispose();
     _hover.dispose();
     _frames.dispose();
+    _responses.dispose();
     super.dispose();
   }
 
@@ -62,7 +94,8 @@ class _HomePageState extends State<HomePage>
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: pg,
+      // The fit card listens on its own; the plots need the responses.
+      listenable: Listenable.merge([pg, _responses]),
       builder: (context, _) => Scaffold(
         appBar: AppBar(
           title: Text(
@@ -92,6 +125,7 @@ class _HomePageState extends State<HomePage>
     final muted = Theme.of(context).colorScheme.onSurfaceVariant;
     final colors = HgfColors.of(context);
     final categorical = pg.preset.input == InputKind.categorical;
+    final binary = pg.preset.input == InputKind.binary;
     return HgfTrajectoryView(
       network: pg.network,
       trajectories: traj,
@@ -101,8 +135,8 @@ class _HomePageState extends State<HomePage>
       hover: _hover,
       panelHeight: panelHeight,
       extraLayers: {
-        if (hidden != null && hidden.first.length == traj.nTime)
-          input: [
+        input: [
+          if (hidden != null && hidden.first.length == traj.nTime)
             for (final (k, h) in hidden.indexed)
               LineLayer(
                 h,
@@ -118,7 +152,15 @@ class _HomePageState extends State<HomePage>
                   DataModel.randomWalk => 'hidden',
                 },
               ),
-          ],
+          if (_shownResponses() case final r? when r.length == traj.nTime)
+            PointLayer(
+              r,
+              color: colors.category(6),
+              radius: 1.6,
+              label: binary ? 'choice (offset)' : 'response',
+              readoutGaps: false,
+            ),
+        ],
       },
     );
   }
@@ -177,6 +219,8 @@ class _HomePageState extends State<HomePage>
     NodeCard(playground: pg),
     const SizedBox(height: 12),
     DataCard(playground: pg, settings: widget.settings),
+    const SizedBox(height: 12),
+    FitCard(fitting: fit),
     const SizedBox(height: 12),
     const AboutCard(),
   ];
@@ -296,4 +340,28 @@ String? nodeCaption(Playground pg, int node, int? t) {
   final v = traj.at(node, NodeField.mean, at);
   if (!v.isFinite) return null;
   return 'μ ${v.toStringAsFixed(2)}';
+}
+
+/// A listenable that fires when [select] of [source] changes.
+class _Selected extends ChangeNotifier {
+  _Selected(this.source, this.select) : _last = select() {
+    source.addListener(_check);
+  }
+
+  final Listenable source;
+  final Object? Function() select;
+  Object? _last;
+
+  void _check() {
+    final v = select();
+    if (v == _last) return;
+    _last = v;
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    source.removeListener(_check);
+    super.dispose();
+  }
 }

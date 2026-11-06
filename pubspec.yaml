@@ -107,9 +107,16 @@ melos:
         - melos run test:dart --no-select
         - melos run test:flutter --no-select
       description: Run all default tests.
+    build:worker:
+      run: apps/hgf_playground/tool/build_worker.sh
+      description: >-
+        Compile the playground's fit worker (Wasm and JS) into its web/
+        folder; `flutter run -d chrome` and `flutter build web` serve it.
     build:playground:
-      run: cd apps/hgf_playground && flutter build web --wasm -O4
-      description: Build the playground for the web (Wasm, the primary target).
+      run: >-
+        apps/hgf_playground/tool/build_worker.sh &&
+        cd apps/hgf_playground && flutter build web --wasm -O4
+      description: Build the playground for the web (Wasm, the primary target), with its fit worker.
     bench:playground:
       run: >-
         cd apps/hgf_playground && flutter build web --wasm -O4 &&
@@ -117,6 +124,14 @@ melos:
       description: >-
         Frame times of the playground's Wasm build while a slider re-filters
         300, 1000 and 10000 trials every frame (headless Chromium).
+    bench:playground-fit:
+      run: >-
+        melos run build:playground &&
+        uv run --with playwright python -I tool/web/playground_fit_bench.py
+      description: >-
+        Fits in the playground's Wasm build, on Web Workers and on the main
+        thread: wall time, frame intervals while fitting, and recovery of a
+        simulated agent's parameters (headless Chromium).
     fixtures:
       run: cd tool/parity && uv run python gen_fixtures.py
       description: Regenerate the pyhgf parity fixtures (needs ../pyhgf and uv).

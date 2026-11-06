@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'model/fitting.dart';
 import 'model/playground.dart';
 import 'settings.dart';
 import 'ui/home.dart';
@@ -28,10 +29,12 @@ class PlaygroundApp extends StatelessWidget {
     super.key,
     required this.settings,
     required this.playground,
+    required this.fitting,
   });
 
   final Settings settings;
   final Playground playground;
+  final Fitting fitting;
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
@@ -43,7 +46,11 @@ class PlaygroundApp extends StatelessWidget {
       darkTheme: buildTheme(Brightness.dark),
       // Follows the system unless the user picked one.
       themeMode: settings.themeMode,
-      home: HomePage(settings: settings, playground: playground),
+      home: HomePage(
+        settings: settings,
+        playground: playground,
+        fitting: fitting,
+      ),
     ),
   );
 }

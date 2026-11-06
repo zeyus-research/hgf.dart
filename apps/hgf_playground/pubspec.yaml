@@ -16,6 +16,7 @@ dependencies:
   flutter:
     sdk: flutter
   hgf: ^0.1.0-dev.1
+  hgf_fit: ^0.1.0-dev.1
   hgf_widgets: ^0.1.0-dev.1
 
 dev_dependencies:

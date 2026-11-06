@@ -264,6 +264,34 @@ final class PosteriorDraws {
   }
 }
 
+/// How far a [sampleNuts] run has got: pass one in and read it while the
+/// run goes on (it is updated on the calling isolate, between passes).
+final class SamplingProgress {
+  List<ChainOutput> _chains = const [];
+  int _perChain = 0;
+
+  void _attach(List<ChainOutput> chains, int perChain) {
+    _chains = chains;
+    _perChain = perChain;
+  }
+
+  /// Transitions to run, warmup included, over all chains (0 until the
+  /// run has started).
+  int get total => _chains.length * _perChain;
+
+  /// Transitions done; a chain that failed to start counts as done.
+  int get completed {
+    var n = 0;
+    for (final c in _chains) {
+      n += c.error != null ? _perChain : c.iterations;
+    }
+    return n;
+  }
+
+  /// [completed] / [total], 0 before the start.
+  double get fraction => total == 0 ? 0 : completed / total;
+}
+
 /// The posterior draws of a [sampleNuts] call, one per subject, with what
 /// they cost.
 final class NutsFit {
@@ -360,6 +388,8 @@ final class NutsFit {
 /// filters per leapfrog step): the sampler stays exact with any
 /// deterministic gradient approximation, so a finite-difference gradient
 /// only changes how far a step size can stretch.
+///
+/// [progress], if given, counts the transitions as they are done.
 NutsFit sampleNuts(
   HgfModel model,
   List<Subject> subjects, {
@@ -372,6 +402,7 @@ NutsFit sampleNuts(
   int seed = 0,
   double fdStep = 1e-5,
   Gradients? gradients,
+  SamplingProgress? progress,
 }) => runInline(
   (o) => _sampleNuts(
     model,
@@ -385,6 +416,7 @@ NutsFit sampleNuts(
     seed,
     fdStep,
     gradients,
+    progress,
     1,
     o,
   ),
@@ -405,6 +437,7 @@ extension SampleNutsOnWorkers on FitWorkers {
     int seed = 0,
     double fdStep = 1e-5,
     Gradients? gradients,
+    SamplingProgress? progress,
   }) => run(
     (o) => _sampleNuts(
       model,
@@ -418,6 +451,7 @@ extension SampleNutsOnWorkers on FitWorkers {
       seed,
       fdStep,
       gradients,
+      progress,
       streams,
       o,
     ),
@@ -436,6 +470,7 @@ Iterable<Step> _sampleNuts(
   int seed,
   double fdStep,
   Gradients? gradients,
+  SamplingProgress? progress,
   int streams,
   Out<NutsFit> result,
 ) sync* {
@@ -481,6 +516,7 @@ Iterable<Step> _sampleNuts(
     }
     outs.add(row);
   }
+  progress?._attach([for (final r in outs) ...r], warmup + draws);
   yield* driveChainPasses(tasks, streams: streams, (
     subjectOf,
     points,

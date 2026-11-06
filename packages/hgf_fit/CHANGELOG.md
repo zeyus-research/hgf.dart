@@ -1,5 +1,10 @@
 ## Unreleased
 
+- For apps: `FitWorkers.cancel()` (running jobs fail with `FitCancelled`
+  before their next pass), `FitWorkers.yieldInterval` (a pool without
+  workers gives way to the event loop that often, so a UI keeps drawing),
+  and `SamplingProgress` for `sampleNuts` (transitions done / total;
+  `ChainOutput.iterations` counts each chain's).
 - `FitWorkers` on the web: Web Workers running a separately compiled worker
   (`package:hgf_fit/fit_worker.dart`, `runFitWorker()`), compiled with
   `dart compile js` or `wasm`; `FitWorkers.spawn(script:

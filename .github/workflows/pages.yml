@@ -38,6 +38,9 @@ jobs:
       # Wasm (skwasm) with a dart2js fallback for browsers without Wasm GC.
       # -O4: the fastest dart2wasm output (see ROADMAP W2); symbols stripped,
       # no source maps.
+      # The Web Worker that fits run on (Wasm and JS), copied in with web/.
+      - name: Build the fit worker
+        run: apps/hgf_playground/tool/build_worker.sh
       - name: Build (Wasm, -O4)
         working-directory: apps/hgf_playground
         run: >-

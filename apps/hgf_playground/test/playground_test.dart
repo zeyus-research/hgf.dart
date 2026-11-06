@@ -3,8 +3,10 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hgf/hgf.dart';
+import 'package:hgf_fit/hgf_fit.dart';
 import 'package:hgf_playground/src/app.dart';
 import 'package:hgf_playground/src/model/data.dart';
+import 'package:hgf_playground/src/model/fitting.dart';
 import 'package:hgf_playground/src/model/playground.dart';
 import 'package:hgf_playground/src/model/presets.dart';
 import 'package:hgf_playground/src/settings.dart';
@@ -147,10 +149,7 @@ void main() {
       for (final mode in [ThemeMode.light, ThemeMode.dark]) {
         settings.setThemeMode(mode);
         await tester.pumpWidget(
-          PlaygroundApp(
-            settings: settings,
-            playground: Playground(presetId: 'continuous3', nTrials: 300),
-          ),
+          _app(settings, Playground(presetId: 'continuous3', nTrials: 300)),
         );
         await tester.pump();
         expect(tester.takeException(), isNull);
@@ -172,9 +171,7 @@ void main() {
     tester.view.physicalSize = const Size(1400, 900);
     for (final p in presets) {
       final pg = Playground(presetId: p.id, nTrials: 100);
-      await tester.pumpWidget(
-        PlaygroundApp(settings: settings, playground: pg),
-      );
+      await tester.pumpWidget(_app(settings, pg));
       await tester.pump();
       expect(tester.takeException(), isNull, reason: p.id);
       expect(
@@ -198,10 +195,7 @@ void main() {
     // Selecting a node shows its sliders.
     tester.view.physicalSize = const Size(1400, 900);
     await tester.pumpWidget(
-      PlaygroundApp(
-        settings: settings,
-        playground: Playground(presetId: 'binary3', nTrials: 300)..select(1),
-      ),
+      _app(settings, Playground(presetId: 'binary3', nTrials: 300)..select(1)),
     );
     expect(find.textContaining('tonic volatility'), findsOneWidget);
     // Play advances the trial counter.
@@ -212,3 +206,13 @@ void main() {
     addTearDown(tester.view.reset);
   });
 }
+
+/// Fits on the calling isolate: no isolates under the widget tester's fake
+/// clock.
+Future<FitWorkers> _inline() => FitWorkers.spawn(count: 0);
+
+Widget _app(Settings settings, Playground pg) => PlaygroundApp(
+  settings: settings,
+  playground: pg,
+  fitting: Fitting(pg, spawnWorkers: _inline),
+);

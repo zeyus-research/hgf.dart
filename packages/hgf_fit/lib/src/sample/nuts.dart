@@ -107,6 +107,7 @@ final class Nuts {
 
     for (var it = 0; it < warmup + draws; it++) {
       yield* c.transition();
+      out.iterations++;
       if (it < warmup) {
         c.eps = da.learn(c.acceptStat);
         if (window.inWindow) est.add(c.z.q);
@@ -162,6 +163,9 @@ final class ChainOutput {
 
   /// Set when the chain could not start.
   String? error;
+
+  /// Transitions done so far, warmup included (for progress displays).
+  int iterations = 0;
 
   int _k = 0;
 

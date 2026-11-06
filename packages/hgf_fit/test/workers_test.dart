@@ -1,6 +1,7 @@
 // Runs on every platform: real isolates on the VM, the inline pool on the
 // web. Either way the results must equal the synchronous functions' bit for
 // bit.
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -246,5 +247,66 @@ void main() {
     // The pool still works afterwards.
     final ok = await workers.fitMap(model, subjects.sublist(0, 2));
     expect(ok.results, hasLength(2));
+  });
+
+  test('progress counts the transitions; cancel stops a job', () async {
+    final progress = SamplingProgress();
+    final job = workers.sampleNuts(
+      model,
+      subjects.sublist(0, 2),
+      chains: 2,
+      warmup: 30,
+      draws: 20,
+      progress: progress,
+    );
+    await job;
+    expect(progress.total, 2 * 2 * 50);
+    expect(progress.completed, progress.total);
+    expect(progress.fraction, 1);
+
+    // Inline (on the web), a job only gives way with a yield interval.
+    workers.yieldInterval = Duration.zero;
+    final long = SamplingProgress();
+    final cancelled = workers.sampleNuts(
+      model,
+      subjects,
+      warmup: 2000,
+      draws: 2000,
+      progress: long,
+    );
+    while (long.completed < 10) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+    workers.cancel();
+    await expectLater(cancelled, throwsA(isA<FitCancelled>()));
+    workers.yieldInterval = null;
+    expect(long.fraction, lessThan(1));
+    // Jobs started after the cancel run.
+    final ok = await workers.fitMap(model, subjects.sublist(0, 2));
+    expect(ok.results, hasLength(2));
+  });
+
+  test('without workers, yieldInterval lets other events run', () async {
+    final inline = await FitWorkers.spawn(count: 0)
+      ..yieldInterval = Duration.zero;
+    var ticks = 0;
+    final timer = Timer.periodic(Duration.zero, (_) => ticks++);
+    final a = sampleNuts(model, subjects.sublist(0, 2), warmup: 20, draws: 20);
+    final b = await inline.sampleNuts(
+      model,
+      subjects.sublist(0, 2),
+      warmup: 20,
+      draws: 20,
+    );
+    timer.cancel();
+    expect(ticks, greaterThan(10));
+    for (var s = 0; s < 2; s++) {
+      _sameChains(b.results[s], a.results[s]);
+    }
+    // And it can be cancelled too.
+    final job = inline.sampleNuts(model, subjects, warmup: 500, draws: 500);
+    Timer.run(inline.cancel);
+    await expectLater(job, throwsA(isA<FitCancelled>()));
+    await inline.close();
   });
 }

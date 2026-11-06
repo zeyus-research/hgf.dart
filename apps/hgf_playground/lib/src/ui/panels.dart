@@ -12,8 +12,14 @@ import '../model/presets.dart';
 import '../settings.dart';
 import 'home.dart' show nodeCaption;
 
-class _Section extends StatelessWidget {
-  const _Section({required this.title, required this.children, this.action});
+/// A titled card in the side panel.
+class SectionCard extends StatelessWidget {
+  const SectionCard({
+    super.key,
+    required this.title,
+    required this.children,
+    this.action,
+  });
 
   final String title;
   final List<Widget> children;
@@ -133,7 +139,7 @@ class NetworkCard extends StatelessWidget {
     final hasVolatility = pg.layout.edges.any(
       (e) => e.kind == EdgeKind.volatility,
     );
-    return _Section(
+    return SectionCard(
       title: pg.preset.name,
       children: [
         Text(pg.preset.summary, style: theme.textTheme.bodySmall),
@@ -203,7 +209,7 @@ class NodeCard extends StatelessWidget {
     final theme = Theme.of(context);
     final i = pg.selected;
     if (i == null) {
-      return _Section(
+      return SectionCard(
         title: 'Node parameters',
         children: [
           Text(
@@ -227,7 +233,7 @@ class NodeCard extends StatelessWidget {
         .where((e) => e.parent == i && scalar(e.parent) && scalar(e.child))
         .toList();
     final about = _about(net, i);
-    return _Section(
+    return SectionCard(
       title:
           '${defaultNodeLabel(i)} · ${_kindNames[kind]}'
           '${input ? ' input' : ''}',
@@ -360,7 +366,7 @@ class DataCard extends StatelessWidget {
     final d = pg.data;
     final theme = Theme.of(context);
     final model = pg.preset.data;
-    return _Section(
+    return SectionCard(
       title: 'Data',
       action: TextButton.icon(
         onPressed: () => _load(context),
@@ -514,7 +520,7 @@ class AboutCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return _Section(
+    return SectionCard(
       title: 'Reading the plots',
       children: [
         Text(
@@ -531,7 +537,8 @@ class AboutCard extends StatelessWidget {
           'network one trial at a time with predict/step, as in a real-time '
           'experiment.\n\n'
           'Filtering runs the hgf.dart engine, a pure-Dart port of pyhgf, '
-          'checked against it to 1e-9.',
+          'checked against it to 1e-9. Fitting runs hgf_fit (MAP, Laplace, '
+          'NUTS) on Web Workers, or isolates on desktop.',
           style: theme.textTheme.bodySmall,
         ),
       ],

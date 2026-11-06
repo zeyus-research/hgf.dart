@@ -122,28 +122,49 @@ final class FitWorkers {
   /// Passes evaluated on the calling isolate (no workers) so far.
   int localSlices = 0;
 
+  /// Without workers, passes run on the calling isolate one after the
+  /// other, and a long job would block it (a UI wouldn't draw). With
+  /// [yieldInterval] set, a job gives way to the event loop (a timer
+  /// event, so frames and input get their turn) whenever it has run this
+  /// long. Results don't change. Ignored when there are workers: the
+  /// calling isolate only routes then.
+  Duration? yieldInterval;
+  final _sinceYield = Stopwatch();
+
+  // Bumped by [cancel]; each run stops once it differs from its own.
+  int _generation = 0;
+
+  /// Stops every job running on this pool: each one's future fails with
+  /// [FitCancelled] before its next pass (passes already sent finish on
+  /// the workers, and their results are dropped). The pool stays usable.
+  void cancel() => _generation++;
+
   /// Runs [program], answering each pass on this pool.
   Future<T> run<T>(Program<T> program) async {
     if (_closed) throw StateError('FitWorkers closed');
     final result = Out<T>();
     _active++;
     try {
-      await _drive(program(result));
+      await _drive(program(result), _generation);
     } finally {
       _active--;
     }
     return result.value;
   }
 
-  Future<void> _drive(Iterable<Step> steps) async {
+  Future<void> _drive(Iterable<Step> steps, int generation) async {
     for (final step in steps) {
+      if (generation != _generation) throw const FitCancelled();
       switch (step) {
         case Pass():
           await _submit(step);
+          if (count == 0) await _maybeYield();
         case Concurrent(:final streams):
           _active--;
           try {
-            await Future.wait([for (final s in streams) _stream(s)]);
+            await Future.wait([
+              for (final s in streams) _stream(s, generation),
+            ]);
           } finally {
             _active++;
           }
@@ -151,13 +172,22 @@ final class FitWorkers {
     }
   }
 
-  Future<void> _stream(Iterable<Step> steps) async {
+  Future<void> _stream(Iterable<Step> steps, int generation) async {
     _active++;
     try {
-      await _drive(steps);
+      await _drive(steps, generation);
     } finally {
       _active--;
     }
+  }
+
+  Future<void> _maybeYield() async {
+    final interval = yieldInterval;
+    if (interval == null) return;
+    if (!_sinceYield.isRunning) _sinceYield.start();
+    if (_sinceYield.elapsed < interval) return;
+    await Future<void>.delayed(Duration.zero);
+    _sinceYield.reset();
   }
 
   /// Stops the workers. Passes still running fail.
@@ -346,6 +376,14 @@ final class FitWorkers {
       p.finish();
     }
   }
+}
+
+/// What a job on a [FitWorkers] pool throws after [FitWorkers.cancel].
+final class FitCancelled implements Exception {
+  const FitCancelled();
+
+  @override
+  String toString() => 'FitCancelled: the job was cancelled';
 }
 
 /// An error raised in a worker, with the worker's stack trace (as the

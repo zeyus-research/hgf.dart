@@ -1,8 +1,10 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:hgf_fit/hgf_fit.dart';
 
 import 'src/app.dart';
 import 'src/bench.dart';
+import 'src/model/fitting.dart';
 import 'src/model/playground.dart';
 import 'src/settings.dart';
 
@@ -10,7 +12,8 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final settings = Settings();
   final bench = benchTrials();
-  if (bench == null) await settings.load();
+  final fitBench = fitBenchRequested();
+  if (bench == null && !fitBench) await settings.load();
   // Links to a preset: `?preset=dp&trials=200` (over the saved settings).
   final query = kIsWeb ? Uri.base.queryParameters : const <String, String>{};
   final preset = query['preset'] ?? settings.preset;
@@ -19,7 +22,21 @@ Future<void> main() async {
     nTrials: bench ?? int.tryParse(query['trials'] ?? '') ?? settings.nTrials,
     coalesce: true,
   );
-  runApp(PlaygroundApp(settings: settings, playground: playground));
+  final fitting = Fitting(
+    playground,
+    spawnWorkers: query['workers'] == '0'
+        ? () async => await FitWorkers.spawn(count: 0)
+            ..yieldInterval = const Duration(milliseconds: 12)
+        : null,
+  );
+  runApp(
+    PlaygroundApp(settings: settings, playground: playground, fitting: fitting),
+  );
+  if (fitBench) {
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => runFitBench(playground, fitting),
+    );
+  }
   if (bench != null) {
     // Scripted slider drags; see bench.dart.
     WidgetsBinding.instance.addPostFrameCallback(

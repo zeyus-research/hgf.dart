@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:hgf/hgf.dart';
 
+import 'model/fitting.dart';
 import 'model/playground.dart';
 
 /// The trial count of a scripted benchmark run, if one was asked for:
@@ -88,4 +89,66 @@ Future<Map<String, Object>> runBench(
   // ignore: avoid_print
   print('HGF_BENCH ${jsonEncode(result)}');
   return result;
+}
+
+/// Whether a scripted fitting benchmark was asked for: `?fitbench` on the
+/// web (`&workers=0` fits on the main thread), `--dart-define=HGF_FITBENCH=1`
+/// elsewhere.
+bool fitBenchRequested() =>
+    const String.fromEnvironment('HGF_FITBENCH').isNotEmpty ||
+    (kIsWeb && Uri.base.queryParameters.containsKey('fitbench'));
+
+/// Fit simulated agents' responses with MAP and NUTS on two presets,
+/// recording each fit's wall time and the frame intervals while it ran
+/// (the page must keep drawing), then print one `HGF_FITBENCH {json}` line.
+Future<void> runFitBench(Playground pg, Fitting fit) async {
+  final binding = SchedulerBinding.instance;
+  final runs = <Map<String, Object?>>[];
+  // Spawn the workers and warm up, untimed.
+  pg.setPreset('binary3');
+  fit
+    ..simulateAgent(seed: 1)
+    ..setMethod(FitMethod.map);
+  await fit.fit();
+  for (final preset in ['binary3', 'continuous3']) {
+    pg.setPreset(preset);
+    pg.updateData((d) => d.nTrials = 400);
+    fit.simulateAgent(seed: 1);
+    for (final method in FitMethod.values) {
+      fit.setMethod(method);
+      final frames = <double>[];
+      final sw = Stopwatch()..start();
+      final job = fit.fit();
+      var last = 0;
+      while (fit.running) {
+        binding.scheduleFrame();
+        await binding.endOfFrame;
+        final now = sw.elapsedMicroseconds;
+        frames.add((now - last) / 1000);
+        last = now;
+      }
+      await job;
+      frames.sort();
+      final r = fit.result;
+      runs.add({
+        'preset': preset,
+        'method': method.name,
+        'error': fit.error,
+        'ms': r?.millis,
+        'where': r?.where,
+        'frames': frames.length,
+        'frame_median_ms': frames.isEmpty ? null : frames[frames.length ~/ 2],
+        'frame_max_ms': frames.isEmpty ? null : frames.last,
+        'estimates': {
+          for (final e in r?.estimates ?? const <ParamEstimate>[])
+            e.param.id: [e.estimate, e.lower, e.upper, e.truth],
+        },
+      });
+    }
+  }
+  final target = kIsWeb
+      ? (kIsWasm ? 'wasm' : 'js')
+      : defaultTargetPlatform.name;
+  // ignore: avoid_print
+  print('HGF_FITBENCH ${jsonEncode({'target': target, 'runs': runs})}');
 }

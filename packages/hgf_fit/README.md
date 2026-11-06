@@ -264,6 +264,22 @@ A Wasm worker filters faster than the page's main thread (one worker:
 and a little beyond; a JS worker's messages cost more (one worker: 0.97×).
 Prefer the Wasm worker.
 
+### In an app
+
+For interactive use (the playground's fitting view does this):
+
+- `workers.cancel()` stops every job running on the pool: each one's
+  future fails with `FitCancelled` before its next pass. The pool stays
+  usable.
+- `sampleNuts(..., progress: SamplingProgress())` counts the transitions
+  as they are done (`completed`, `total`, `fraction`); read it from a
+  timer or once a frame.
+- Without workers (a web page whose worker script didn't load, say),
+  passes run on the calling thread and a long job would freeze the UI.
+  `workers.yieldInterval = Duration(milliseconds: 12)` makes it give way
+  to the event loop that often, so frames keep being drawn; results don't
+  change.
+
 Custom drivers can use the pool too: write a `Program` (a `sync*`
 generator yielding `Pass`es, or `Concurrent` streams of them) and run it
 with `workers.run(program)` or `runInline(program)`.

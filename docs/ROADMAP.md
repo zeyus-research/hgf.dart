@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-06, after MAP, Laplace, NUTS, exact gradients, hierarchical models and worker pools)
+## Where things stand (2026-11-07, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools and the playground's fitting view)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -21,7 +21,7 @@ supersedes its phase list.
     data, bit-identical to `Network` (W4);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
-- 632 engine tests pass (plus 110 fitting, 17 widget and 15 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+- 632 engine tests pass (plus 112 fitting, 16 widget and 23 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
   `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
@@ -56,7 +56,9 @@ supersedes its phase list.
   agents), 3× for NUTS on 20 agents (42 s → 13.8 s), 2.6× for
   hierarchical NUTS. On the web the same pool runs on Web Workers (a
   separately compiled worker, models as JSON): 3.3–4.2× on 4 cores with
-  Wasm workers, 2.1–3× with JS ones.
+  Wasm workers, 2.1–3× with JS ones. The playground fits on them too
+  (MAP + Laplace in ~50–80 ms, NUTS in 11–18 s on 4 Wasm workers, 60 fps
+  throughout).
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -579,6 +581,7 @@ First version done 2026-11-06.
   - The categorical preset's shared volatility parent uses ω = −8: at
     pyhgf's −4 the unbounded update runs away by trial ~300, at −6 by
     ~2400 (the P17 structure: binary HGFs under a volatility parent).
+- [x] Fitting view (2026-11-07): see Phase 6.
 - [ ] Next: zoom and pan on the time axis;
       editable structure (add/remove nodes); export (CSV of trajectories,
       PNG); a guided "lessons" mode for teaching; measure desktop (GPU)
@@ -909,11 +912,55 @@ First part done 2026-11-06: MAP estimation.
     isolates). The Wasm main thread is 1.3× the JS one. `dart test`
     compiles its pages without the release flags, so speed-ups measured
     there are inflated; use the standalone page.
+- [x] Fitting view in the playground (2026-11-07): a *Fit parameters*
+      card.
+  - Targets: the observations (`ObservationSurprise`, so the summed
+    surprise panel plus the prior), or responses: simulated from an agent
+    with the current sliders and a response parameter (β for binary,
+    response noise for continuous; `GaussianReadout` /
+    `BinarySoftmaxReadout` on x₀), which become the truth to recover, or
+    loaded from a CSV.
+  - Free parameters as chips: every non-input ω (on by default), μ₀, κ,
+    the input π_u, the response parameter. Priors are centred on the
+    preset's values, not the sliders' (so not on a simulated truth), and
+    shown on hover.
+  - MAP (L-BFGS, 3 restarts) + Laplace, or NUTS (4 chains × 500 + 500,
+    started at the mode) with a progress bar and cancel. Each parameter
+    gets its estimate, 95 % interval, R̂/ESS (NUTS) and a small plot of
+    prior vs posterior (Laplace density or NUTS histogram) with the
+    estimate and the truth; *Apply* moves the sliders to the estimates.
+    Simulated responses are drawn on the input panel.
+  - Fits run on a `FitWorkers` pool of 4: Web Workers from
+    `fit_worker.wasm`/`.js` (built into `web/` by
+    `apps/hgf_playground/tool/build_worker.sh`, in `build:playground`
+    and the Pages workflow; 166 KB Wasm, 236 KB JS), isolates on desktop.
+    If the worker doesn't load, on the main thread with `yieldInterval`.
+  - Vector node presets (categorical, dp, ef) say why they can't be fitted
+    (no batched kernels yet).
+  - For it, `hgf_fit` gained `FitWorkers.cancel()` / `FitCancelled`,
+    `FitWorkers.yieldInterval` and `SamplingProgress`.
+  - Found: a coalescing `Playground` swaps in new data at once but
+    notifies at the next frame, so `Fitting` re-checks it at each entry
+    point (regression test pumps that frame).
+  - `melos run bench:playground-fit` (Wasm release, headless Chromium,
+    i7-7700, 400 trials, simulated agent, same estimates in both modes):
+
+    | fit | 4 Wasm workers | main thread | frame interval during the fit (workers / main) |
+    |---|---|---|---|
+    | binary 3-level, MAP + Laplace (3 params) | 52 ms | 146 ms | — |
+    | binary 3-level, NUTS | 18.4 s | 49.0 s | median 16.7 / 17.7 ms |
+    | continuous 3-level, MAP + Laplace | 81 ms | 96 ms | — |
+    | continuous 3-level, NUTS | 11.1 s | 34.5 s | median 16.7 / 17.9 ms |
+
+    Every true value fell inside its 95 % interval. The UI keeps 60 fps
+    either way (max frame 80–120 ms, once).
 - [ ] Next:
-  - use the pool in the playground (a fitting view, below) with the Wasm
-    worker shipped in `web/`;
-  - tangents for the vector node kinds, once they have batched kernels;
-  - a fitting view in the playground (fit the loaded CSV's responses).
+  - tangents for the vector node kinds, once they have batched kernels
+    (then the categorical, dp and ef presets can be fitted);
+  - NUTS in the playground takes 11–18 s: fewer iterations by default,
+    or more chains than workers;
+  - responses in the same CSV as the observations (a second column);
+  - hierarchical fits in the playground (several simulated agents).
 
 ### Phase 7: GPU probe (go/no-go)
 
@@ -1030,8 +1077,9 @@ https://zeyus-research.github.io/hgf.dart/ from `main`. Phase 6 has
 started: `packages/hgf_fit` does MAP estimation, the Laplace
 approximation, NUTS, exact gradients and hierarchical models
 (2026-11-06), and runs them on worker pools (`FitWorkers`: isolates, and
-Web Workers on the web, 2026-11-06); see its open items (a fitting view in
-the playground next).
+Web Workers on the web, 2026-11-06). The playground has a fitting view on
+those workers (2026-11-07). See Phase 6's open items: next are batched
+kernels and tangents for the vector node kinds, or Phase 7.
 
 ```sh
 cd hgf.dart
@@ -1045,6 +1093,7 @@ melos run bench:hier                              # hierarchical NUTS vs NumPyro
 melos run bench:parallel                          # FitWorkers speed-ups (~15 min)
 melos run test:web-workers                        # FitWorkers on Web Workers (Chrome)
 melos run bench:web-parallel                      # ... and their speed-ups (~10 min)
+melos run bench:playground-fit                    # the playground's fits (~3 min)
 (cd apps/hgf_playground && flutter run -d chrome --wasm)   # try it
 dart compile exe packages/hgf/benchmark/bin/profile_modes.dart -o /tmp/pm && \
   (cd packages/hgf && /tmp/pm)                    # ns/trial baseline per mode
