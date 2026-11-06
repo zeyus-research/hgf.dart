@@ -35,6 +35,11 @@ supersedes its phase list.
 - Performance on Wasm (`-O4`): about 1.6× slower than AOT in every update
   mode, which is about the speed of float64 JAX.
 
+- CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
+  tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
+  parity build. `pages.yml` deploys the playground (Wasm `-O4`, JS
+  fallback) to GitHub Pages after CI passes on `main`.
+
 ## Decisions so far
 
 | decision | why |
@@ -379,9 +384,11 @@ major rewrite.** Concretely:
       test:wasm-release` compiles `packages/hgf/tool/parity_check.dart` (the
       parity suite as an app; `fixtureMismatches` in
       `test/src/parity_check.dart` is shared with `web_parity_test.dart`)
-      with `-O4` and runs it under Node: 34/34 match. For the playground
-      (phase 5), check that `flutter build web --wasm` builds at `-O4`, and
-      pass `-O4` if it doesn't.
+      with `-O4` and runs it under Node: 34/34 match. The playground:
+      `flutter build web --wasm --release` defaults to **`-O2`** (checked on
+      Flutter 3.47.9 with `-v`), so `build:playground`, `bench:playground`
+      and the Pages workflow pass `-O4` explicitly (filter 6–8% faster,
+      see phase 5).
 - [x] **W3: cut transcendentals in the unbounded update.** Done (above). The
       standard/eHGF updates have one exp per node and nothing to cut.
 - [x] **W4: batched lock-step engine** (`BatchNetwork`), scalar version done
@@ -502,13 +509,14 @@ First version done 2026-11-06.
 - [x] Frame time with the engine running each frame:
       `melos run bench:playground` (`?bench=N`, or
       `--dart-define=HGF_BENCH=N` on desktop: ω₂ dragged for 300 frames).
-      Wasm release, headless Chromium (software raster), binary 3-level:
+      Wasm release, headless Chromium (software raster), binary 3-level,
+      at `-O4` (Flutter's default `-O2` in brackets):
 
       | trials | filter (median) | frame interval (median / p95) |
       |---|---|---|
-      | 300 | 0.38 ms | 16.7 / 19.8 ms (60 fps) |
-      | 1 000 | 1.22 ms | 16.6 / 20.8 ms (60 fps) |
-      | 10 000 | 11.3 ms | 23.9 / 29.9 ms (~42 fps) |
+      | 300 | 0.35 (0.38) ms | 16.6 / 20.0 ms (60 fps) |
+      | 1 000 | 1.12 (1.22) ms | 16.6 / 19.6 ms (60 fps) |
+      | 10 000 | 10.6 (11.3) ms | 23.0 / 27.8 ms (~43 fps) |
 
       Recording 3 fields instead of 7 took the 10k filter from 13.7 to
       11.3 ms. On the web, `FrameTiming` reports only ~20 of 300 frames

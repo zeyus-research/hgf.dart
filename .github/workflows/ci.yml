@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Analyze and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: dart run melos run lint:all --no-select
+
+  test:
+    name: Tests (VM and Flutter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      # Engine (incl. the pyhgf parity suites), widgets and playground.
+      - run: dart run melos run test --no-select
+
+  web:
+    name: Parity on dart2js and dart2wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      # Wasm GC needs a recent Node.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+      - run: flutter pub get
+      - run: dart run melos run test:web --no-select
+        env:
+          CHROME_EXECUTABLE: ${{ steps.chrome.outputs.chrome-path }}
+      - run: dart run melos run test:wasm-release --no-select

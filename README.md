@@ -1,5 +1,9 @@
 # hgf.dart
 
+[![CI](https://github.com/zeyus-research/hgf.dart/actions/workflows/ci.yml/badge.svg)](https://github.com/zeyus-research/hgf.dart/actions/workflows/ci.yml)
+
+**[Try the playground](https://zeyus-research.github.io/hgf.dart/)** (Wasm; needs a recent Chrome, Firefox or Safari, or falls back to JS).
+
 Hierarchical Gaussian Filter (HGF) networks in Dart and Flutter. This is a
 pure-Dart port of the nodalised engine of
 [pyhgf](https://github.com/ComputationalPsychiatry/pyhgf), checked numerically
@@ -53,7 +57,7 @@ melos run test                   # unit + parity tests (Dart VM)
 CHROME_EXECUTABLE=/usr/bin/chromium melos run test:web   # parity on dart2js/dart2wasm
 melos run fixtures               # regenerate pyhgf fixtures (needs ../pyhgf, uv, cargo)
 melos run bench                  # benchmarks: Dart AOT/JIT/JS/Wasm vs JAX vs rshgf
-melos run build:playground       # playground web build (Wasm)
+melos run build:playground       # playground web build (Wasm, -O4)
 melos run bench:playground       # its frame times in headless Chromium (uv + playwright)
 ```
 

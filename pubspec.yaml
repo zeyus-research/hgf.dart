@@ -92,11 +92,11 @@ melos:
         - melos run test:flutter --no-select
       description: Run all default tests.
     build:playground:
-      run: cd apps/hgf_playground && flutter build web --wasm
+      run: cd apps/hgf_playground && flutter build web --wasm -O4
       description: Build the playground for the web (Wasm, the primary target).
     bench:playground:
       run: >-
-        cd apps/hgf_playground && flutter build web --wasm &&
+        cd apps/hgf_playground && flutter build web --wasm -O4 &&
         cd ../.. && uv run --with playwright python -I tool/web/playground_bench.py
       description: >-
         Frame times of the playground's Wasm build while a slider re-filters
