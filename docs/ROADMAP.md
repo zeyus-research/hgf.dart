@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-06, after MAP, Laplace, NUTS and exact gradients)
+## Where things stand (2026-11-06, after MAP, Laplace, NUTS, exact gradients and hierarchical models)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -48,6 +48,9 @@ supersedes its phase list.
   pyhgf + JAX + SciPy, and NUTS on the notebook's 20 agents 3.3× faster
   than NumPyro in wall time on one core and ahead in ESS/s (1.2× min,
   1.08× median).
+  `HierarchicalModel` adds group-level inference: `sampleHierarchical`
+  (joint NUTS; on pyhgf's multilevel notebook 1.2× NumPyro's and 1.85×
+  PyMC's ESS/s on one core) and `fitEmpiricalBayes` (Laplace-EM, 45 ms).
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -746,9 +749,55 @@ First part done 2026-11-06: MAP estimation.
   - Not done: the Laplace Hessian still uses second differences of values
     (`2k² + 1` plain elements); central differences of exact gradients
     would be more accurate but not cheaper for small k.
+- [x] Hierarchical models (2026-11-06): `HierarchicalModel` over a
+      subject-level `HgfModel` (`lib/src/hierarchical.dart`,
+      `empirical_bayes.dart`).
+  - Parameters are pooled (each subject's value, on the parameter's
+    unconstrained scale `y = T(x)`, from a `Population` `N(μ, σ²)` with
+    hyperpriors on μ and σ: normal, log-normal or logit-normal populations
+    by the parameter's transform), shared (one value, its own prior) or
+    independent (as before). pyhgf's multilevel notebook is two pooled
+    parameters: ω₂ normal, β log-normal.
+  - `sampleHierarchical`: NUTS on the joint posterior (`2·pooled + shared +
+    n·local` dimensions), non-centred by default (`z = (y − μ)/σ`) or
+    centred. Each leapfrog step of every chain is one batched pass of
+    `chains × subjects` elements; the per-subject gradients (exact) are
+    chained into μ, σ and z by hand. `includePrior` keeps the pooled and
+    shared parameters' own priors out of the subject objective.
+  - `fitEmpiricalBayes`: type-II ML of the populations by Laplace-EM
+    (subject modes in lock step, warm-started; one Hessian pass; closed-form
+    `μ = mean ŷ`, `σ² = mean((ŷ − μ)² + Σᵢᵢ)`), via `HgfModel.withPriors`
+    (shares the compiled batches). Recovers the sample moments of 60
+    simulated agents to ~0.03.
+  - Checked: the joint objective against a hand-written density, gradients
+    against finite differences (centred and not, pooled/shared/independent
+    mixes), prior recovery with a flat likelihood, centred = non-centred
+    posteriors, and agreement with NumPyro and PyMC (`melos run
+    bench:hier`).
+  - Performance on the notebook's problem (10 agents × 320 trials, 4 chains
+    × (1000 + 1000), one core, centred):
+
+    | | wall time | leapfrog steps after warmup | bulk ESS min / median | ESS/s min / median | means vs hgf_fit (rms z) |
+    |---|---|---|---|---|---|
+    | hgf_fit `sampleHierarchical` | 52.3 s | 46400 | 2685 / 4047 | 51.4 / 77.4 | |
+    | NumPyro | 62.0 s (+8.1 s compile) | 43840 | 2591 / 3468 | 41.8 / 55.9 | 1.11 |
+    | PyMC (notebook route) | 102.8 s | 37612 | 2854 / 3936 | 27.8 / 38.3 | 0.83 |
+    | hgf_fit `fitEmpiricalBayes` | 45 ms (7 iterations) | | | | |
+
+    The per-step lead over NumPyro is smaller than in the per-agent
+    benchmark (~1.3× vs 3.3×): JAX `vmap`s the 10 agents of each step
+    together, and a 40-element pass costs hgf_fit 170 ns per element-trial
+    (163 at 320 elements; the hierarchical layer itself adds nothing).
+    With 320 trials per agent the agents are well identified, and centred
+    beats non-centred (139 s, 2.5× the leapfrog steps); non-centred is
+    the default for the usual case of little data per subject. NumPyro
+    non-centred (seed 0) did not converge: 404 s, R̂ 1.61, min ESS 7
+    (one chain stuck, likely started from its uniform(−2, 2) init with
+    σ_ω up to e² near the ω₂ ≈ 0.355 cliff); not investigated further.
+  - Not done: empirical Bayes with shared parameters (needs a gradient
+    M-step); hyperpriors in EB (MAP-II); group-level covariates
+    (regressions on μ).
 - [ ] Next:
-  - hierarchical (group-level) priors: the objective is then not separable
-    per subject;
   - isolate-parallel passes (split a pass's elements across isolates; web
     workers on the web);
   - tangents for the vector node kinds, once they have batched kernels;
@@ -865,8 +914,8 @@ views and presets for every node kind; see its open items. CI runs on
 every push, and the playground deploys to
 https://zeyus-research.github.io/hgf.dart/ from `main`. Phase 6 has
 started: `packages/hgf_fit` does MAP estimation, the Laplace
-approximation and NUTS (2026-11-06); see its open items (hierarchical
-priors, exact gradients, isolate-parallel passes).
+approximation, NUTS, exact gradients and hierarchical models
+(2026-11-06); see its open items (isolate-parallel passes next).
 
 ```sh
 cd hgf.dart
@@ -876,6 +925,7 @@ melos run test:wasm-release                       # parity at dart2wasm -O4
 melos run bench:playground                        # playground frame times (Wasm)
 melos run bench:fit                               # MAP fitting vs pyhgf + JAX
 melos run bench:nuts                              # NUTS vs PyMC and NumPyro (~8 min)
+melos run bench:hier                              # hierarchical NUTS vs NumPyro, PyMC (~4 min)
 (cd apps/hgf_playground && flutter run -d chrome --wasm)   # try it
 dart compile exe packages/hgf/benchmark/bin/profile_modes.dart -o /tmp/pm && \
   (cd packages/hgf && /tmp/pm)                    # ns/trial baseline per mode

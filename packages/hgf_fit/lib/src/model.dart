@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:hgf/hgf.dart';
 
 import 'parameter.dart';
+import 'prior.dart';
 import 'response_model.dart';
 
 /// One subject's data: the observations the network filters and, for
@@ -52,6 +53,7 @@ final class HgfModel {
     this.blockSize = 256,
   }) : network = network..build(),
        parameters = List.unmodifiable(parameters),
+       _batches = {},
        _responseNames = response.parameters.keys.toList(growable: false),
        _responseDefaults = Float64List.fromList(
          response.parameters.values.toList(),
@@ -94,6 +96,42 @@ final class HgfModel {
     BatchNetwork(network, 1);
   }
 
+  HgfModel._withParameters(HgfModel base, this.parameters)
+    : network = base.network,
+      response = base.response,
+      blockSize = base.blockSize,
+      _responseNames = base._responseNames,
+      _responseDefaults = base._responseDefaults,
+      _batches = base._batches;
+
+  /// This model with the priors of the parameters named in [priors]
+  /// replaced (transforms and starting values kept). The copy shares the
+  /// compiled network and its batches, so it is cheap to make: for prior
+  /// sensitivity checks, or empirical Bayes, which refits with updated
+  /// group-level priors.
+  HgfModel withPriors(Map<String, Prior> priors) {
+    for (final n in priors.keys) {
+      if (!names.contains(n)) {
+        throw ArgumentError('The model has no parameter "$n"');
+      }
+    }
+    return HgfModel._withParameters(this, [
+      for (final p in parameters)
+        switch (priors[p.name]) {
+          null => p,
+          final prior => Parameter(
+            p.name,
+            targets: p.targets,
+            prior: prior,
+            transform: p.transform,
+            initial: p.initial != null && prior.contains(p.initial!)
+                ? p.initial
+                : null,
+          ),
+        },
+    ]);
+  }
+
   /// The perceptual model.
   final Network network;
 
@@ -108,7 +146,7 @@ final class HgfModel {
 
   final List<String> _responseNames;
   final Float64List _responseDefaults;
-  final Map<(int, bool), BatchNetwork> _batches = {};
+  final Map<(int, bool), BatchNetwork> _batches;
 
   /// Whether [negLogPosterior] can return exact gradients: the response
   /// model supports tangents and every parameter targets something the
@@ -190,6 +228,10 @@ final class HgfModel {
   /// through the filter (NaN where `out[e]` is `+∞`). A pass with gradients
   /// costs more per element than one without, but far less than the
   /// `dimension + 1` elements of a finite-difference gradient.
+  ///
+  /// [includePrior] (one entry per parameter) leaves out the prior and
+  /// Jacobian terms of the parameters marked `false`: a hierarchical model
+  /// puts its own group-level terms in their place.
   void negLogPosterior(
     List<Subject> subjects,
     Int32List subjectOf,
@@ -198,12 +240,16 @@ final class HgfModel {
     bool jacobian = false,
     Float64List? negLogLikelihood,
     Float64List? gradient,
+    List<bool>? includePrior,
   }) {
     final k = dimension, nE = subjectOf.length;
     if (y.length != nE * k) {
       throw ArgumentError('y must have ${nE * k} entries ($nE x $k)');
     }
     if (out.length != nE) throw ArgumentError('out must have $nE entries');
+    if (includePrior != null && includePrior.length != k) {
+      throw ArgumentError('includePrior must have $k entries');
+    }
     final exact = gradient != null;
     if (exact) {
       if (!hasExactGradients) {
@@ -253,6 +299,7 @@ final class HgfModel {
         negLogLikelihood?[e] = nll;
         var v = nll;
         for (var i = 0; i < k; i++) {
+          if (includePrior != null && !includePrior[i]) continue;
           final p = parameters[i];
           v -= p.prior.logDensity(x[e * k + i]);
           if (jacobian) v -= p.transform.logAbsJacobian(y[e * k + i]);
@@ -262,8 +309,11 @@ final class HgfModel {
         if (!exact) continue;
         for (var i = 0; i < k; i++) {
           final p = parameters[i], ei = e * k + i;
-          var gi = grad![j * k + i] - p.prior.dLogDensity(x[ei]) * dxdy![ei];
-          if (jacobian) gi -= p.transform.dLogAbsJacobian(y[ei]);
+          var gi = grad![j * k + i];
+          if (includePrior == null || includePrior[i]) {
+            gi -= p.prior.dLogDensity(x[ei]) * dxdy![ei];
+            if (jacobian) gi -= p.transform.dLogAbsJacobian(y[ei]);
+          }
           gradient[ei] = value.isFinite ? gi : double.nan;
         }
       }

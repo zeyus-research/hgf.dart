@@ -38,6 +38,7 @@ final class BatchedObjective {
     this.subjects, {
     this.fdStep = 1e-5,
     this.jacobian = false,
+    this.includePrior,
     Gradients? gradients,
   }) : gradients =
            gradients ??
@@ -62,6 +63,10 @@ final class BatchedObjective {
   /// scale, as samplers need). MAP estimation leaves them out, so the mode
   /// is that of the posterior on the parameters' natural scale.
   final bool jacobian;
+
+  /// Which parameters' priors (and Jacobian terms) to include; all if null
+  /// (see `HgfModel.negLogPosterior`).
+  final List<bool>? includePrior;
 
   /// Batched passes run so far.
   int passes = 0;
@@ -110,7 +115,14 @@ final class BatchedObjective {
       }
     }
     final out = Float64List(nE);
-    model.negLogPosterior(subjects, subj, y, out, jacobian: jacobian);
+    model.negLogPosterior(
+      subjects,
+      subj,
+      y,
+      out,
+      jacobian: jacobian,
+      includePrior: includePrior,
+    );
     passes++;
     elements += nE;
     final values = Float64List(nP);
@@ -177,6 +189,7 @@ final class BatchedObjective {
         y,
         out,
         jacobian: jacobian,
+        includePrior: includePrior,
         gradient: g,
       );
       passes++;
@@ -249,7 +262,14 @@ final class BatchedObjective {
       }
     }
     final out = Float64List(nE);
-    model.negLogPosterior(subjects, subj, y, out, jacobian: jacobian);
+    model.negLogPosterior(
+      subjects,
+      subj,
+      y,
+      out,
+      jacobian: jacobian,
+      includePrior: includePrior,
+    );
     passes++;
     elements += nE;
     final values = Float64List(nP);
@@ -375,7 +395,7 @@ MapFit fitMap(
     fdStep: fdStep,
     gradients: gradients,
   );
-  final tasks = <_Task>[];
+  final tasks = <({int subject, Float64List y0})>[];
   for (var s = 0; s < subjects.length; s++) {
     final starts = [
       start?[s] ?? model.start(),
@@ -387,49 +407,18 @@ MapFit fitMap(
           'Start vectors must have ${model.dimension} values',
         );
       }
-      final slot = ResultSlot();
-      final it = optimizer.minimize(model.toUnconstrained(x0), slot).iterator;
-      tasks.add(_Task(s, it, slot));
+      tasks.add((subject: s, y0: model.toUnconstrained(x0)));
     }
   }
-  var active = [
-    for (final t in tasks)
-      if (t.iterator.moveNext()) t,
-  ];
-  while (active.isNotEmpty) {
-    final subjectOf = <int>[], points = <Float64List>[], grad = <bool>[];
-    for (final t in active) {
-      final r = t.iterator.current;
-      for (final p in r.points) {
-        subjectOf.add(t.subject);
-        points.add(p);
-        grad.add(r.gradient);
-      }
-    }
-    final (values, grads) = objective.evaluate(subjectOf, points, grad);
-    var j = 0;
-    for (final t in active) {
-      final r = t.iterator.current;
-      final n = r.points.length;
-      r.values = Float64List.sublistView(values, j, j + n);
-      if (r.gradient) {
-        r.gradients = [for (var i = j; i < j + n; i++) grads[i]!];
-      }
-      j += n;
-    }
-    active = [
-      for (final t in active)
-        if (t.iterator.moveNext()) t,
-    ];
-  }
+  final results = minimizeAll(objective, optimizer, tasks);
 
   // The best run per subject, then its likelihood and prior parts.
   final best = List<OptimizeResult?>.filled(subjects.length, null);
-  for (final t in tasks) {
-    final r = t.slot.result!;
-    final b = best[t.subject];
+  for (var t = 0; t < tasks.length; t++) {
+    final r = results[t], s = tasks[t].subject;
+    final b = best[s];
     if (b == null || r.value < b.value || (b.value.isNaN && !r.value.isNaN)) {
-      best[t.subject] = r;
+      best[s] = r;
     }
   }
   final k = model.dimension, n = subjects.length;
@@ -464,10 +453,49 @@ MapFit fitMap(
   );
 }
 
-final class _Task {
-  _Task(this.subject, this.iterator, this.slot);
-
-  final int subject;
-  final Iterator<EvalRequest> iterator;
-  final ResultSlot slot;
+/// Runs [optimizer] from each task's start `y0` (unconstrained) on its
+/// subject's objective, every run advanced in lock step: each round
+/// answers all pending requests with one [BatchedObjective.evaluate] pass.
+/// Returns one result per task, in order.
+List<OptimizeResult> minimizeAll(
+  BatchedObjective objective,
+  Optimizer optimizer,
+  List<({int subject, Float64List y0})> tasks,
+) {
+  final slots = [for (final _ in tasks) ResultSlot()];
+  final its = [
+    for (var t = 0; t < tasks.length; t++)
+      optimizer.minimize(tasks[t].y0, slots[t]).iterator,
+  ];
+  var active = [
+    for (var t = 0; t < tasks.length; t++)
+      if (its[t].moveNext()) t,
+  ];
+  while (active.isNotEmpty) {
+    final subjectOf = <int>[], points = <Float64List>[], grad = <bool>[];
+    for (final t in active) {
+      final r = its[t].current;
+      for (final p in r.points) {
+        subjectOf.add(tasks[t].subject);
+        points.add(p);
+        grad.add(r.gradient);
+      }
+    }
+    final (values, grads) = objective.evaluate(subjectOf, points, grad);
+    var j = 0;
+    for (final t in active) {
+      final r = its[t].current;
+      final n = r.points.length;
+      r.values = Float64List.sublistView(values, j, j + n);
+      if (r.gradient) {
+        r.gradients = [for (var i = j; i < j + n; i++) grads[i]!];
+      }
+      j += n;
+    }
+    active = [
+      for (final t in active)
+        if (its[t].moveNext()) t,
+    ];
+  }
+  return [for (final s in slots) s.result!];
 }

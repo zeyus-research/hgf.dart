@@ -7,6 +7,10 @@
 /// filter), is one `BatchNetwork` pass.
 /// [laplace] adds the Laplace approximation around the estimates (standard
 /// errors, intervals, log evidence for model comparison) in one more pass.
+/// [sampleNuts] draws full posteriors per subject. For group-level
+/// inference, a [HierarchicalModel] pools parameters across subjects:
+/// [sampleHierarchical] samples the joint posterior, [fitEmpiricalBayes]
+/// estimates the populations by Laplace-EM.
 ///
 /// ```dart
 /// final model = HgfModel(
@@ -29,7 +33,9 @@
 /// ```
 library;
 
+export 'src/empirical_bayes.dart';
 export 'src/fit.dart';
+export 'src/hierarchical.dart';
 export 'src/laplace.dart';
 export 'src/model.dart';
 export 'src/optim/lbfgs.dart';
@@ -42,6 +48,6 @@ export 'src/response_model.dart' hide bindResponsePartials;
 export 'src/sample/diagnostics.dart'
     show essBulk, essMean, essTail, mcseMean, quantileOf, rhat;
 export 'src/sample/nuts.dart';
-export 'src/sample/sample.dart';
+export 'src/sample/sample.dart' hide chainSeed, driveChains;
 export 'src/special.dart' show erf, erfc, logNormalCdf, normalQuantile;
 export 'src/transform.dart';

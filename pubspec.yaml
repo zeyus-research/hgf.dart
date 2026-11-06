@@ -129,6 +129,19 @@ melos:
         1000 + 1000), one core: hgf_fit's sampleNuts against PyMC (the
         notebook's wrap_jax route) and NumPyro, with ESS/s and agreement of
         the posterior means. Takes about 8 minutes; Linux (taskset).
+    bench:hier:
+      run: >-
+        cd packages/hgf_fit &&
+        dart compile exe benchmark/bin/hierarchical_benchmark.dart -o .dart_tool/hier_benchmark &&
+        taskset -c 0 .dart_tool/hier_benchmark --centered --out .dart_tool/hier_problem.json &&
+        cd ../../tool/parity &&
+        taskset -c 0 uv run --with numpyro python fit_hier_jax.py ../../packages/hgf_fit/.dart_tool/hier_problem.json --backend numpyro &&
+        taskset -c 0 uv run python fit_hier_jax.py ../../packages/hgf_fit/.dart_tool/hier_problem.json --backend pymc
+      description: >-
+        Hierarchical model of pyhgf's multilevel notebook (10 agents, ω₂ and
+        β pooled, 4 chains, 1000 + 1000, centred), one core: hgf_fit's
+        empirical Bayes and sampleHierarchical against NumPyro and PyMC (the
+        notebook's route). Linux (taskset).
     bench:
       run: dart run tool/bench_compare.dart --rust
       description: >-

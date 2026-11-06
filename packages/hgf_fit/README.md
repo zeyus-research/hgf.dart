@@ -3,7 +3,8 @@
 Parameter estimation for [`hgf`](../hgf) networks: priors, response models,
 batched objectives with exact gradients, MAP optimisers that
 fit many subjects in one batched pass, the Laplace approximation for
-uncertainty and model evidence, and full posteriors by NUTS.
+uncertainty and model evidence, full posteriors by NUTS, and hierarchical
+(multilevel) models with group-level populations.
 
 ```dart
 import 'package:hgf/hgf.dart';
@@ -96,6 +97,30 @@ File('draws.json').writeAsStringSync(post.toJson());  // for ArviZ
   match grid quadrature within Monte Carlo error. `sampleFunction` runs the
   sampler on any log density.
 
+- **Hierarchical models.** `HierarchicalModel(model, pooled: {...},
+  shared: {...})` builds a multilevel model on a subject-level `HgfModel`:
+  a pooled parameter varies by subject around a `Population` (`N(μ, σ²)`
+  on the parameter's unconstrained scale, so normal, log-normal or
+  logit-normal across subjects, with hyperpriors on `μ` and `σ`), a shared
+  one takes one value for everyone, the rest stay independent.
+  `sampleHierarchical` samples the joint posterior by NUTS (non-centred by
+  default, `centered: true` for well-identified subjects), one batched pass
+  of all subjects of all chains per leapfrog step; `fitEmpiricalBayes`
+  estimates the populations by Laplace-EM in milliseconds, with shrunken
+  subject estimates (`example/hierarchical.dart`, pyhgf's multilevel
+  notebook):
+
+  ```dart
+  final hier = HierarchicalModel(model, pooled: {
+    'omega2': const Population(mean: Normal(-5, 5), sd: HalfNormal(10)),
+    'inverseTemperature': const Population(mean: Normal(0, 2), sd: HalfNormal(2)),
+  });
+  final eb = fitEmpiricalBayes(hier, subjects);   // populations, quickly
+  final fit = sampleHierarchical(hier, subjects); // the joint posterior
+  print(fit.summary('omega2', group: 'mu'));
+  File('draws.json').writeAsStringSync(fit.toJson());  // subject dimension
+  ```
+
 ## Performance
 
 pyhgf's parameter-recovery notebook (binary 2-level HGF, ω₂ and β per agent,
@@ -136,6 +161,20 @@ minimum, 1.08× at the median), on one core. Exact gradients made each
 leapfrog step 1.5× cheaper here: β is a response parameter, so the filter
 carries one tangent direction (ω₂).
 
+Hierarchical: pyhgf's multilevel notebook (10 agents, ω₂ normal and β
+log-normal across agents, hyperpriors as in the notebook, centred), 4 chains
+× (1000 + 1000), one core (`melos run bench:hier`;
+`tool/parity/fit_hier_jax.py`):
+
+| | wall time | bulk ESS min / median | ESS/s min / median |
+|---|---|---|---|
+| hgf_fit `sampleHierarchical` | 52.3 s | 2685 / 4047 | 51.4 / 77.4 |
+| NumPyro (jitted) | 62.0 s (+8.1 s compile) | 2591 / 3468 | 41.8 / 55.9 |
+| PyMC (the notebook's `CustomDist` + `wrap_jax`, `backend="jax"`) | 102.8 s | 2854 / 3936 | 27.8 / 38.3 |
+| hgf_fit `fitEmpiricalBayes` (point estimates) | 45 ms | | |
+
+Posterior means agree with both (rms z 1.11 and 0.83).
+
 The cost of the tangents per element-trial, against a plain filter
 (`package:hgf`'s `benchmark/bin/tangent_cost.dart`, AOT, response
 included):
@@ -156,5 +195,5 @@ real gain there is exactness.
 ## Status
 
 Phase 6 of the [roadmap](../../docs/ROADMAP.md): MAP estimation, the
-Laplace approximation, NUTS and exact gradients work. Planned: hierarchical
-priors and isolate-parallel passes.
+Laplace approximation, NUTS, exact gradients and hierarchical models work.
+Planned: isolate-parallel passes.

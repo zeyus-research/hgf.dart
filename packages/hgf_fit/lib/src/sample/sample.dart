@@ -244,15 +244,16 @@ final class PosteriorDraws {
       'PosteriorDraws(${subject?.id ?? ''} $nChains chains x $nDraws draws, '
       '$divergences divergences)\n',
     );
+    final w = names.fold(18, (m, n) => math.max(m, n.length)) + 2;
     b.writeln(
-      '${'parameter'.padRight(20)}${'mean'.padLeft(10)}${'sd'.padLeft(10)}'
+      '${'parameter'.padRight(w)}${'mean'.padLeft(10)}${'sd'.padLeft(10)}'
       '${'q5'.padLeft(10)}${'q95'.padLeft(10)}${'ess_bulk'.padLeft(10)}'
       '${'ess_tail'.padLeft(10)}${'r_hat'.padLeft(8)}',
     );
     String f(double v, [int d = 3]) => v.toStringAsFixed(d).padLeft(10);
     for (final s in summary()) {
       b.writeln(
-        '${s.name.padRight(20)}${f(s.mean)}${f(s.sd)}${f(s.q5)}${f(s.q95)}'
+        '${s.name.padRight(w)}${f(s.mean)}${f(s.sd)}${f(s.q5)}${f(s.q95)}'
         '${f(s.essBulk, 0)}${f(s.essTail, 0)}'
         '${s.rhat.toStringAsFixed(3).padLeft(8)}',
       );
@@ -394,7 +395,7 @@ NutsFit sampleNuts(
     final y0 = model.toUnconstrained(x0);
     final row = <ChainOutput>[];
     for (var c = 0; c < chains; c++) {
-      final rng = math.Random(_mix(seed, s, c));
+      final rng = math.Random(chainSeed(seed, s, c));
       final out = ChainOutput();
       row.add(out);
       final it = sampler
@@ -412,7 +413,7 @@ NutsFit sampleNuts(
     }
     outs.add(row);
   }
-  _drive(tasks, (subjectOf, points) {
+  driveChains(tasks, (subjectOf, points) {
     final (v, g) = objective.evaluate(
       subjectOf,
       points,
@@ -453,7 +454,7 @@ PosteriorDraws sampleFunction(
   final outs = <ChainOutput>[];
   final tasks = <({int subject, Iterator<EvalRequest> it})>[];
   for (var c = 0; c < chains; c++) {
-    final rng = math.Random(_mix(seed, 0, c));
+    final rng = math.Random(chainSeed(seed, 0, c));
     final out = ChainOutput();
     outs.add(out);
     tasks.add((
@@ -471,7 +472,7 @@ PosteriorDraws sampleFunction(
           .iterator,
     ));
   }
-  _drive(tasks, (_, points) {
+  driveChains(tasks, (_, points) {
     final v = Float64List(points.length);
     final g = <Float64List>[];
     for (var j = 0; j < points.length; j++) {
@@ -490,7 +491,7 @@ PosteriorDraws sampleFunction(
 
 /// Advances every task's generator in lock step, answering all pending
 /// requests with one [evaluate] call per round.
-void _drive(
+void driveChains(
   List<({int subject, Iterator<EvalRequest> it})> tasks,
   (Float64List, List<Float64List>) Function(
     List<int> subjectOf,
@@ -529,5 +530,5 @@ void _drive(
 /// A per-chain seed from the run seed, subject and chain (`math.Random`
 /// scrambles its seed, so nearby seeds give unrelated streams). Kept below
 /// 2^53 so it is the same on the web.
-int _mix(int seed, int subject, int chain) =>
+int chainSeed(int seed, int subject, int chain) =>
     ((seed % 0x100000) * 0x100000 + subject * 4099 + chain) % 0x20000000000000;

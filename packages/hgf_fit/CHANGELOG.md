@@ -1,5 +1,21 @@
 ## Unreleased
 
+- Hierarchical models: `HierarchicalModel` over a subject-level `HgfModel`,
+  with pooled parameters (each subject's value, on the parameter's
+  unconstrained scale, drawn from a `Population` `N(μ, σ²)` with hyperpriors
+  on `μ` and `σ`), shared parameters (one value for all subjects) and
+  independent ones; centred or non-centred (default). `sampleHierarchical`
+  samples the joint posterior by NUTS, all subjects of all chains in one
+  batched pass per leapfrog step, with exact gradients; `HierarchicalFit`
+  gives summaries by group or subject and ArviZ JSON with a `subject`
+  dimension. `fitEmpiricalBayes`: type-II maximum likelihood of the
+  populations by Laplace-EM, with shrunken subject estimates and the
+  evidence.
+- `HgfModel.withPriors` (a copy with some priors replaced, sharing the
+  compiled network and batches), `negLogPosterior(includePrior:)` and
+  `BatchedObjective(includePrior:)`, and `minimizeAll` (the lock-step
+  optimiser driver behind `fitMap`).
+
 - Exact gradients: `HgfModel.negLogPosterior(gradient:)` differentiates the
   negative log posterior with forward-mode tangents through the filter
   (`BatchNetwork.tangents`, one direction per parameter), the priors
