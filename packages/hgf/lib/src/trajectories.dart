@@ -148,7 +148,8 @@ final class Trajectories {
   ///
   /// Needs `mean`, `expectedMean` (and for continuous nodes
   /// `expectedPrecision`) to have been recorded. Not defined (all NaN) for
-  /// constant, ef-state and categorical nodes, which pyhgf leaves out (a
+  /// constant, ef-state, categorical and dp-state nodes, which pyhgf leaves
+  /// out (a
   /// categorical node records its own [NodeField.surprise]).
   Float64List nodeSurprise(int node) {
     RangeError.checkValidIndex(node, null, 'node', nNodes);
@@ -157,7 +158,8 @@ final class Trajectories {
     final out = Float64List(nTime);
     if (ks[node] == NodeKind.constantState ||
         ks[node] == NodeKind.efState ||
-        ks[node] == NodeKind.categoricalState) {
+        ks[node] == NodeKind.categoricalState ||
+        ks[node] == NodeKind.dpState) {
       return out..fillRange(0, nTime, double.nan);
     }
     final x = series(node, NodeField.mean);
@@ -175,6 +177,7 @@ final class Trajectories {
       case NodeKind.constantState:
       case NodeKind.efState:
       case NodeKind.categoricalState:
+      case NodeKind.dpState:
         break; // handled above
     }
     return out;

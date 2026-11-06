@@ -1,5 +1,20 @@
 ## Unreleased
 
+- Dirichlet process nodes (`NodeKind.dpState`, `Network.addDpState`, and
+  `Network.addEfState(valueChildren: [...])` for their clusters): each
+  observation goes to the most likely open cluster or opens a new one, with
+  pyhgf's new-cluster proposals (JAX's threefry PRNG and `erf_inv`,
+  reproduced). New fields `NodeField.alpha`, `sensoryPrecision`, `nTotal`,
+  `nActiveCluster`, and `VectorField.n`, `expectedMeans`, `expectedSigmas`,
+  `activated`. Checked against pyhgf JAX on 6 new fixtures (VM, dart2js,
+  dart2wasm, `-O4`). Unlike pyhgf, missing observations are skipped, the
+  node may follow a continuous one, and a cluster count that doesn't match
+  `batchSize` is reported at `build()`. About 1.3 ms per trial on AOT
+  (pyhgf JAX: 3.8 ms). `BatchNetwork` and `sample` don't take them yet.
+- Update order: an ef-state node without parents takes its step on the
+  first pass even when it has children, as in pyhgf (only dp-state clusters
+  are affected).
+
 - Categorical state nodes (`NodeKind.categoricalState`,
   `Network.addCategoricalState`): one-hot observations over `n`
   categories, one binary HGF per category with a shared volatility parent

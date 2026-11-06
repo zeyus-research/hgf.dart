@@ -17,6 +17,11 @@ It is tested against pyhgf reference trajectories (float64 JAX and rshgf) to
 - Categorical state nodes (`addCategoricalState`): one-hot observations,
   one binary HGF per category, and the implied Dirichlet distribution over
   the categories with its KL divergence (Bayesian surprise).
+- Dirichlet process nodes (`addDpState`): sort observations into clusters,
+  opening a new one when no existing cluster explains an observation (a
+  Chinese restaurant process), each cluster a univariate ef-state node.
+  pyhgf's random cluster proposals are reproduced, so the clustering
+  matches pyhgf's.
 - Non-linear value coupling: `linear`, `relu`, `sigmoid`, `tanh`,
   `leaky_relu`, `gelu`, or your own `CustomCoupling` (g, g', g''), declared
   on the parent.
@@ -102,6 +107,15 @@ final run = cat.inputData(
 final p = run.vectorAt(0, VectorField.mean, t);       // P(category) after trial t
 final alpha = run.vectorAt(0, VectorField.alpha, t);  // implied Dirichlet
 final bayesianSurprise = run.series(0, NodeField.klDivergence);
+
+// How many clusters, and where? Node 0 is the Dirichlet process input,
+// nodes 1-3 its clusters (one ef-state node each).
+final dp = Network()
+  ..addDpState(batchSize: 3, alpha: 0.1)
+  ..addEfState(nNodes: 3, valueChildren: [0], nus: 15.0);
+dp.inputData(samples, record: false);                    // nTime × 1
+final centres = dp.getVector(0, VectorField.expectedMeans);
+final counts = dp.getVector(0, VectorField.n);           // per cluster
 ```
 
 ## Performance
@@ -114,10 +128,22 @@ about 0.65 µs. That is faster than pyhgf's Rust backend and its JAX backend
 builds are about 1.6× slower than AOT. Run `melos run bench` at the repository root for
 the full comparison.
 
+Dirichlet process nodes are the exception: each trial weighs 20000 cluster
+proposals, as pyhgf does, about 1.3 ms per trial on AOT (1.8 ms on Wasm),
+against 3.8 ms for pyhgf's JAX backend.
+
 ## Differences from pyhgf
 
-- Not yet ported: Dirichlet process nodes; per-child coupling functions.
-  `BatchNetwork` and `sample` don't take ef-state or categorical nodes yet.
+- Not yet ported: per-child coupling functions. `BatchNetwork` and `sample`
+  don't take ef-state, categorical or dp-state nodes yet.
+- Dirichlet process nodes skip missing observations (pyhgf clusters them,
+  and a NaN placeholder opens a NaN cluster), may follow other nodes (pyhgf
+  crashes when a continuous node comes first), and check at `build()` that
+  there is one cluster per `batchSize`. Their clusters must be univariate
+  ef-state nodes with a fixed learning rate. The cluster proposals match
+  pyhgf's float64 draws under JAX's default PRNG mode (to about 1 ulp); with
+  pyhgf in float32 or in JAX's legacy PRNG mode the clustering differs.
+  See `docs/upstream/README.md`, P7 and P14–P16.
 - Categorical nodes: `addCategoricalState` adds one node per call (pyhgf's
   `n_nodes > 1` builds a broken graph), may follow other nodes (pyhgf
   crashes when a continuous node comes first), and passes its parameters to

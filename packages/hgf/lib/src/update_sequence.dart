@@ -1,9 +1,9 @@
 part of 'network.dart';
 
 /// Port of rshgf's `set_update_sequence` (`src/utils/set_sequence.rs`), which
-/// mirrors pyhgf's `get_update_sequence`; the ef-state and categorical
-/// steps follow pyhgf's JAX version (rshgf only has the fixed-rate ef one,
-/// and no categorical node).
+/// mirrors pyhgf's `get_update_sequence`; the ef-state, categorical and
+/// dp-state steps follow pyhgf's JAX version (rshgf only has the fixed-rate
+/// ef one, and neither of the others).
 ///
 /// One difference from JAX: its posterior pass resets `update_fn` once per
 /// pass, so a node that should get no posterior step (a binary node with a
@@ -46,6 +46,8 @@ extension on Network {
           ));
         case NodeKind.binaryState:
           out.add((found, UpdateStep.predictionBinary));
+        case NodeKind.dpState:
+          out.add((found, UpdateStep.predictionDp));
         case NodeKind.constantState:
         case NodeKind.efState:
         case NodeKind.categoricalState:
@@ -93,9 +95,17 @@ extension on Network {
       }
       po.removeWhere(eligiblePo.contains);
 
+      // As in pyhgf, an ef-state node without parents (fixed rate) takes its
+      // step on the first pass, even when it has children (a dp-state
+      // cluster) whose prediction errors are still pending. It learns from
+      // what that child sets this trial; the child always has the lower
+      // index (addEfState needs it to exist), so its step comes first.
       final eligiblePe = [
         for (final idx in pe)
-          if (!po.contains(idx)) idx,
+          if (!po.contains(idx) ||
+              (_defs[idx].kind == NodeKind.efState &&
+                  _defs[idx].valueParents.isEmpty))
+            idx,
       ];
       for (final idx in eligiblePe) {
         final d = _defs[idx];
@@ -126,6 +136,8 @@ extension on Network {
             out.add((idx, UpdateStep.predictionErrorContinuous));
           case NodeKind.binaryState:
             out.add((idx, UpdateStep.predictionErrorBinary));
+          case NodeKind.dpState:
+            out.add((idx, UpdateStep.predictionErrorDp));
           case NodeKind.constantState:
           case NodeKind.efState:
           case NodeKind.categoricalState:

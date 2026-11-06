@@ -72,9 +72,14 @@ List<String> batchMismatches(Map<String, Object?> fixture) {
       : Float64List.fromList(series(fixture['time_steps']));
 
   final template = build();
-  final unbatched = {NodeKind.efState, NodeKind.categoricalState}.intersection({
-    for (var i = 0; i < template.nNodes; i++) template.kindOf(i),
-  });
+  final unbatched =
+      {
+        NodeKind.efState,
+        NodeKind.categoricalState,
+        NodeKind.dpState,
+      }.intersection({
+        for (var i = 0; i < template.nNodes; i++) template.kindOf(i),
+      });
   if (unbatched.isNotEmpty) {
     // No batched kernels for the vector-valued kinds yet: the batch must
     // refuse the network.

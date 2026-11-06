@@ -39,6 +39,16 @@ clears JAX's caches before and after, and skips rshgf, which is unpatched.
 These fixtures check the proposed upstream fix, not released pyhgf, and
 their `reference` field says so.
 
+The same goes for `dp_missing` (`"dp_skip_missing": true`): there the
+generator wraps pyhgf's `dirichlet_node_prediction_error` so that an
+unobserved trial only sets the clusters' `observed` to 0, which is what
+hgf.dart does (pyhgf clusters missing observations, upstream P14).
+
+`fixtures/dp/dp_reference.json` is not a scenario: it holds pyhgf's fixed
+dp-state cluster proposals (every 50th, plus sums) and some `get_candidate`
+results, which `dp_state_test.dart` checks on their own. They come from the
+default JAX PRNG mode (`jax_threefry_partitionable`), in float64.
+
 After pulling pyhgf, regenerate with `melos run fixtures` and rerun
 `melos run test:parity`. Mismatches show which update equations changed
 upstream.

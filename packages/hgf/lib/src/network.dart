@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'coupling.dart';
+import 'dirichlet_process.dart';
 import 'math.dart';
 import 'response.dart';
 import 'trajectories.dart';
@@ -11,6 +12,7 @@ part 'batch/batch_network.dart';
 part 'batch/batch_updates.dart';
 part 'update_sequence.dart';
 part 'updates/categorical.dart';
+part 'updates/dirichlet.dart';
 part 'updates/exponential.dart';
 part 'updates/prediction.dart';
 part 'updates/prediction_error.dart';
@@ -32,12 +34,15 @@ const int _kPredictionErrorEfDynamic = 11;
 const int _kPosteriorEfDynamic = 12;
 const int _kPredictionErrorCategorical = 13;
 const int _kPosteriorCategorical = 14;
+const int _kPredictionDp = 15;
+const int _kPredictionErrorDp = 16;
 
 const int _kindContinuous = 0;
 const int _kindBinary = 1;
 const int _kindConstant = 2;
 const int _kindEf = 3;
 const int _kindCategorical = 4;
+const int _kindDp = 5;
 
 /// `_couplingFn` code of a [CustomCoupling] (named ones use their index).
 const int _kCustomCoupling = 255;
@@ -60,6 +65,9 @@ final class _NodeDef {
   /// The number of input columns: an ef-state node's observation dimension,
   /// a categorical-state node's number of categories.
   int dimension = 1;
+
+  /// dp-state only: the number of clusters (pyhgf's `batch_size`).
+  int batchSize = 0;
 
   /// ef-state only: the initial sufficient statistics (`null`: pyhgf's
   /// default).
@@ -233,6 +241,12 @@ class Network {
         'their binary HGFs)',
       );
     }
+    if (kind == NodeKind.dpState) {
+      throw ArgumentError(
+        'Add dp-state nodes with addDpState, and their clusters with '
+        'addEfState(valueChildren: [...])',
+      );
+    }
     if (kind == NodeKind.binaryState &&
         (volatilityParents != null || volatilityChildren != null)) {
       throw ArgumentError('Binary state nodes take value edges only');
@@ -298,6 +312,12 @@ class Network {
               'by addCategoricalState',
             );
           }
+          if (o.kind == NodeKind.dpState) {
+            throw ArgumentError(
+              'Node $other is a dp-state node; its only edges are its '
+              'clusters, added with addEfState(valueChildren: [$other])',
+            );
+          }
           if (!theirs(o).contains(id)) {
             theirs(o).add(id);
             theirsS(o).add(s[k]);
@@ -357,15 +377,39 @@ class Network {
   ///
   /// [xis] overrides the initial ξ (`d + d(d+1)/2` values; default: the
   /// sufficient statistics of N(0, I)). pyhgf ignores a `xis` parameter.
+  ///
+  /// With [valueChildren], the nodes are the clusters of those dp-state
+  /// nodes (see [addDpState]) instead of input nodes: they observe only the
+  /// values their child assigns to them. Clusters must be univariate, with
+  /// a fixed learning rate.
   Network addEfState({
     int nNodes = 1,
     int dimension = 1,
     EfLearning learning = EfLearning.fixed,
     double nus = 3.0,
     List<double>? xis,
+    List<int>? valueChildren,
   }) {
     if (nNodes < 1) throw ArgumentError.value(nNodes, 'nNodes');
     if (dimension < 1) throw ArgumentError.value(dimension, 'dimension');
+    if (valueChildren != null) {
+      for (final c in valueChildren) {
+        if (c < 0 || c >= _defs.length || _defs[c].kind != NodeKind.dpState) {
+          throw ArgumentError.value(
+            valueChildren,
+            'valueChildren',
+            'ef-state nodes can only be value parents of existing dp-state '
+                'nodes',
+          );
+        }
+      }
+      if (dimension != 1 || learning != EfLearning.fixed) {
+        throw ArgumentError(
+          'The clusters of a dp-state node are univariate ef-state nodes '
+          'with a fixed learning rate',
+        );
+      }
+    }
     final nSs = _efSufficientStatisticsCount(dimension);
     if (xis != null && xis.length != nSs) {
       throw ArgumentError.value(
@@ -379,11 +423,19 @@ class Network {
     );
     final first = _defs.length;
     for (var k = 0; k < nNodes; k++) {
-      _defs.add(
-        _NodeDef(NodeKind.efState, CouplingFn.linear, {NodeField.nus: nus})
-          ..dimension = dimension
-          ..xis = initialXis,
-      );
+      final def =
+          _NodeDef(NodeKind.efState, CouplingFn.linear, {NodeField.nus: nus})
+            ..dimension = dimension
+            ..xis = initialXis;
+      for (final c in valueChildren ?? const <int>[]) {
+        def
+          ..valueChildren.add(c)
+          ..valueChildStrengths.add(1.0);
+        _defs[c]
+          ..valueParents.add(_defs.length)
+          ..valueParentStrengths.add(1.0);
+      }
+      _defs.add(def);
     }
     _compiled = false;
     if (learning.levels == 0) return this;
@@ -503,6 +555,47 @@ class Network {
     return this;
   }
 
+  /// Add a Dirichlet process node (pyhgf's `dp-state`): an input node that
+  /// sorts its observations into up to [batchSize] clusters, opening a new
+  /// one when no open cluster explains an observation well enough (a
+  /// Chinese restaurant process with concentration [alpha]).
+  ///
+  /// Then add its clusters, [batchSize] univariate ef-state nodes, as in
+  /// pyhgf:
+  ///
+  /// ```dart
+  /// final net = Network()
+  ///   ..addDpState(batchSize: 3, alpha: 0.1)                    // node 0
+  ///   ..addEfState(nNodes: 3, valueChildren: [0], nus: 15.0);  // clusters
+  /// ```
+  ///
+  /// Each trial, the node reads every cluster's expected mean and standard
+  /// deviation from its `xis` ([VectorField.expectedMeans],
+  /// [VectorField.expectedSigmas]), weighs them against a new-cluster
+  /// candidate fitted to the observation (pyhgf's proposal scheme, with the
+  /// same random proposals; see `dirichlet_process.dart`), and passes the
+  /// observation to the chosen cluster, which updates at its fixed rate. A
+  /// new cluster starts at the candidate. [sensoryPrecision] sharpens the
+  /// candidate's fit to the observation.
+  ///
+  /// Each trial costs about 20000 × (2 × [batchSize] + 1) exponentials (the
+  /// candidate's proposal weights), as in pyhgf.
+  Network addDpState({
+    int batchSize = 10,
+    double alpha = 1.0,
+    double sensoryPrecision = 1.0,
+  }) {
+    if (batchSize < 1) throw ArgumentError.value(batchSize, 'batchSize');
+    _defs.add(
+      _NodeDef(NodeKind.dpState, CouplingFn.linear, {
+        NodeField.alpha: alpha,
+        NodeField.sensoryPrecision: sensoryPrecision,
+      })..batchSize = batchSize,
+    );
+    _compiled = false;
+    return this;
+  }
+
   // ---------------------------------------------------------------------------
   // Compiled representation
   // ---------------------------------------------------------------------------
@@ -548,7 +641,11 @@ class Network {
       _volatilityPredictionError = _f64,
       _nus = _f64,
       _klDivergence = _f64,
-      _surprise = _f64;
+      _surprise = _f64,
+      _dpAlpha = _f64,
+      _sensoryPrecision = _f64,
+      _nTotal = _f64,
+      _nActiveCluster = _f64;
 
   // Vector side store, outside the scalar hot loop: one CSR-like array per
   // [VectorField] (node i's vector is `[start[i], start[i + 1])`), read only
@@ -559,6 +656,19 @@ class Network {
       _xisInitial = _f64,
       _ssInitial = _f64,
       _alphaInitial = _f64;
+
+  // dp-state nodes: one vector of each per node, one entry per cluster, all
+  // sharing `_dpStart`.
+  Int32List _dpStart = _i32;
+  Float64List _dpN = _f64,
+      _dpExpectedMeans = _f64,
+      _dpExpectedSigmas = _f64,
+      _dpActivated = _f64;
+  Float64List _dpNInitial = _f64,
+      _dpExpectedMeansInitial = _f64,
+      _dpExpectedSigmasInitial = _f64,
+      _dpActivatedInitial = _f64;
+  DpScratch? _dpScratch;
 
   // Scratch for the categorical posterior (the new α, before the KL
   // divergence from the old one), sized to the most categories.
@@ -599,6 +709,7 @@ class Network {
         NodeKind.constantState => _kindConstant,
         NodeKind.efState => _kindEf,
         NodeKind.categoricalState => _kindCategorical,
+        NodeKind.dpState => _kindDp,
       };
       if (d.kind == NodeKind.constantState && d.valueChildren.isEmpty) {
         throw StateError('Constant state node $i has no value children');
@@ -680,9 +791,15 @@ class Network {
     _nus = Float64List(n);
     _klDivergence = Float64List(n);
     _surprise = Float64List(n);
+    _dpAlpha = Float64List(n);
+    _sensoryPrecision = Float64List(n);
+    _nTotal = Float64List(n);
+    _nActiveCluster = Float64List(n);
 
     assert(UpdateStep.predictionContinuous.index == _kPredictionContinuous);
     assert(UpdateStep.predictionErrorBinary.index == _kPredictionErrorBinary);
+    assert(UpdateStep.predictionDp.index == _kPredictionDp);
+    assert(UpdateStep.predictionErrorDp.index == _kPredictionErrorDp);
     final seq = _buildUpdateSequence();
     _predNode = Int32List.fromList([for (final s in seq.predictions) s.$1]);
     _predStep = Uint8List.fromList([
@@ -711,21 +828,30 @@ class Network {
     final n = _n;
     final mStart = Int32List(n + 1),
         sStart = Int32List(n + 1),
-        aStart = Int32List(n + 1);
+        aStart = Int32List(n + 1),
+        dStart = Int32List(n + 1);
     var maxCategories = 0;
     for (var i = 0; i < n; i++) {
       final d = _defs[i];
       final ef = d.kind == NodeKind.efState;
       final cat = d.kind == NodeKind.categoricalState;
+      final dp = d.kind == NodeKind.dpState;
       mStart[i + 1] = mStart[i] + (ef || cat ? d.dimension : 0);
       sStart[i + 1] =
           sStart[i] + (ef ? _efSufficientStatisticsCount(d.dimension) : 0);
       aStart[i + 1] = aStart[i] + (cat ? d.dimension : 0);
+      dStart[i + 1] = dStart[i] + (dp ? d.batchSize : 0);
       if (cat) {
         maxCategories = math.max(maxCategories, d.dimension);
         _checkCategoricalParents(i, d);
       }
+      if (dp) _checkDpParents(i, d);
       if (!ef) continue;
+      if (d.valueChildren.isNotEmpty && d.valueParents.isNotEmpty) {
+        throw StateError(
+          'ef-state node $i is a dp-state cluster; it takes no parents',
+        );
+      }
       final vp = d.valueParents;
       if (vp.isNotEmpty &&
           vp.length != _efSufficientStatisticsCount(d.dimension)) {
@@ -758,6 +884,18 @@ class Network {
     // α starts at 1 (a flat Dirichlet), the mean at 1/n per category.
     _alphaInitial = Float64List(aStart[n])..fillRange(0, aStart[n], 1.0);
     _alphaScratch = Float64List(maxCategories);
+    final nd = dStart[n];
+    _dpStart = dStart;
+    _dpN = Float64List(nd);
+    _dpExpectedMeans = Float64List(nd);
+    _dpExpectedSigmas = Float64List(nd);
+    _dpActivated = Float64List(nd);
+    // pyhgf's defaults: no observations, N(0, 1) expectations, none open.
+    _dpNInitial = Float64List(nd);
+    _dpExpectedMeansInitial = Float64List(nd);
+    _dpExpectedSigmasInitial = Float64List(nd)..fillRange(0, nd, 1.0);
+    _dpActivatedInitial = Float64List(nd);
+    _dpScratch = nd > 0 ? DpScratch(nd) : null;
     for (var i = 0; i < n; i++) {
       final d = _defs[i];
       final xis = d.xis;
@@ -786,6 +924,30 @@ class Network {
         throw StateError(
           'Value parent $b of categorical state node $i must be a binary '
           'node whose first value parent is a continuous node',
+        );
+      }
+    }
+  }
+
+  /// A dp-state node's value parents are its clusters: [_NodeDef.batchSize]
+  /// univariate ef-state nodes without parents, whose only child it is.
+  void _checkDpParents(int i, _NodeDef d) {
+    if (d.valueParents.length != d.batchSize) {
+      throw StateError(
+        'dp-state node $i needs one ef-state value parent per cluster '
+        '(batchSize ${d.batchSize}), has ${d.valueParents.length}; add them '
+        'with addEfState(nNodes: ${d.batchSize}, valueChildren: [$i])',
+      );
+    }
+    for (final p in d.valueParents) {
+      final pd = _defs[p];
+      if (pd.kind != NodeKind.efState ||
+          pd.dimension != 1 ||
+          pd.valueParents.isNotEmpty ||
+          pd.valueChildren.length != 1) {
+        throw StateError(
+          'Value parent $p of dp-state node $i must be a univariate ef-state '
+          'node with a fixed learning rate and no other children',
         );
       }
     }
@@ -866,6 +1028,7 @@ class Network {
       (_vMeanStart, _vMean.length),
       (_ssStart, _ss.length),
       (_alphaStart, _alpha.length),
+      (_dpStart, _dpN.length),
     ]) {
       if (start.length != n + 1 || start[0] != 0 || start[n] != len) {
         throw StateError('Corrupt vector offsets');
@@ -880,6 +1043,38 @@ class Network {
         _vMeanInitial.length != _vMean.length ||
         _alphaInitial.length != _alpha.length) {
       throw StateError('Bad vector store');
+    }
+    for (final v in [
+      _dpExpectedMeans,
+      _dpExpectedSigmas,
+      _dpActivated,
+      _dpNInitial,
+      _dpExpectedMeansInitial,
+      _dpExpectedSigmasInitial,
+      _dpActivatedInitial,
+    ]) {
+      if (v.length != _dpN.length) throw StateError('Bad dp-state store');
+    }
+    if (_dpN.isNotEmpty && (_dpScratch?.clusters ?? 0) < _dpN.length) {
+      throw StateError('Missing dp-state scratch');
+    }
+    for (var i = 0; i < n; i++) {
+      final len = _dpStart[i + 1] - _dpStart[i];
+      if (_kind[i] != _kindDp) {
+        if (len != 0) throw StateError('Bad dp-state vector lengths');
+        continue;
+      }
+      if (len != _vpStart[i + 1] - _vpStart[i] || len < 1) {
+        throw StateError('Bad dp-state vector lengths');
+      }
+      for (var e = _vpStart[i]; e < _vpStart[i + 1]; e++) {
+        final p = _vpIdx[e];
+        if (_kind[p] != _kindEf ||
+            _vMeanStart[p + 1] - _vMeanStart[p] != 1 ||
+            _ssStart[p + 1] - _ssStart[p] != 2) {
+          throw StateError('Bad dp-state parents');
+        }
+      }
     }
     for (var i = 0; i < n; i++) {
       final len = _alphaStart[i + 1] - _alphaStart[i];
@@ -969,6 +1164,11 @@ class Network {
       NodeField.nus: 3.0,
     },
     NodeKind.categoricalState => const {NodeField.observed: 1.0},
+    NodeKind.dpState => const {
+      NodeField.observed: 1.0,
+      NodeField.alpha: 1.0,
+      NodeField.sensoryPrecision: 1.0,
+    },
   };
 
   UpdateSequence? _updateSequence;
@@ -1021,6 +1221,10 @@ class Network {
     NodeField.nus => _nus,
     NodeField.klDivergence => _klDivergence,
     NodeField.surprise => _surprise,
+    NodeField.alpha => _dpAlpha,
+    NodeField.sensoryPrecision => _sensoryPrecision,
+    NodeField.nTotal => _nTotal,
+    NodeField.nActiveCluster => _nActiveCluster,
   };
 
   @pragma('vm:prefer-inline')
@@ -1029,6 +1233,10 @@ class Network {
     VectorField.mean => _vMeanStart,
     VectorField.xis || VectorField.observationSs => _ssStart,
     VectorField.alpha => _alphaStart,
+    VectorField.n ||
+    VectorField.expectedMeans ||
+    VectorField.expectedSigmas ||
+    VectorField.activated => _dpStart,
   };
 
   @pragma('vm:prefer-inline')
@@ -1038,6 +1246,10 @@ class Network {
     VectorField.xis => _xis,
     VectorField.observationSs => _ss,
     VectorField.alpha => _alpha,
+    VectorField.n => _dpN,
+    VectorField.expectedMeans => _dpExpectedMeans,
+    VectorField.expectedSigmas => _dpExpectedSigmas,
+    VectorField.activated => _dpActivated,
   };
 
   Float64List _vectorInitial(VectorField f) => switch (f) {
@@ -1045,6 +1257,10 @@ class Network {
     VectorField.xis => _xisInitial,
     VectorField.observationSs => _ssInitial,
     VectorField.alpha => _alphaInitial,
+    VectorField.n => _dpNInitial,
+    VectorField.expectedMeans => _dpExpectedMeansInitial,
+    VectorField.expectedSigmas => _dpExpectedSigmasInitial,
+    VectorField.activated => _dpActivatedInitial,
   };
 
   /// Length of [node]'s [field] vector (0 if the node has none).
@@ -1457,9 +1673,10 @@ class Network {
   }) {
     build();
     if (nTime < 0) throw ArgumentError.value(nTime, 'nTime');
-    if (_hasVectorInputs) {
+    if (_hasVectorInputs || _dpN.isNotEmpty) {
       throw UnsupportedError(
-        'sample() does not support ef-state or categorical inputs yet',
+        'sample() does not support ef-state, categorical or dp-state inputs '
+        'yet',
       );
     }
     final nIn = _inputs.length;
@@ -1709,7 +1926,8 @@ class Network {
     }
   }
 
-  /// The steps of the vector-valued node kinds (ef-state, categorical),
+  /// The steps of the vector-valued node kinds (ef-state, categorical,
+  /// dp-state),
   /// out of line: they are few per network, and keeping them out of the
   /// inlined [_dispatch] keeps the scalar sweep's code compact. (Measured
   /// on AOT: recording runs were ~7% slower after the categorical cases were
@@ -1730,6 +1948,10 @@ class Network {
         _predictionErrorCategorical(node);
       case _kPosteriorCategorical:
         _posteriorCategorical(node);
+      case _kPredictionDp:
+        _predictionDp(node);
+      case _kPredictionErrorDp:
+        _predictionErrorDp(node);
     }
   }
 

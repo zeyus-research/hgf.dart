@@ -19,7 +19,16 @@ enum NodeKind {
   /// tracks the probability of each with its own binary HGF, plus a
   /// Dirichlet distribution ([VectorField.alpha]) implied by how much those
   /// HGFs learn. Add it with `Network.addCategoricalState`.
-  categoricalState('categorical-state');
+  categoricalState('categorical-state'),
+
+  /// A Dirichlet process node (pyhgf's `dp-state`): an input node that
+  /// assigns each observation to one of a fixed number of clusters, or opens
+  /// a new one (a Chinese restaurant process with concentration
+  /// [NodeField.alpha]). Each cluster is a univariate ef-state value parent
+  /// that only learns from the observations assigned to it. Add it with
+  /// `Network.addDpState`, then its clusters with
+  /// `Network.addEfState(valueChildren: [dp])`.
+  dpState('dp-state');
 
   const NodeKind(this.pyhgfName);
 
@@ -91,7 +100,23 @@ enum NodeField {
   /// under its binary node's prediction. (Not the surprise that
   /// `Trajectories.nodeSurprise` computes, which pyhgf leaves out for this
   /// kind.)
-  surprise('surprise');
+  surprise('surprise'),
+
+  /// A dp-state node's concentration parameter α: the prior weight of a new
+  /// cluster against the existing ones (`α / (α + N)` against `n_k / (α + N)`).
+  alpha('alpha'),
+
+  /// A dp-state node's sensory precision: the exponent of the observation's
+  /// likelihood when weighing the new-cluster proposals.
+  sensoryPrecision('sensory_precision'),
+
+  /// A dp-state node's number of observations so far (`N`).
+  nTotal('n_total'),
+
+  /// A dp-state node's number of clusters opened so far. Keeps counting
+  /// past the number of clusters the node has; openings beyond it are
+  /// dropped (as in pyhgf).
+  nActiveCluster('n_active_cluster');
 
   const NodeField(this.pyhgfName);
 
@@ -130,7 +155,21 @@ enum VectorField {
 
   /// A categorical-state node's Dirichlet concentration parameters α, one
   /// per category (initially all 1).
-  alpha('alpha');
+  alpha('alpha'),
+
+  /// A dp-state node's number of observations assigned to each cluster
+  /// (pyhgf's `n`).
+  n('n'),
+
+  /// A dp-state node's expected mean of each cluster, from its ef-state
+  /// parent's `xis` (the prediction step).
+  expectedMeans('expected_means'),
+
+  /// A dp-state node's expected standard deviation of each cluster.
+  expectedSigmas('expected_sigmas'),
+
+  /// A dp-state node's `1` for each cluster opened so far, `0` otherwise.
+  activated('activated');
 
   const VectorField(this.pyhgfName);
 
@@ -267,7 +306,19 @@ enum UpdateStep {
   /// A categorical-state node, at the end of the sweep: the implied
   /// Dirichlet α from how much each binary HGF learned, its KL divergence
   /// and the surprise.
-  posteriorCategorical('categorical_state_update', 'categorical_state_update');
+  posteriorCategorical('categorical_state_update', 'categorical_state_update'),
+
+  /// A dp-state node reads each cluster's expected mean and standard
+  /// deviation from its ef-state parents.
+  predictionDp('dirichlet_node_prediction', 'dirichlet_node_prediction'),
+
+  /// A dp-state node assigns the observation to the most likely existing
+  /// cluster or opens a new one, and passes it (and `observed` flags) to the
+  /// clusters' ef-state nodes, whose fixed-rate update runs next.
+  predictionErrorDp(
+    'dirichlet_node_prediction_error',
+    'dirichlet_node_prediction_error',
+  );
 
   const UpdateStep(this.rshgfName, this.pyhgfName);
 

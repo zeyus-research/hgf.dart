@@ -79,6 +79,10 @@ final class BatchNetwork {
       _nus = Float64List(net._n * b),
       _klDivergence = Float64List(net._n * b),
       _surprise = Float64List(net._n * b),
+      _dpAlpha = Float64List(net._n * b),
+      _sensoryPrecision = Float64List(net._n * b),
+      _nTotal = Float64List(net._n * b),
+      _nActiveCluster = Float64List(net._n * b),
       _predNode = net._predNode,
       _predStep = net._predStep,
       _updNode = net._updNode,
@@ -155,7 +159,11 @@ final class BatchNetwork {
       _volatilityPredictionError,
       _nus,
       _klDivergence,
-      _surprise;
+      _surprise,
+      _dpAlpha,
+      _sensoryPrecision,
+      _nTotal,
+      _nActiveCluster;
 
   final Int32List _predNode, _updNode;
   final Uint8List _predStep, _updStep;
@@ -244,6 +252,10 @@ final class BatchNetwork {
     NodeField.nus => _nus,
     NodeField.klDivergence => _klDivergence,
     NodeField.surprise => _surprise,
+    NodeField.alpha => _dpAlpha,
+    NodeField.sensoryPrecision => _sensoryPrecision,
+    NodeField.nTotal => _nTotal,
+    NodeField.nActiveCluster => _nActiveCluster,
   };
 
   @pragma('vm:prefer-inline')

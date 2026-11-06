@@ -12,7 +12,7 @@
 ///       ../../tool/web/run_wasm.mjs /tmp/pm.wasm unbounded
 ///
 /// An optional first argument picks one mode (`standard`, `eHGF`,
-/// `unbounded`, `floor`, `response`, `record`, `ef`, `categorical`) and
+/// `unbounded`, `floor`, `response`, `record`, `ef`, `categorical`, `dp`) and
 /// runs it longer, which
 /// keeps the profile focused.
 library;
@@ -152,6 +152,35 @@ void main(List<String> args) {
         warmup: 5,
       );
       print('$label${nsPerTrial(ms)}');
+    }
+  }
+
+  if (only == null || only == 'dp') {
+    // A Dirichlet process node: per trial, the new-cluster candidate weighs
+    // 20000 proposals, 2k + 1 Gaussian densities each (k clusters).
+    final x = Float64List(300);
+    for (var t = 0; t < x.length; t++) {
+      // Three clusters, jittered by the series' increments.
+      final noise = (data[t + 1] - data[t]) * 400.0;
+      x[t] = const [-6.0, 0.5, 7.0][(t * 7 + t ~/ 5) % 3] + noise;
+    }
+    for (final (label, k) in [
+      ('dp, 3 clusters         ', 3),
+      ('dp, 10 clusters        ', 10),
+    ]) {
+      final net = Network()
+        ..addDpState(batchSize: k, alpha: 0.5)
+        ..addEfState(nNodes: k, valueChildren: [0], nus: 10.0)
+        ..build();
+      _checkFinite(net, x, label.trim());
+      final ms = medianMs(
+        () => net.inputData(x, record: false),
+        repeat: only == null ? 7 : 40,
+        warmup: 2,
+      );
+      print(
+        '$label${(ms * 1e3 / x.length).toStringAsFixed(1).padLeft(9)} us/trial',
+      );
     }
   }
 

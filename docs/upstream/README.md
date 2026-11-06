@@ -24,13 +24,16 @@ Checked against pyhgf `6be12eb4` (0.3.2) and Dart 3.13.7.
 | [P4](#p4) | pyhgf JAX | a parent of two ef-state nodes crashes the scheduler | medium: crash | [ ] |
 | [P5](#p5) | pyhgf JAX | `add_ef_state` ignores `xis` | low | [ ] |
 | [P6](#p6) | pyhgf JAX | ν = ±∞ on missing observations (HGF learning) | low | [ ] |
-| [P7](#p7) | pyhgf JAX | stale `update_fn` in the posterior pass: a categorical node after a continuous one crashes | medium: crash | [ ] |
+| [P7](#p7) | pyhgf JAX | stale `update_fn` in the posterior pass: a categorical or dp-state node after a continuous one crashes | medium: crash | [ ] |
 | [P8](#p8) | pyhgf JAX vs rshgf | backends order independent predictions differently | cosmetic | [ ] |
 | [P9](#p9) | pyhgf | licence: MIT in `LICENSE`, GPL-3.0 in `pyproject.toml` | to settle | [ ] |
 | [P10](#p10) | pyhgf JAX | `categorical-state` with `n_nodes > 1` builds a broken graph | medium | [ ] |
 | [P11](#p11) | pyhgf JAX | `add_categorical_state` ignores `binary_parameters`; docstring says `3n + 2` nodes | low | [ ] |
 | [P12](#p12) | pyhgf JAX | categorical α = ±∞ on missing observations | low | [ ] |
 | [P13](#p13) | pyhgf JAX | `dirichlet_kullback_leibler` NaN once Σα > 171 (Γ overflows) | low | [ ] |
+| [P14](#p14) | pyhgf JAX | dp-state ignores `observed`: missing samples are clustered (NaN opens a NaN cluster) | medium | [ ] |
+| [P15](#p15) | pyhgf JAX | dp-state results depend on JAX's PRNG mode and precision; the tests pin the legacy mode | low | [ ] |
+| [P16](#p16) | pyhgf JAX | dp-state `batch_size` ≠ number of clusters fails inside the scan | low | [ ] |
 | [R1](#r1) | rshgf | ef-state ignores `observed`; univariate fixed rate only | medium | [ ] |
 | [R2](#r2) | rshgf | hot-path costs (string compares, allocations, clones) | perf | [ ] |
 | [D1](#d1) | dart2wasm | a typed-data view anywhere slows reads of non-view lists | perf, ~10% | [ ] |
@@ -180,13 +183,14 @@ before the categorical node), they inherit its
 `continuous_node_posterior_update`, which fails on the binary node's
 attributes. With the categorical node added first the pass reaches the
 binary nodes before any continuous one, and it works. The same would happen
-to any other node type with children (an ef-state node as a dp-state
-parent).
+to any other node type with children: the ef-state clusters of a dp-state
+node do (repro: [`pyhgf/dp_after_continuous.py`](pyhgf/dp_after_continuous.py),
+`KeyError 'expected_precision'`).
 **Fix:** reset `update_fn` per node and handle every node type explicitly.
 **hgf.dart:** only continuous nodes get posterior steps, so either order
-works; the `categorical_mixed` fixture uses the order pyhgf can run, and
-`categorical_test.dart` checks that a continuous HGF before the categorical
-node leaves the categorical part's trajectories bit-identical.
+works; the `categorical_mixed` and `dp_mixed` fixtures use the order pyhgf
+can run, and `categorical_test.dart` / `dp_state_test.dart` check that a
+continuous HGF before the node leaves its trajectories bit-identical.
 
 ### P8
 
@@ -272,6 +276,73 @@ confident prior on their value parents) get there. **Fix:** differences of
 `gammaln` (with `gammasgn` if negative α must give NaN as now).
 **hgf.dart:** computes it in log space with the sign of Γ, so it matches
 pyhgf wherever pyhgf is finite and stays finite here.
+
+### P14
+
+**A dp-state node clusters missing observations**
+(`pyhgf/updates/prediction_error/dirichlet.py`).
+Repro: [`pyhgf/dp_missing_observed.py`](pyhgf/dp_missing_observed.py)
+(trial 5 unobserved):
+
+```
+placeholder 0.0: n_total at trials 4-6 [5 6 7], n at trial 5 [6. 0. 0.], final expected_means [-2.58   3.775  0.   ]
+placeholder nan: n_total at trials 4-6 [5 6 7], n at trial 5 [5. 1. 0.], final expected_means [-2.934    nan    nan]
+```
+
+`dirichlet_node_prediction_error` never reads `observed`. An unobserved
+trial still picks or opens a cluster, counts in `n` and `n_total`, and the
+chosen cluster learns from the placeholder value. With NaN as the
+placeholder, the cluster likelihoods are NaN, a NaN cluster opens, and every
+later candidate is NaN too. **Fix:** on `observed == 0`, set the clusters'
+`observed` to 0 and leave everything else as it is (the patch in
+`tool/parity/gen_fixtures.py`, `_dp_prediction_error_skip_missing`).
+**hgf.dart:** skips missing observations that way; the `dp_missing`
+fixture comes from pyhgf JAX with that patch.
+
+### P15
+
+**dp-state results depend on JAX's PRNG mode and float precision**
+(`get_candidate`, `likely_cluster_proposal`).
+Repro: [`pyhgf/dp_prng_mode.py`](pyhgf/dp_prng_mode.py):
+
+```
+pyhgf's test_get_candidate expects mean 5.026636, sigma 1.2752448
+partitionable=True  x64=True  mean 5.051089  sigma 1.290296
+partitionable=True  x64=False mean 5.028831  sigma 1.329850
+partitionable=False x64=True  mean 5.024141  sigma 1.271072
+partitionable=False x64=False mean 5.026635  sigma 1.275245
+```
+
+The new-cluster candidate averages the best of 20000 proposals drawn from
+`random.key(42)`. Which numbers that key gives depends on
+`jax_threefry_partitionable` (True by default since JAX 0.5) and on
+`jax_enable_x64`, so the same network clusters differently across JAX
+versions and precisions. pyhgf's `tests/conftest.py` pins the legacy mode,
+so `test_get_candidate` checks values (float32, legacy) that users on a
+current JAX don't get. The proposals are also redrawn on every trial from
+the same key: 40000 threefry hashes and `erf_inv`s, and an argsort of 20000,
+for the same numbers each time. **Fix:** draw the proposals once (or from
+the network's `rng_key`, if they are meant to be random), and test against
+the default PRNG mode. **hgf.dart:** reproduces the default mode's float64
+draws (threefry and XLA's `erf_inv`, `lib/src/jax_random.dart`) to about
+1 ulp, once per process; the fixtures use the default mode.
+
+### P16
+
+**A dp-state node whose `batch_size` differs from its number of clusters
+fails inside the scan** (`add_dp_state`).
+Repro: [`pyhgf/dp_batch_size.py`](pyhgf/dp_batch_size.py):
+
+```
+batch_size=3, 3 clusters: ran
+batch_size=4, 3 clusters: TypeError mul got incompatible shapes for broadcasting: (3,), (4,).
+batch_size=None, 3 clusters: TypeError mul got incompatible shapes for broadcasting: (3,), (10,).
+```
+
+`batch_size` (default 10) sizes `n` and `activated`, but the prediction step
+replaces `expected_means` with one entry per ef-state parent. **Fix:** check
+the parent count when the network is built, or derive `batch_size` from it.
+**hgf.dart:** `build()` throws a `StateError` naming both counts.
 
 ## rshgf
 

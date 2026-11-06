@@ -48,6 +48,11 @@ from pyhgf.rshgf import Network as RsNetwork  # noqa: E402
 from pyhgf.updates.posterior.continuous import (  # noqa: E402
     posterior_update_precision_continuous_node as _precision_mod,
 )
+import pyhgf.utils.get_update_sequence  # noqa: E402,F401
+
+# The module (pyhgf.utils re-exports a function under the same name).
+_sequence_mod = sys.modules["pyhgf.utils.get_update_sequence"]
+from pyhgf.updates.prediction_error import dirichlet as _dirichlet_mod  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -67,15 +72,31 @@ FIELDS = (
     # categorical-state nodes
     "kl_divergence",
     "surprise",
+    # dp-state nodes
+    "alpha",
+    "sensory_precision",
+    "n_total",
+    "n_active_cluster",
 )
 
 # Vector-valued fields of ef-state and categorical-state nodes (``mean`` too
 # when the node is multivariate), written to the fixture's
 # ``vector_trajectories``.
-VECTOR_FIELDS = ("mean", "xis", "observation_ss", "alpha")
+VECTOR_FIELDS = (
+    "mean",
+    "xis",
+    "observation_ss",
+    "alpha",
+    # dp-state nodes
+    "n",
+    "expected_means",
+    "expected_sigmas",
+    "activated",
+)
 
-# pyhgf node types with vector-valued attributes (ef-state, categorical-state).
-VECTOR_NODE_TYPES = (3, 5)
+# pyhgf node types with vector-valued attributes (ef-state, dp-state,
+# categorical-state).
+VECTOR_NODE_TYPES = (3, 4, 5)
 
 JAX_COUPLING_FNS = {
     "tanh": jnp.tanh,
@@ -348,6 +369,45 @@ def categorical_mixed() -> dict:
     return spec
 
 
+def dp_state(
+    batch_size: int | None = 3,
+    alpha: float | None = 0.1,
+    sensory_precision: float | None = None,
+    nus: float | None = 15.0,
+) -> dict:
+    """A Dirichlet process node (node 0) and its clusters, one univariate
+    ef-state node each (nodes 1..batch_size), as in pyhgf's tests. ``None``
+    keeps pyhgf's default (batch_size 10, alpha 1, sensory precision 1,
+    nus 3)."""
+    params: dict = {}
+    if batch_size is not None:
+        params["batch_size"] = batch_size
+    if alpha is not None:
+        params["alpha"] = alpha
+    if sensory_precision is not None:
+        params["sensory_precision"] = sensory_precision
+    cluster: dict = {
+        "kind": "ef-state",
+        "n_nodes": batch_size or 10,
+        "value_children": [0],
+    }
+    if nus is not None:
+        cluster["params"] = {"nus": nus}
+    return {"network": {}, "nodes": [{"kind": "dp-state", "params": params}, cluster]}
+
+
+def dp_mixed() -> dict:
+    """A dp-state node with 3 clusters (nodes 0-3) followed by a continuous
+    2-level HGF (nodes 4-5). The other order crashes pyhgf: the clusters then
+    inherit the continuous parent's posterior update (upstream P7)."""
+    spec = dp_state()
+    spec["nodes"] += [
+        {"kind": "continuous-state", "params": {"precision": 1e4}},
+        {"kind": "continuous-state", "value_children": [4], "params": {"tonic_volatility": -6.0}},
+    ]
+    return spec
+
+
 # ---------------------------------------------------------------------------
 # Builders
 # ---------------------------------------------------------------------------
@@ -461,6 +521,50 @@ class _MgfCorrection:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Proposed upstream fix: dp-state nodes skip missing observations (P14)
+# ---------------------------------------------------------------------------
+#
+# pyhgf's `dirichlet_node_prediction_error` never reads the node's `observed`
+# flag, so a missing observation is clustered like any other. hgf.dart skips
+# it: no cluster observes it and no count changes. The fixtures with spec key
+# "dp_skip_missing" come from pyhgf's JAX backend with that change.
+
+
+def _dp_prediction_error_skip_missing(edges, attributes, node_idx, **args):
+    """``dirichlet_node_prediction_error``, or, when the node is unobserved,
+    only its clusters' ``observed = 0``."""
+    observed = attributes[node_idx]["observed"]
+    updated = _dirichlet_mod.dirichlet_node_prediction_error(
+        edges=edges, attributes=attributes, node_idx=node_idx
+    )
+    skipped = {k: dict(v) if isinstance(v, dict) else v for k, v in attributes.items()}
+    for parent_idx in edges[node_idx].value_parents:
+        skipped[parent_idx]["observed"] = jnp.zeros_like(updated[parent_idx]["observed"])
+    return jax.tree_util.tree_map(
+        lambda a, b: jnp.where(observed, a, b).astype(jnp.asarray(a).dtype), updated, skipped
+    )
+
+
+_dp_prediction_error_skip_missing.__name__ = "dirichlet_node_prediction_error"
+
+
+class _DpSkipMissing:
+    def __enter__(self):
+        self._orig = _sequence_mod.dirichlet_node_prediction_error
+        _sequence_mod.dirichlet_node_prediction_error = _dp_prediction_error_skip_missing
+        jax.clear_caches()
+
+    def __exit__(self, *exc):
+        _sequence_mod.dirichlet_node_prediction_error = self._orig
+        jax.clear_caches()
+        return False
+
+
+def _dp_skip_missing(spec: dict) -> bool:
+    return bool(spec["network"].get("dp_skip_missing", False))
+
+
 def _mgf_corrected(spec: dict) -> bool:
     return bool(spec["network"].get("ehgf_mgf_correction", False))
 
@@ -475,8 +579,8 @@ def rs_supported(spec: dict, observed=None) -> bool:
             # rshgf's ef-state has only the univariate fixed-rate update,
             # without missing observations.
             return False
-        if node["kind"] == "categorical-state":
-            return False  # no nodalised categorical node in rshgf
+        if node["kind"] in ("categorical-state", "dp-state"):
+            return False  # neither node kind exists in rshgf
         if node.get("coupling_fn", "linear") not in RS_COUPLING_FNS:
             return False
         for key in ("value_parents", "value_children", "volatility_parents", "volatility_children"):
@@ -649,6 +753,18 @@ def categories(n_trials: int, n_categories: int, seed: int = 7) -> np.ndarray:
         [rng.choice(n_categories, size=third, p=q) for q in probs]
     )[:n_trials]
     return np.eye(n_categories)[draws]
+
+
+def mixture(n_trials: int, seed: int = 11) -> np.ndarray:
+    """Draws from three well-separated normal clusters, in random order, with a
+    fourth appearing halfway through."""
+    rng = np.random.default_rng(seed)
+    centres = np.array([-6.0, 0.5, 7.0])
+    first = rng.choice(3, size=n_trials // 2)
+    second = rng.choice(4, size=n_trials - n_trials // 2)
+    centres4 = np.append(centres, 15.0)
+    x = np.concatenate([centres[first], centres4[second]])
+    return x + rng.normal(0.0, 1.0, size=n_trials)
 
 
 def missing_mask(n: int, n_inputs: int = 1) -> np.ndarray:
@@ -837,6 +953,42 @@ def scenarios() -> list[dict]:
             "observed": missing_mask(len(cat3)),
         }
     )
+    # Dirichlet process nodes (JAX only: rshgf has none).
+    xs = mixture(160)
+    out.append({"name": "dp_3_clusters", "spec": dp_state(), "inputs": xs})
+    out.append(
+        {"name": "dp_default", "spec": dp_state(None, None, None, None), "inputs": xs}
+    )
+    out.append(
+        # Two clusters and a high α: more clusters are opened than exist.
+        {"name": "dp_full", "spec": dp_state(2, 5.0), "inputs": xs[:60]}
+    )
+    out.append(
+        {
+            "name": "dp_sensory_precision",
+            "spec": dp_state(4, 0.5, sensory_precision=3.0, nus=8.0),
+            "inputs": xs,
+        }
+    )
+    dp_missing = dp_state(4, 0.5)
+    dp_missing["network"]["dp_skip_missing"] = True
+    mask = missing_mask(len(xs))
+    out.append(
+        {
+            "name": "dp_missing",
+            "spec": dp_missing,
+            # Missing values are NaN: pyhgf (unpatched) would open a NaN cluster.
+            "inputs": np.where(mask[:, 0] == 0.0, np.nan, xs),
+            "observed": mask,
+        }
+    )
+    out.append(
+        {
+            "name": "dp_mixed",
+            "spec": dp_mixed(),
+            "inputs": np.stack([xs, y[: len(xs)]], axis=1),
+        }
+    )
     out.append(
         {
             "name": "categorical_mixed",
@@ -877,6 +1029,9 @@ def run(scenario: dict, commit: str) -> dict:
     if _mgf_corrected(spec):
         with _MgfCorrection():
             jnet.input_data(**jax_kwargs)
+    elif _dp_skip_missing(spec):
+        with _DpSkipMissing():
+            jnet.input_data(**jax_kwargs)
     else:
         jnet.input_data(**jax_kwargs)
     reference, vector_reference = jax_trajectories(jnet)
@@ -888,6 +1043,8 @@ def run(scenario: dict, commit: str) -> dict:
         "reference": (
             "pyhgf JAX with the proposed eHGF MGF correction (not released pyhgf)"
             if _mgf_corrected(spec)
+            else "pyhgf JAX with dp-state nodes skipping missing observations (not released pyhgf)"
+            if _dp_skip_missing(spec)
             else "pyhgf JAX"
         ),
         "jax_x64": bool(jax.config.jax_enable_x64),
@@ -929,10 +1086,71 @@ def run(scenario: dict, commit: str) -> dict:
     return fixture
 
 
+DP_CANDIDATE_CASES = [
+    # value, sensory precision, cluster means, cluster sigmas
+    (5.0, 1.0, [0.0, -5.0], [1.0, 3.0]),  # pyhgf's own test
+    (0.0, 1.0, [0.0], [1.0]),
+    (-12.0, 2.0, [0.0, 3.0, 8.0], [1.0, 0.5, 2.0]),
+    (3.3, 0.5, [0.0] * 10, [1.0] * 10),  # pyhgf's defaults
+    (25.0, 1.0, [-1.0, 1.0], [0.7, 4.0]),
+    (1.2, 3.0, [1.0, 1.5, -2.0, 6.0], [0.3, 1.0, 1.0, 2.5]),
+]
+
+
+def dp_reference(commit: str) -> dict:
+    """pyhgf's fixed dp-state cluster proposals (every 50th, and the sums of
+    all 20000) and some ``get_candidate`` results, to check those parts of the
+    port on their own."""
+    from jax import random
+
+    mus, sigmas, _ = _dirichlet_mod.likely_cluster_proposal(
+        mean_mu_G0=0.0,
+        sigma_mu_G0=10.0,
+        sigma_pi_G0=3.0,
+        expected_mean=jnp.zeros(1),
+        expected_sigma=jnp.ones(1),
+        key=random.key(42),
+        n_samples=20_000,
+    )
+    mus, sigmas = np.asarray(mus), np.asarray(sigmas)
+    candidates = []
+    for value, precision, means, sds in DP_CANDIDATE_CASES:
+        mean, sigma = _dirichlet_mod.get_candidate(
+            value=value,
+            sensory_precision=precision,
+            expected_mean=jnp.asarray(means),
+            expected_sigma=jnp.asarray(sds),
+        )
+        candidates.append(
+            {
+                "value": value,
+                "sensory_precision": precision,
+                "expected_means": means,
+                "expected_sigmas": sds,
+                "mean": float(mean),
+                "sigma": float(sigma),
+            }
+        )
+    return {
+        "pyhgf_commit": commit,
+        "stride": 50,
+        "mu": _series(mus[::50]),
+        "sigma": _series(sigmas[::50]),
+        "mu_sum": float(mus.sum()),
+        "sigma_sum": float(sigmas.sum()),
+        "candidates": candidates,
+    }
+
+
 def main(argv: list[str]) -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     commit = pyhgf_commit()
     only = set(argv[1:])
+    if not only or "dp_reference" in only:
+        (OUT_DIR / "dp").mkdir(exist_ok=True)
+        path = OUT_DIR / "dp" / "dp_reference.json"
+        path.write_text(json.dumps(dp_reference(commit), separators=(",", ":"), allow_nan=False))
+        print(f"{'dp_reference':<42} (proposals and candidates)")
     for scenario in scenarios():
         if only and scenario["name"] not in only:
             continue

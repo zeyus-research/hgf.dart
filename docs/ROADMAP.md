@@ -5,12 +5,13 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-06, after W4, ef-state and categorical)
+## Where things stand (2026-11-06, after W4 and the vector node kinds)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
     nodes, the latter with fixed or HGF-implied (`hgf-1/2/3`) learning,
-    and categorical nodes (`categorical-state`);
+    categorical nodes (`categorical-state`) and Dirichlet process nodes
+    (`dp-state`);
   - standard, eHGF and unbounded volatility updates, relaxed or mean-field;
   - named and custom coupling functions, missing observations, irregular
     time steps;
@@ -20,9 +21,9 @@ supersedes its phase list.
     data, bit-identical to `Network` (W4);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
-- 414 tests pass. Parity with float64 pyhgf JAX holds to 1e-9 on 55 fixtures
-  (3 of them against a patched pyhgf, see `ehgfMgfCorrection`; 11 ef-state,
-  7 categorical),
+- 461 tests pass. Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+  (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
+  `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
   `BatchNetwork` matches `Network` bit for bit on all of them, on the same
   four targets.
@@ -191,7 +192,71 @@ major rewrite.** Concretely:
       Moving the vector-kind step codes (10–14) out of the inlined
       `_dispatch` into a never-inline `_dispatchVectorStep` recovered
       ~4 ns (→ 292). Wasm -O4: every mode within noise of the baseline.
-  - [ ] Dirichlet process (`dp-state`)
+  - [x] Dirichlet process (`dp-state`). Done 2026-11-06, following JAX
+        (rshgf has none). `Network.addDpState(batchSize, alpha,
+        sensoryPrecision)`, then the clusters with
+        `addEfState(nNodes: batchSize, valueChildren: [dp])`, as in pyhgf
+        (`NetworkSpec`: ef-state nodes take `value_children`). 6 fixtures:
+        3 clusters, pyhgf's defaults (10 clusters, α = 1), more openings
+        than clusters, sensory precision 3, missing observations (patched
+        JAX, [P14](upstream/README.md#p14)), and dp followed by a continuous
+        HGF.
+    - **Cluster proposals:** pyhgf's `get_candidate` weighs 20000 proposals
+      drawn from `random.key(42)` on every trial (the same draws each time).
+      `lib/src/jax_random.dart` ports JAX's threefry-2x32 (partitionable
+      mode, the default since JAX 0.5), `split`, and float64 `normal` with
+      XLA's `erf_inv` (Giles' polynomials, coefficients read off the
+      compiled HLO). The draws match JAX to ≤ 4 ulp, not bit for bit: XLA's
+      CPU backend fuses the Horner steps into FMAs and has its own `log1p`;
+      Dart has neither. Drawn once per process (`DpProposals.instance`).
+      pyhgf's own tests pin the legacy PRNG mode and expect float32 values
+      ([P15](upstream/README.md#p15)).
+    - **Store:** scalar `NodeField.alpha`, `sensoryPrecision`, `nTotal`,
+      `nActiveCluster`; `VectorField.n`, `expectedMeans`, `expectedSigmas`,
+      `activated`, one per cluster, sharing `_dpStart`. Clusters reuse the
+      ef-state store; the dp step writes their mean, `observed` and, for a
+      new cluster, `xis`. Openings past `batchSize` only count (pyhgf's
+      out-of-bounds writes are dropped).
+    - **Steps:** `predictionDp` (cluster means and sigmas from the parents'
+      `xis`) and `predictionErrorDp` (assignment), in
+      `_dispatchVectorStep`. As in pyhgf, an ef-state node without parents
+      takes its step on the first update pass even when it has children,
+      so the clusters run right after their dp node.
+    - **Differences from pyhgf:** missing observations are skipped (pyhgf
+      clusters them, and a NaN opens a NaN cluster: P14); a dp node may
+      follow a continuous one (pyhgf crashes: [P7](upstream/README.md#p7));
+      a cluster count other than `batchSize` fails at `build()` (pyhgf:
+      broadcasting error in the scan, [P16](upstream/README.md#p16)).
+      Clusters must be univariate with a fixed learning rate. `dp_state_test`
+      checks that a continuous HGF before the node, and a second dp node
+      after it, leave its trajectories bit-identical.
+    - **The W constraint held:** pyhgf switches branches on and off through
+      the clusters' `observed` flags, not by changing the schedule, so the
+      int-coded schedule and per-step dispatch needed no change.
+    - Not yet: `BatchNetwork` (rejects the step codes), `sample` (throws).
+    - **Cost** (`profile_modes.dart dp`, µs/trial, 300 trials):
+
+      | | 3 clusters | 10 clusters |
+      |---|---|---|
+      | pyhgf JAX f64 (`input_data`) | 3820 | 4447 |
+      | hgf.dart AOT | 1281 | 1466 |
+      | hgf.dart Wasm -O4 | 1827 | 2365 |
+
+      A straight port took 2625 / 6128 µs on AOT. What brought it down:
+      each cluster's two rows of 20000 densities are cached, keyed on its
+      (mean, sigma), so only the cluster that learned is recomputed (same
+      sums in the same order, so the same result); the four min-max passes
+      became one (`max(v − min) = max − min` under monotonic rounding);
+      the top-1000 quickselect runs on the ~1600 weights above a cutoff from
+      a stride sample, exact because everything at or above the 1000th
+      largest passes it (375 → 125 µs); `/ −2` became `· −0.5`. What is left
+      is about 3 exps and 4 divisions per proposal per trial. 320 KB of
+      cache per cluster.
+    - **Regression check (A/B against HEAD, pinned core):** AOT recording
+      ~6% faster, unbounded and categorical within noise; standard, eHGF,
+      2-node and ef d=3 3–6% slower but with 3–5% *fewer* instructions and
+      fewer branch misses (code layout again, as with categorical). Wasm
+      -O4: every mode within noise.
 
   These need vector-valued attributes (`xis`, `alpha`, cluster means, ...):
   one side store per vector field (offsets per node, as CSR), recorded in
@@ -468,8 +533,8 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
   - [ ] [P6](upstream/README.md#p6) ν = ±∞ on missing observations with HGF
         learning.
   - [ ] [P7](upstream/README.md#p7) stale `update_fn` in the posterior pass:
-        a categorical node after a continuous one crashes (reproduced
-        2026-11-06; recheck with dp-state's ef parents).
+        a categorical or dp-state node after a continuous one crashes (both
+        reproduced 2026-11-06).
   - [ ] [P8](upstream/README.md#p8) JAX and rshgf order independent
         predictions differently (cosmetic).
   - [ ] [P9](upstream/README.md#p9) licence: MIT vs GPL-3.0.
@@ -481,6 +546,14 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
         observations.
   - [ ] [P13](upstream/README.md#p13) `dirichlet_kullback_leibler` NaN once
         Σα > 171 (Γ overflows).
+  - [ ] [P14](upstream/README.md#p14) dp-state ignores `observed`: missing
+        samples are clustered, a NaN one opens a NaN cluster. Fix ready
+        (`gen_fixtures.py`); hgf.dart skips them.
+  - [ ] [P15](upstream/README.md#p15) dp-state results depend on JAX's PRNG
+        mode and precision; pyhgf's tests pin the legacy mode and expect
+        float32 values. Proposals are redrawn every trial from the same key.
+  - [ ] [P16](upstream/README.md#p16) dp-state `batch_size` ≠ number of
+        clusters fails inside the scan (also with the default 10).
 - **rshgf**
   - [ ] [R1](upstream/README.md#r1) ef-state ignores `observed`; univariate
         fixed rate only.
@@ -522,15 +595,11 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
 ## Starting a new session
 
 Phase W is done apart from the optional SIMD variant and W5 (both AOT
-only). Phase 4: ef-state (2026-11-05) and categorical-state (2026-11-06)
-are done. Next: **dp-state**, which reads ef parents' `xis` and needs ef
-nodes with value children (a spec ef node can't declare edges yet), and
-changes which branches are active at run time (see the W constraints). It
-reuses the vector side store; its steps go in `_dispatchVectorStep`, out of
-the inlined hot switch. Watch for [P7](upstream/README.md#p7): pyhgf's
-stale `update_fn` will hit ef parents with children too. New node kinds
-need a batched kernel too (or `BatchNetwork` rejects them; see the W4
-notes).
+only). Phase 4's node kinds are all done: ef-state (2026-11-05),
+categorical-state and dp-state (2026-11-06). Left in Phase 4: per-child
+coupling functions (only if needed), and batched kernels / `sample` for the
+vector kinds (`BatchNetwork` rejects them). Next: **Phase 5, the Flutter
+playground**, which the user treats Phase 4 as groundwork for.
 
 ```sh
 cd hgf.dart

@@ -51,6 +51,10 @@ final class NetworkSpec {
         _addCategoricalState(network, node);
         continue;
       }
+      if (node['kind'] == NodeKind.dpState.pyhgfName) {
+        _addDpState(network, node);
+        continue;
+      }
       final params = <NodeField, double>{
         for (final e
             in ((node['params'] as Map<String, Object?>?) ?? const {}).entries)
@@ -81,11 +85,11 @@ final class NetworkSpec {
   /// An ef-state node takes pyhgf's `add_nodes(kind="ef-state", ...)`
   /// parameters: `dimension`, `distribution` (`"normal"` or
   /// `"multivariate-normal"`), `learning` and `nus`; the implied continuous
-  /// nodes of HGF learning are added as in pyhgf.
+  /// nodes of HGF learning are added as in pyhgf. `value_children` makes
+  /// them the clusters of a dp-state node.
   static void _addEfState(Network network, Map<String, Object?> node) {
     for (final key in const [
       'value_parents',
-      'value_children',
       'volatility_parents',
       'volatility_children',
       'coupling_fn',
@@ -119,7 +123,14 @@ final class NetworkSpec {
       default:
         throw FormatException('Unknown ef-state distribution "$distribution"');
     }
+    final vc = _edge(node['value_children']);
+    if (vc?.$2 != null) {
+      throw const FormatException(
+        'ef-state value children take no coupling strengths',
+      );
+    }
     network.addEfState(
+      valueChildren: vc?.$1,
       nNodes: (node['n_nodes'] as int?) ?? 1,
       dimension: dimension,
       learning: EfLearning.parse(
@@ -190,6 +201,41 @@ final class NetworkSpec {
       volatilityMean: p('mean_3') ?? 0.0,
       volatilityPrecision: p('precision_3') ?? 1.0,
       volatilityTonicVolatility: p('tonic_volatility_3') ?? -4.0,
+    );
+  }
+
+  /// A dp-state node takes pyhgf's `batch_size` (default 10), `alpha`
+  /// (1.0) and `sensory_precision` (1.0); its clusters follow as ef-state
+  /// nodes with `value_children` pointing at it. `n_nodes` must be 1.
+  static void _addDpState(Network network, Map<String, Object?> node) {
+    for (final key in const [
+      'value_parents',
+      'value_children',
+      'volatility_parents',
+      'volatility_children',
+      'coupling_fn',
+    ]) {
+      if (node[key] != null) {
+        throw FormatException(
+          'dp-state nodes take no "$key" (list their clusters as ef-state '
+          'nodes with "value_children")',
+        );
+      }
+    }
+    if (((node['n_nodes'] as int?) ?? 1) != 1) {
+      throw const FormatException('dp-state nodes take no "n_nodes"');
+    }
+    final params = (node['params'] as Map<String, Object?>?) ?? const {};
+    for (final key in params.keys) {
+      if (!const {'batch_size', 'alpha', 'sensory_precision'}.contains(key)) {
+        throw FormatException('Unknown dp-state parameter "$key"');
+      }
+    }
+    network.addDpState(
+      batchSize: (params['batch_size'] as int?) ?? 10,
+      alpha: (params['alpha'] as num?)?.toDouble() ?? 1.0,
+      sensoryPrecision:
+          (params['sensory_precision'] as num?)?.toDouble() ?? 1.0,
     );
   }
 
