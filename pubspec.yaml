@@ -9,6 +9,7 @@ environment:
 workspace:
   - packages/hgf
   - packages/hgf_fit
+  - packages/hgf_gpu
   - packages/hgf_widgets
   - apps/hgf_playground
 
@@ -94,6 +95,19 @@ melos:
       packageFilters:
         fileExists: tool/parity_check.dart
       description: Run the parity suite on a dart2wasm -O4 (release) build under Node.
+    test:gpu:
+      # Native: wgpu-native through dart:ffi (skips without the library).
+      # Web: Chromium's WebGPU, on SwiftShader (dart test passes --disable-gpu).
+      exec:
+        command: >-
+          dart test --tags gpu test/native_parity_test.dart 2>&1 &&
+          dart test -p chrome-gpu -c dart2wasm --tags gpu 2>&1
+        concurrency: 1
+      packageFilters:
+        fileExists: test/gpu_parity_test.dart
+      description: >-
+        The GPU kernels (f32) against the f64 engine on every parity fixture,
+        on wgpu-native and on Chromium's WebGPU.
     test:flutter:
       exec:
         command: flutter test --exclude-tags performance
@@ -197,6 +211,31 @@ melos:
         FitWorkers on Web Workers against the page's main thread in headless
         Chromium (dart2wasm -O4 and dart2js -O2): bench:parallel's jobs.
         Takes about 10 minutes.
+    bench:gpu-web:
+      # Headless Chromium with WebGPU on Vulkan (the machine's GPU).
+      exec:
+        command: >-
+          mkdir -p .dart_tool/gpu_web &&
+          command cp -f benchmark/web/index.html ../hgf/benchmark/data/inputs.json .dart_tool/gpu_web/ &&
+          dart compile wasm -O4 benchmark/web/gpu_bench.dart -o .dart_tool/gpu_web/bench.wasm &&
+          uv run --with playwright python -I tool/gpu_bench.py .dart_tool/gpu_web
+        concurrency: 1
+      packageFilters:
+        fileExists: tool/gpu_bench.py
+      description: >-
+        Phase 7 probe on WebGPU (dart2wasm -O4 page): f32 accuracy against
+        BatchNetwork, then time against batch size, as JSON lines.
+    bench:gpu-native:
+      exec:
+        command: >-
+          dart compile exe benchmark/bin/gpu_native.dart -o .dart_tool/gpu_native &&
+          .dart_tool/gpu_native
+        concurrency: 1
+      packageFilters:
+        fileExists: benchmark/bin/gpu_native.dart
+      description: >-
+        Phase 7 probe on wgpu-native (AOT, dart:ffi); needs libwgpu_native
+        (installed, or tool/fetch_wgpu.sh + WGPU_LIB).
     bench:
       run: dart run tool/bench_compare.dart --rust
       description: >-

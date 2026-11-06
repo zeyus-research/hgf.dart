@@ -1,0 +1,18 @@
+# dart run ffigen --config ffigen.yaml
+name: WgpuBindings
+description: FFI bindings for webgpu.h and wgpu.h (wgpu-native v29.0.1.1).
+output: lib/src/native/wgpu_bindings.g.dart
+headers:
+  entry-points:
+    - third_party/webgpu/webgpu.h
+    - third_party/webgpu/wgpu.h
+  include-directives:
+    - third_party/webgpu/webgpu.h
+    - third_party/webgpu/wgpu.h
+compiler-opts:
+  - -Ithird_party
+preamble: |
+  // ignore_for_file: type=lint, unused_field, unused_element
+comments:
+  style: any
+  length: brief

@@ -1,0 +1,20 @@
+tags:
+  # WebGPU in the browser (test/gpu_parity_test.dart).
+  gpu:
+    timeout: 4x
+
+define_platforms:
+  # Chromium with WebGPU: `dart test -p chrome-gpu -c dart2wasm --tags gpu`.
+  # On Linux WebGPU needs Vulkan; machines without a GPU (CI) fall back to
+  # SwiftShader.
+  chrome-gpu:
+    name: Chromium (WebGPU)
+    extends: chrome
+    settings:
+      executable:
+        linux: chromium
+        mac_os: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+        windows: Google\Chrome\Application\chrome.exe
+      arguments: >-
+        --enable-unsafe-webgpu --enable-features=Vulkan
+        --use-angle=vulkan --ignore-gpu-blocklist --enable-unsafe-swiftshader

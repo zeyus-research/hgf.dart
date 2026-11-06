@@ -1,0 +1,9 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>hgf_gpu WebGPU probe</title>
+<script type="module">
+  globalThis.hgfResults = [];
+  const loader = await import('./bench.mjs');
+  const app = await (await loader.compileStreaming(fetch('bench.wasm'))).instantiate({});
+  app.invokeMain();
+</script>

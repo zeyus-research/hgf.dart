@@ -60,6 +60,17 @@ supersedes its phase list.
   (MAP + Laplace in ~50–80 ms, NUTS in 11–18 s on 4 Wasm workers, 60 fps
   throughout).
 
+- `packages/hgf_gpu` (Phase 7 probe, 2026-11-07): **GPU is a go.**
+  `HgfKernel` compiles a `Network` into a WGSL compute shader (one GPU
+  thread per parameter set), and `GpuBatch` runs it on WebGPU in the
+  browser or on wgpu-native through `dart:ffi`, from the same host code.
+  For 1000 parameter sets × 1000 trials, the end-to-end time is 2.2 ms
+  (native) or 2.7–4 ms (browser) on an RX 7600 XT for the 2-level unbounded
+  HGF. That is 28× / 15–23× faster than `BatchNetwork` on 8 AOT isolates,
+  and 17× / 9–14× faster than JAX float32 `vmap`. At 10⁶ parameter sets it takes
+  40–115 ms. Accuracy is f32: the GPU matches f64 to ~1e-6, which is how
+  close pyhgf's own float32 mode gets. See Phase 7.
+
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
   parity build. `pages.yml` deploys the playground (Wasm `-O4`, JS
@@ -962,20 +973,169 @@ First part done 2026-11-06: MAP estimation.
   - responses in the same CSV as the observations (a second column);
   - hierarchical fits in the playground (several simulated agents).
 
-### Phase 7: GPU probe (go/no-go)
+### Phase 7: GPU probe (go/no-go): **go** (2026-11-07)
 
-- [ ] **First target: the batched filter, not deep networks.** One GPU
-      thread per parameter set, in a WGSL compute shader (f32). It is
-      embarrassingly parallel, matches W4's layout, and is where JAX
-      currently wins.
-- [ ] Routes:
-  - WebGPU via `dart:js_interop` (Wasm/web builds);
-  - Flutter GPU (check compute shader support at the time);
-  - a native WebGPU (Dawn/wgpu) FFI binding for desktop.
-- [ ] Then one vectorised layer step (`src/vectorised/layer.rs`) with a
-      `Float32List` CPU baseline.
-- [ ] Record platform coverage, upload/readback overhead, and the batch size
-      at which the GPU starts to beat the CPU.
+`packages/hgf_gpu`. Commands: `melos run test:gpu`, `melos run
+bench:gpu-web`, `melos run bench:gpu-native`, and
+`tool/parity/gpu_f32_reference.py` for JAX f32 against f64.
+
+**Design: codegen, not an interpreter.** `HgfKernel(network)` turns the
+compiled network into WGSL, a little like XLA does for JAX:
+- the update schedule and every edge are unrolled;
+- each GPU thread is one batch element and keeps that element's whole
+  state in registers while it loops over trials;
+- the arithmetic is `BatchNetwork`'s, step for step, in f32.
+
+Every per-element quantity sits in one `[slot][element]` storage buffer:
+node fields, ω, drift, λ, coupling strengths, and the running response
+total (a Kahan sum). Any of them can vary per element without
+recompiling.
+
+A dispatch loads only the slots that carry over between trials, which a
+liveness pass at codegen time finds. It stores those slots plus the
+beliefs a caller reads back. A series can therefore be split across
+dispatches, which keeps each one under the browser's GPU watchdog.
+
+`GpuBatch` keeps the initial state on the GPU and resets it with a
+GPU-to-GPU copy on each call. Between calls, only the slots changed with
+`setInitial` and friends cross the bus. One `GpuBackend` interface has two
+implementations:
+- `WebGpuBackend`: hand-written `dart:js_interop` bindings, because
+  package:web 1.1's `webgpu.dart` only has the flag constants;
+- `WgpuBackend`: ffigen bindings of `webgpu.h` and `wgpu.h`, wgpu-native
+  v29.0.1.1, vendored under `third_party/webgpu`.
+
+Supported now:
+- continuous, binary and constant nodes;
+- standard, eHGF (with the MGF option) and unbounded updates, relaxed or
+  mean-field;
+- every named coupling function;
+- missing observations, per-trial time steps, shared or per-element data;
+- `TotalGaussianSurprise` and `FirstLevelBinarySurprise`.
+
+Not yet: ef-state, categorical, dp-state, custom couplings (Dart closures),
+and tangents.
+
+**Results (RX 7600 XT, RADV / Mesa 26.2.6, Chromium 156, i7-7700).**
+These are end-to-end times, including the upload of new ω values, the
+dispatch and the readback. The CPU comparisons are from
+`docs/benchmark_results.md`: `BatchNetwork` on 8 AOT isolates 62 ms, JAX
+f64 `vmap` 133 ms, JAX f32 `vmap` 37.6 ms.
+
+| 1000 trials | B = 1 | B = 1000 | B = 64k | B = 10⁶ | ns / element-trial at 10⁶ |
+|---|--:|--:|--:|--:|--:|
+| 2-level unbounded, native | 1.8 ms | **2.2 ms** | 9.1 ms | 70 ms | 0.07 |
+| 2-level unbounded, browser (Wasm) | 2.9–3.9 ms | **2.7–4.0 ms** | 11 ms | 100 ms | 0.10 |
+| 3-level unbounded, native | 3.4 ms | 3.8 ms | 15 ms | 115 ms | 0.12 |
+| 2-level standard, native | 0.9 ms | 1.0 ms | 3.6 ms | 42 ms | 0.04 |
+| binary 3-level eHGF, native | 0.3 ms | 0.4 ms | 2.5 ms | 42 ms | 0.04 |
+
+Browser times vary between runs by about one fence-polling interval
+(2.7–4.0 ms at small B).
+
+- **Latency, not throughput, is the GPU's limit on small jobs.** One GPU
+  thread runs one series at ~1.6 µs per trial (2-level unbounded). That is
+  slower than one CPU core, so a single filter belongs on the CPU. The GPU
+  catches up with one AOT core at about 6 parameter sets, and with 8 AOT
+  isolates at about 30.
+- **Browser fixed cost: ~2.5 ms per call.** It is one round trip to the GPU
+  process, and it looks quantised by Chromium's fence polling. Waiting
+  with `onSubmittedWorkDone` and then mapping cost two round trips, so now
+  only the map is awaited. Native has no such floor (0.3 ms).
+- **dart2wasm pitfall:** `toJS` on Dart typed data copies element by
+  element (~80 ns per byte here, so 228 ms for 2.8 MB). Host arrays that
+  get uploaded are JS-backed (`JSFloat32Array.withLength(n).toDart`), which
+  makes the upload free. Readback copies with a JS `slice()` before
+  `unmap`.
+- **WGSL pitfalls:**
+  - Tint rejects any infinite or out-of-range `f32` constant, even
+    `bitcast<f32>(0x7f800000u)` and `3.40282347e38f`; naga accepts them.
+    Non-finite results are flagged per element and reported through a
+    3.4e38 sentinel.
+  - WGSL doesn't guarantee NaN/∞ semantics, so finiteness is tested on
+    the bits.
+  - `log(1)` isn't exactly 0, so `logT` is selected.
+
+**Accuracy (f32).** Totals for 1000 ω × 1000 trials against the f64
+engine. pyhgf's own float32 mode (JAX's default) on the same problems is
+the yardstick:
+
+| scenario | GPU f32 vs f64: median / max rel | JAX f32 vs f64: median / max rel |
+|---|--:|--:|
+| 2-level standard | 3.3e-7 / 1.1e-6 | 8.9e-8 / 4.0e-7 |
+| 2-level eHGF | 1.1e-6 / 5.3e-6 | 1.8e-6 / 1.0e-5 |
+| 2-level unbounded | 9.6e-8 / 3.3e-7 | 6.9e-8 / 1.6e-7 |
+| 3-level unbounded | 6.9e-7 / 2.0e-6 | 6.0e-7 / 8.0e-7 |
+| binary 3-level standard | same 509 ∞, same 3 flips, max 0.012 | same |
+
+Results by fixture:
+- **All 31 parity fixtures with a GPU kernel are checked** on the GPU
+  (wgpu-native) and on SwiftShader, 5 perturbed parameter sets each.
+- **25 of them** stay within 1e-6 (tolerance 1e-5, because 1e-6 fails
+  intermittently).
+- **`continuous_3level_eHGF`** is non-finite in both f64 and f32, which is
+  the known divergence (P1).
+- **The other 5 can't be tracked in f32 by pyhgf either:**
+  - `constant_bias_eHGF` and `unbounded_overflow` reach variances of
+    1e250 / 1e-307 in f64, where JAX f32 returns ∞;
+  - `continuous_2level_eHGF` is chaotic;
+  - three binary fixtures run close to a runaway, and JAX f32 is 5e-4 to
+    9e-3 off on them.
+
+The argmin over the ω grid is the same, or within 1–4 grid steps where
+the optimum is flat. That is the same behaviour as JAX f32.
+
+**Routes:**
+- WebGPU in the browser works (Chromium on Linux needs
+  `--enable-unsafe-webgpu` and Vulkan; Firefox/Zen works too).
+- wgpu-native works on desktop (Vulkan; Metal and D3D12 are the same
+  code).
+- Flutter GPU (3.47.9) has render pipelines only, no compute, so it is no
+  route yet. The other routes can serve Flutter: WebGPU in Flutter web,
+  wgpu-native through FFI on desktop and mobile.
+
+**What this changes in the design:**
+- **f32 is the GPU's precision.** WebGPU has no f64. Vulkan has f64, but
+  mobile and Metal don't, and pyhgf's float32 default and rshgf's f32
+  vectorised backend set the same bar. The f64 CPU engine stays the
+  reference and the parity target. GPU results are "pyhgf-f32 accurate".
+- **The kernel boundary is the batched pass.** hgf_fit's drivers already
+  yield `Pass`es, so a GPU transport that evaluates passes on `GpuBatch`
+  slots in next to the isolate and Web Worker pools.
+  - To make that useful for gradient-based fitting, the codegen needs
+    forward-mode tangents. That is mechanical given the unrolled code: an
+    expression IR with JVP rules, mirroring `batch_tangents.dart`.
+  - Until then, central differences cost only 2k+1 elements per subject,
+    which the GPU absorbs. In f32, though, finite differences are only
+    good to ~1e-3.
+- **Grids and populations become cheap.** Exhaustive grid posteriors,
+  large hierarchical models, and simulation-based calibration or
+  parameter recovery over 10⁵–10⁶ simulated agents now take
+  milliseconds.
+
+**Next steps (Phase 7 follow-up):**
+- [ ] HGF neural networks: port rshgf's vectorised backend
+  (`src/vectorised/`, about 3.4k lines, f32 by default). It is per-layer
+  matrix–vector products (GEMM over samples), elementwise volatile-node
+  updates and rank-1 weight updates, which is GPU-shaped by construction.
+  First a `Float32List` CPU baseline in Dart, then WGSL (tiled GEMM plus
+  elementwise kernels).
+- [ ] Tangents in the codegen (exact gradients on the GPU), then a GPU
+  `Pass` transport in hgf_fit (MAP, NUTS with many chains, hierarchical).
+- [ ] Response models with response data (`BinarySoftmax`,
+  `GaussianResponse`), and per-trial surprise output.
+- [ ] Vector node kinds on the GPU (ef-state first). dp-state's
+  data-dependent branching is the hard one.
+- [ ] Platform coverage still to measure:
+  - Intel and Apple GPUs, and Android (Vulkan) and iOS (Metal) through
+    wgpu-native;
+  - Firefox and Safari WebGPU.
+- [ ] CI: run `test/gpu_parity_test.dart` on SwiftShader. The
+  `chrome-gpu` platform names `chromium`, but CI has Chrome through a
+  wrapper.
+- [ ] Tuning not tried yet: the workgroup size (64 is used), the memory
+  layout at very large B, and a kernel variant whose state is in
+  registers only, without a store between dispatches.
 
 ## Upstream issues
 
@@ -1079,7 +1239,9 @@ approximation, NUTS, exact gradients and hierarchical models
 (2026-11-06), and runs them on worker pools (`FitWorkers`: isolates, and
 Web Workers on the web, 2026-11-06). The playground has a fitting view on
 those workers (2026-11-07). See Phase 6's open items: next are batched
-kernels and tangents for the vector node kinds, or Phase 7.
+kernels and tangents for the vector node kinds. Phase 7's GPU probe is
+done and a go (2026-11-07, `packages/hgf_gpu`); its follow-ups (HGF neural
+networks, GPU tangents and a GPU transport for hgf_fit) are listed there.
 
 ```sh
 cd hgf.dart
