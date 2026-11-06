@@ -1,5 +1,24 @@
 ## Unreleased
 
+- Exact gradients: `BatchNetwork(tangents: k)` carries `k` forward-mode
+  tangents per element through every batched update (predictions,
+  prediction errors, standard / eHGF / unbounded posteriors, relaxed or
+  mean-field, linear or non-linear coupling), seeded with
+  `setInitialTangent`, `setValueCouplingTangent` and
+  `setVolatilityCouplingTangent`, read with `getTangent` / `readTangent`.
+  `surprise(..., gradient:)` returns the gradient of each element's total
+  surprise. Primal values stay bit-identical to a batch without tangents.
+  Directions no seed moves (e.g. a response parameter's) are skipped.
+  Checked against Richardson finite differences on every field of every
+  node of the 37 batchable fixtures (VM, dart2js, dart2wasm).
+- `ResponseFunction.batchSurprisePartials` / `supportsGradients` and
+  `SurprisePartials`: a response function reports `∂surprise/∂belief` for
+  the beliefs it reads; implemented by every built-in model.
+  `binarySurpriseDerivative`.
+- `Coupling.d3f` (g'''), needed for exact gradients through non-linear
+  value coupling; `CustomCoupling(d3g: ...)` (optional: central differences
+  of `d2g` otherwise).
+
 - `sigmoidInverseTemperature` computes `σ(β · logit x)` instead of
   `x^β / (x^β + (1 − x)^β)`: the same function (agrees to 1e-13 relative,
   same values at 0 and 1), about 3x faster, which makes

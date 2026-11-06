@@ -235,7 +235,8 @@ void main() {
   });
 
   group('BatchedObjective', () {
-    test('finite-difference gradients match a Richardson estimate', () {
+    test('exact and finite-difference gradients match a Richardson '
+        'estimate', () {
       final model = _binaryModel();
       final responses = model.simulate(
         [Subject(inputs: u)],
@@ -246,11 +247,20 @@ void main() {
       )[0];
       final subjects = [Subject(inputs: u, responses: responses)];
       final obj = BatchedObjective(model, subjects);
+      expect(model.hasExactGradients, isTrue);
+      expect(obj.gradients, Gradients.exact);
       final p = model.toUnconstrained([-4.0, 2.0]);
       final (_, grads) = obj.evaluate([0], [p], [true]);
       expect(obj.passes, 1);
-      expect(obj.elements, 5);
+      expect(obj.elements, 1);
       double f(Float64List y) => obj.evaluate([0], [y], [false]).$1[0];
+      final central = BatchedObjective(
+        model,
+        subjects,
+        gradients: Gradients.central,
+      );
+      final (_, cg) = central.evaluate([0], [p], [true]);
+      expect(central.elements, 5);
       for (var i = 0; i < 2; i++) {
         double d(double h) {
           final a = Float64List.fromList(p)..[i] += h;
@@ -259,14 +269,15 @@ void main() {
         }
 
         final rich = (4 * d(1e-3) - d(2e-3)) / 3;
-        expect(grads[0]![i], closeTo(rich, 1e-5 * (1 + rich.abs())));
+        expect(grads[0]![i], closeTo(rich, 1e-6 * (1 + rich.abs())));
+        expect(cg[0]![i], closeTo(rich, 1e-5 * (1 + rich.abs())));
       }
 
       // Forward differences: k + 1 elements, O(h) error.
       final fwd = BatchedObjective(
         model,
         subjects,
-        differences: Differences.forward,
+        gradients: Gradients.forward,
       );
       final (v, g) = fwd.evaluate([0, 0], [p, p], [true, false]);
       expect(fwd.elements, 4);

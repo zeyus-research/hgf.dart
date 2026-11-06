@@ -20,6 +20,13 @@ abstract class Prior {
   /// Log probability density at [x] (`-∞` outside the support).
   double logDensity(double x);
 
+  /// `d logDensity / dx` at [x] inside the support (for exact gradients).
+  /// The default takes central differences; the built-in priors are exact.
+  double dLogDensity(double x) {
+    final h = 1e-6 * (x.abs() > 1 ? x.abs() : 1.0);
+    return (logDensity(x + h) - logDensity(x - h)) / (2 * h);
+  }
+
   /// Lower end of the support (`-∞` if unbounded).
   double get lower => double.negativeInfinity;
 
@@ -51,6 +58,9 @@ final class Normal extends Prior {
     final z = (x - mean) / sd;
     return -0.5 * z * z - math.log(sd) - _logSqrt2Pi;
   }
+
+  @override
+  double dLogDensity(double x) => -(x - mean) / (sd * sd);
 
   @override
   double sample(math.Random rng) => mean + sd * standardNormal(rng);
@@ -96,6 +106,9 @@ final class TruncatedNormal extends Prior {
   }
 
   @override
+  double dLogDensity(double x) => -(x - mean) / (sd * sd);
+
+  @override
   double sample(math.Random rng) {
     for (var i = 0; i < 10000; i++) {
       final x = mean + sd * standardNormal(rng);
@@ -137,6 +150,9 @@ final class Uniform extends Prior {
       : double.negativeInfinity;
 
   @override
+  double dLogDensity(double x) => 0.0;
+
+  @override
   double sample(math.Random rng) => lower + (upper - lower) * rng.nextDouble();
 
   @override
@@ -161,6 +177,9 @@ final class HalfNormal extends Prior {
     final z = x / sd;
     return -0.5 * z * z - math.log(sd) - _logSqrt2Pi + math.ln2;
   }
+
+  @override
+  double dLogDensity(double x) => -x / (sd * sd);
 
   @override
   double sample(math.Random rng) => (sd * standardNormal(rng)).abs();
@@ -191,6 +210,10 @@ final class LogNormal extends Prior {
   }
 
   @override
+  double dLogDensity(double x) =>
+      -((math.log(x) - mu) / (sigma * sigma) + 1) / x;
+
+  @override
   double sample(math.Random rng) => math.exp(mu + sigma * standardNormal(rng));
 
   @override
@@ -218,6 +241,9 @@ final class GammaPrior extends Prior {
         (shape - 1) * math.log(x) -
         rate * x;
   }
+
+  @override
+  double dLogDensity(double x) => (shape - 1) / x - rate;
 
   /// Marsaglia–Tsang.
   @override
@@ -267,6 +293,9 @@ final class Flat extends Prior {
   @override
   double logDensity(double x) =>
       x >= lower && x <= upper ? 0.0 : double.negativeInfinity;
+
+  @override
+  double dLogDensity(double x) => 0.0;
 
   @override
   double sample(math.Random rng) {

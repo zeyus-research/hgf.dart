@@ -273,8 +273,9 @@ final class NutsFit {
   /// chain, plus starting points and step-size searches).
   final int passes;
 
-  /// Batch elements evaluated in total (`k + 1` per leapfrog step with
-  /// forward differences, `2k + 1` with central ones).
+  /// Batch elements evaluated in total (one per leapfrog step with exact
+  /// gradients, `k + 1` with forward differences, `2k + 1` with central
+  /// ones).
   final int elements;
 
   /// Divergent transitions over all subjects.
@@ -342,8 +343,8 @@ final class NutsFit {
 
 /// Posterior draws of [model]'s parameters for each of [subjects] by NUTS,
 /// [chains] chains per subject, all advanced in lock step: each batched pass
-/// evaluates one leapfrog step (point and finite-difference gradient) of
-/// every running chain of every subject.
+/// evaluates one leapfrog step (point and gradient) of every running chain
+/// of every subject.
 ///
 /// The target is the posterior density on the unconstrained scale (with the
 /// transforms' Jacobians). Chain `c` of subject `s` starts at `start[s]`
@@ -351,10 +352,11 @@ final class NutsFit {
 /// MAP estimates) moved by a uniform `±jitter` on the unconstrained scale,
 /// redrawn until the density is finite. [seed] makes runs reproducible.
 ///
-/// Gradients are forward differences by default (`k + 1` filters per
-/// leapfrog step): the sampler stays exact with any deterministic gradient
-/// approximation, so the cheaper scheme only changes how far a step size
-/// can stretch, and in practice not measurably.
+/// Gradients are exact where the model allows it
+/// (`HgfModel.hasExactGradients`), otherwise forward differences (`k + 1`
+/// filters per leapfrog step): the sampler stays exact with any
+/// deterministic gradient approximation, so a finite-difference gradient
+/// only changes how far a step size can stretch.
 NutsFit sampleNuts(
   HgfModel model,
   List<Subject> subjects, {
@@ -366,7 +368,7 @@ NutsFit sampleNuts(
   double jitter = 1,
   int seed = 0,
   double fdStep = 1e-5,
-  Differences differences = Differences.forward,
+  Gradients? gradients,
 }) {
   if (start != null && start.length != subjects.length) {
     throw ArgumentError('start must have one vector per subject');
@@ -377,7 +379,9 @@ NutsFit sampleNuts(
     subjects,
     fdStep: fdStep,
     jacobian: true,
-    differences: differences,
+    gradients:
+        gradients ??
+        (model.hasExactGradients ? Gradients.exact : Gradients.forward),
   );
   final k = model.dimension;
   final outs = <List<ChainOutput>>[];

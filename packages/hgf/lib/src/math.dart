@@ -166,6 +166,20 @@ double binarySurprise(double x, double expectedMean, {bool clipping = true}) {
   return x != 0.0 ? -math.log(m) : -math.log(1.0 - m);
 }
 
+/// `∂ binarySurprise(x, m) / ∂m`, with its clipping: zero where the clip is
+/// active.
+@pragma('vm:prefer-inline')
+@pragma('wasm:prefer-inline')
+double binarySurpriseDerivative(
+  double x,
+  double expectedMean, {
+  bool clipping = true,
+}) {
+  final m = expectedMean;
+  if (clipping && (m < 1e-6 || m > 1.0 - 1e-6)) return 0.0;
+  return x != 0.0 ? -1.0 / m : 1.0 / (1.0 - m);
+}
+
 /// Gaussian density at [x] as pyhgf defines it (`pyhgf.math.gaussian_density`):
 /// `π / √(2π) · exp(−π/2 (x − μ)²)`.
 ///

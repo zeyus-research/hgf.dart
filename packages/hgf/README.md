@@ -23,8 +23,8 @@ It is tested against pyhgf reference trajectories (float64 JAX and rshgf) to
   pyhgf's random cluster proposals are reproduced, so the clustering
   matches pyhgf's.
 - Non-linear value coupling: `linear`, `relu`, `sigmoid`, `tanh`,
-  `leaky_relu`, `gelu`, or your own `CustomCoupling` (g, g', g''), declared
-  on the parent.
+  `leaky_relu`, `gelu`, or your own `CustomCoupling` (g, g', g'', and
+  optionally g''' for exact gradients), declared on the parent.
 - Relaxed (rHGF) or mean-field value-coupling updates.
 - Standard, eHGF or unbounded (default) volatility updates.
 - Missing observations and irregular time steps.
@@ -42,6 +42,15 @@ It is tested against pyhgf reference trajectories (float64 JAX and rshgf) to
   predictive distribution; `saveState`/`restoreState` to draw several futures
   from the same beliefs.
 - `NetworkSpec`: JSON network descriptions.
+- `BatchNetwork`: many parameter sets (and series) filtered in lock step,
+  bit-identical to `Network`, for fitting and simulation. With
+  `tangents: k` it also carries forward-mode derivatives with respect to
+  `k` parameters (initial values, node parameters, coupling strengths)
+  through every update, so `surprise(..., gradient:)` returns exact
+  gradients of the negative log-likelihood. A response function only
+  reports its partial derivatives with respect to the beliefs it reads
+  (`batchSurprisePartials`); the built-in ones do. Checked against finite
+  differences on every batchable fixture, on the VM, dart2js and dart2wasm.
 
 ## Usage
 

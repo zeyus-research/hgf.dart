@@ -3,7 +3,8 @@
 /// Describe the model with an [HgfModel] (network, [ResponseModel], free
 /// [Parameter]s with [Prior]s), the data with [Subject]s, and fit with
 /// [fitMap]. Every subject is fitted at once: each optimiser step of every
-/// subject, with its finite-difference gradient, is one `BatchNetwork` pass.
+/// subject, with its exact gradient (forward-mode tangents through the
+/// filter), is one `BatchNetwork` pass.
 /// [laplace] adds the Laplace approximation around the estimates (standard
 /// errors, intervals, log evidence for model comparison) in one more pass.
 ///
@@ -37,7 +38,7 @@ export 'src/optim/optimizer.dart'
     show EvalRequest, OptimizeResult, Optimizer, ResultSlot, minimizeFunction;
 export 'src/parameter.dart';
 export 'src/prior.dart';
-export 'src/response_model.dart';
+export 'src/response_model.dart' hide bindResponsePartials;
 export 'src/sample/diagnostics.dart'
     show essBulk, essMean, essTail, mcseMean, quantileOf, rhat;
 export 'src/sample/nuts.dart';

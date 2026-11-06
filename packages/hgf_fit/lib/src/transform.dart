@@ -26,6 +26,20 @@ abstract class Transform {
 
   /// `log |dx/dy|` at `y`: the Jacobian term a density on `y` needs.
   double logAbsJacobian(double y);
+
+  /// `dx/dy` at `y` (for exact gradients). The default takes central
+  /// differences of [toConstrained]; the built-in transforms are exact.
+  double dToConstrained(double y) {
+    final h = 1e-6 * (y.abs() > 1 ? y.abs() : 1.0);
+    return (toConstrained(y + h) - toConstrained(y - h)) / (2 * h);
+  }
+
+  /// `d log |dx/dy| / dy` at `y`. The default takes central differences of
+  /// [logAbsJacobian]; the built-in transforms are exact.
+  double dLogAbsJacobian(double y) {
+    final h = 1e-6 * (y.abs() > 1 ? y.abs() : 1.0);
+    return (logAbsJacobian(y + h) - logAbsJacobian(y - h)) / (2 * h);
+  }
 }
 
 /// `y = x`.
@@ -40,6 +54,12 @@ final class IdentityTransform extends Transform {
 
   @override
   double logAbsJacobian(double y) => 0.0;
+
+  @override
+  double dToConstrained(double y) => 1.0;
+
+  @override
+  double dLogAbsJacobian(double y) => 0.0;
 }
 
 /// `y = log(x − lower)`.
@@ -56,6 +76,12 @@ final class LowerBoundTransform extends Transform {
 
   @override
   double logAbsJacobian(double y) => y;
+
+  @override
+  double dToConstrained(double y) => math.exp(y);
+
+  @override
+  double dLogAbsJacobian(double y) => 1.0;
 }
 
 /// `y = log(upper − x)`.
@@ -72,6 +98,12 @@ final class UpperBoundTransform extends Transform {
 
   @override
   double logAbsJacobian(double y) => y;
+
+  @override
+  double dToConstrained(double y) => -math.exp(y);
+
+  @override
+  double dLogAbsJacobian(double y) => 1.0;
 }
 
 /// `y = logit((x − lower) / (upper − lower))`.
@@ -96,4 +128,18 @@ final class IntervalTransform extends Transform {
   @override
   double logAbsJacobian(double y) =>
       math.log(upper - lower) - softplus(-y) - softplus(y);
+
+  /// `(upper − lower) σ(y) σ(−y)`.
+  @override
+  double dToConstrained(double y) {
+    final p = _sigmoid(y);
+    return (upper - lower) * p * (1 - p);
+  }
+
+  /// `σ(−y) − σ(y)`.
+  @override
+  double dLogAbsJacobian(double y) => 1 - 2 * _sigmoid(y);
 }
+
+double _sigmoid(double y) =>
+    y >= 0 ? 1 / (1 + math.exp(-y)) : math.exp(y) / (1 + math.exp(y));

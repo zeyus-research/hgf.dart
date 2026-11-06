@@ -1,7 +1,7 @@
 # hgf_fit
 
 Parameter estimation for [`hgf`](../hgf) networks: priors, response models,
-batched objectives with finite-difference gradients, MAP optimisers that
+batched objectives with exact gradients, MAP optimisers that
 fit many subjects in one batched pass, the Laplace approximation for
 uncertainty and model evidence, and full posteriors by NUTS.
 
@@ -54,10 +54,19 @@ File('draws.json').writeAsStringSync(post.toJson());  // for ArviZ
   `ResponseModel.fn`. Each also simulates responses (`HgfModel.simulate`),
   for parameter recovery.
 - **Batched evaluation.** `HgfModel.negLogPosterior` evaluates any number of
-  (subject, parameter vector) pairs in one `BatchNetwork` pass;
-  `BatchedObjective` adds central finite-difference gradients in the same pass
-  (`2k + 1` elements per gradient). Subjects with different series
-  lengths or time steps go into separate batches automatically.
+  (subject, parameter vector) pairs in one `BatchNetwork` pass, with exact
+  gradients: forward-mode tangents through every update of the filter (one
+  direction per parameter; `BatchNetwork.tangents` in `package:hgf`), plus
+  the priors' and transforms' derivatives. A parameter that only the
+  response model reads (β, a response precision) costs nothing in the
+  filter. A gradient costs one batch element instead of the `2k + 1` of
+  central differences, and is exact (checked against Richardson finite
+  differences in every update mode). Custom response models get exact
+  gradients by reporting their partial derivatives
+  (`ResponseModel.fn(surprisePartials:)`); without them, `BatchedObjective`
+  falls back to finite differences (`Gradients.central` / `forward`).
+  Subjects with different series lengths or time steps go into separate
+  batches automatically.
 - **Optimisers.** `Lbfgs` and `NelderMead` are written as generators that
   yield evaluation requests, so `fitMap` runs every subject's optimiser in
   lock step and answers all their requests with one pass. `restarts:` adds
@@ -76,11 +85,11 @@ File('draws.json').writeAsStringSync(post.toJson());  // for ArviZ
   trajectories, the generalised no-U-turn criterion, dual-averaging step
   size, windowed adaptation of a diagonal or dense metric). Every chain of
   every subject is a generator, like the optimisers, so each batched pass
-  is one leapfrog step of all of them. Gradients are forward differences
-  (`k + 1` filters per step): the leapfrog integrator is reversible and
-  volume preserving for any deterministic force, and the trajectory weights
-  use the exact density, so the chain targets the exact posterior whatever
-  the gradient error. `PosteriorDraws` gives summaries, rank-normalised
+  is one leapfrog step of all of them, with exact gradients (forward
+  differences where the model has none: the leapfrog integrator is
+  reversible and volume preserving for any deterministic force, and the
+  trajectory weights use the exact density, so the chain still targets the
+  exact posterior). `PosteriorDraws` gives summaries, rank-normalised
   split R̂, bulk and tail ESS, MCSE and E-BFMI (ArviZ's estimators, checked
   against arviz-stats to 1e-9), Stan-style CSV, and JSON that ArviZ's
   `from_dict` reads (`example/posterior_sampling.dart`). Posterior moments
@@ -95,10 +104,10 @@ pyhgf's parameter-recovery notebook (binary 2-level HGF, ω₂ and β per agent,
 (`tool/parity/fit_map_jax.py`: the notebook's log-probability `vmap`-ed over
 agents, exact gradients from `jax.value_and_grad`, SciPy's L-BFGS-B):
 
-| agents | hgf_fit L-BFGS | JAX f64 + L-BFGS-B | hgf_fit Nelder–Mead |
-|---|---|---|---|
-| 20 | 29 ms (15 passes) | 94 ms (51 grad calls) | 113 ms |
-| 200 | 292 ms (17 passes) | 1566 ms (126 grad calls) | 1115 ms |
+| agents | hgf_fit L-BFGS, exact gradients | (central differences) | JAX f64 + L-BFGS-B | hgf_fit Nelder–Mead |
+|---|---|---|---|---|
+| 20 | 13.7 ms (15 passes) | 29 ms | 94 ms (51 grad calls) | 113 ms |
+| 200 | 120 ms (17 passes) | 292 ms | 1566 ms (126 grad calls) | 1115 ms |
 
 Both evaluate the same objective: JAX's value at hgf_fit's estimates matches
 hgf_fit's to 3e-13. hgf_fit reaches an equal or lower objective for every
@@ -113,20 +122,39 @@ sample all agents as one 40-dimensional model, with the same priors):
 
 | | wall time | leapfrog steps / draw | bulk ESS min / median | ESS/s min / median |
 |---|---|---|---|---|
+| hgf_fit (per agent, exact gradients) | 43.7 s | 4.5 per agent | 1006 / 1878 | 23.0 / 43.0 |
 | hgf_fit (per agent, forward differences) | 64 s | 4.5 per agent | 830 / 1922 | 12.9 / 30.0 |
-| NumPyro (joint, exact gradients) | 147 s (+7.5 s compile) | 15 | 2718 / 5806 | 18.5 / 39.5 |
+| NumPyro (joint, exact gradients) | 145 s (+6.7 s compile) | 15 | 2718 / 5806 | 18.7 / 39.9 |
 | PyMC (joint, JAX op) | 214 s | 14.5 | 2798 / 5515 | 13.1 / 25.8 |
 
 The posterior means agree (rms z of the 40 differences, in combined Monte
-Carlo errors: 0.94 vs NumPyro, 1.10 vs PyMC; sds within 7%). hgf_fit is
-the fastest per draw, but the joint samplers get 3× the ESS per draw: their
-long 40-dimensional trajectories make draws antithetic (ESS above the number
-of draws), so per effective sample NumPyro is ~1.3× ahead and PyMC about
-level. Exact gradients (`k + 1` → about 2 filter-equivalents per step) or
-isolate-parallel passes would close that gap.
+Carlo errors: 0.98 vs NumPyro, 1.10 vs PyMC; sds within 7%). The joint
+samplers get 3× the ESS per draw (their long 40-dimensional trajectories
+make draws antithetic), but hgf_fit is 3.3× faster per draw, so with exact
+gradients it is ahead of NumPyro in ESS per second too (1.2× at the
+minimum, 1.08× at the median), on one core. Exact gradients made each
+leapfrog step 1.5× cheaper here: β is a response parameter, so the filter
+carries one tangent direction (ω₂).
+
+The cost of the tangents per element-trial, against a plain filter
+(`package:hgf`'s `benchmark/bin/tangent_cost.dart`, AOT, response
+included):
+
+| model | plain | 1 direction | 2 directions | forward differences, 2 parameters |
+|---|---|---|---|---|
+| binary 2-level | 65 ns | 125 ns | 155 ns | 195 ns |
+| continuous 3-level, standard | 133 ns | 321 ns | 401 ns | 398 ns |
+| continuous 3-level, eHGF | 158 ns | 344 ns | 432 ns | 473 ns |
+| continuous 3-level, unbounded | 314 ns | 613 ns | 764 ns | 942 ns |
+
+Each direction costs about as much as the primal update's arithmetic (the
+exps are shared), so exact gradients are about as fast as forward
+differences when every parameter is in the network, and faster when some
+are response parameters, or than the central differences MAP needs; their
+real gain there is exactness.
 
 ## Status
 
 Phase 6 of the [roadmap](../../docs/ROADMAP.md): MAP estimation, the
-Laplace approximation and NUTS work. Planned: hierarchical priors,
-isolate-parallel passes, and exact gradients.
+Laplace approximation, NUTS and exact gradients work. Planned: hierarchical
+priors and isolate-parallel passes.

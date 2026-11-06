@@ -9,6 +9,7 @@ import 'trajectories.dart';
 import 'types.dart';
 
 part 'batch/batch_network.dart';
+part 'batch/batch_tangents.dart';
 part 'batch/batch_updates.dart';
 part 'update_sequence.dart';
 part 'updates/categorical.dart';
@@ -43,6 +44,9 @@ const int _kindConstant = 2;
 const int _kindEf = 3;
 const int _kindCategorical = 4;
 const int _kindDp = 5;
+
+/// Number of fields carrying tangents (`BatchNetwork.tangentFields`).
+const int _kTangentFields = 12;
 
 /// `_couplingFn` code of a [CustomCoupling] (named ones use their index).
 const int _kCustomCoupling = 255;

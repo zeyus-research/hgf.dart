@@ -41,7 +41,9 @@ final class Subject {
 /// posterior `−log p(responses | x) − Σ log prior(xᵢ)`. Batched evaluation
 /// ([negLogPosterior]) runs many (subject, parameter) pairs through one
 /// `BatchNetwork` pass; the optimisers in `fitMap` use it to fit every
-/// subject at once and to take finite-difference gradients in the same pass.
+/// subject at once. Gradients are exact where the model allows it
+/// ([hasExactGradients]: forward-mode tangents through the filter, one
+/// direction per parameter), finite differences in the same pass otherwise.
 final class HgfModel {
   HgfModel({
     required Network network,
@@ -106,7 +108,24 @@ final class HgfModel {
 
   final List<String> _responseNames;
   final Float64List _responseDefaults;
-  final Map<int, BatchNetwork> _batches = {};
+  final Map<(int, bool), BatchNetwork> _batches = {};
+
+  /// Whether [negLogPosterior] can return exact gradients: the response
+  /// model supports tangents and every parameter targets something the
+  /// tangents reach (a field in `BatchNetwork.tangentFields`, a coupling
+  /// strength or a response parameter).
+  late final bool hasExactGradients =
+      response.supportsGradients &&
+      parameters.every(
+        (p) => p.targets.every(
+          (t) => switch (t) {
+            NodeTarget(:final field) => BatchNetwork.tangentFields.contains(
+              field,
+            ),
+            _ => true,
+          },
+        ),
+      );
 
   /// Number of free parameters.
   int get dimension => parameters.length;
@@ -164,6 +183,13 @@ final class HgfModel {
   /// `− Σ log |dxᵢ/dyᵢ|` (the density on the unconstrained scale, for
   /// samplers). Non-finite values become `+∞`. [negLogLikelihood], if given,
   /// receives the first term alone.
+  ///
+  /// With [gradient] (length `nE * dimension`, needs [hasExactGradients]),
+  /// `gradient[e * dimension + i]` receives the exact derivative of `out[e]`
+  /// with respect to `y[e * dimension + i]`, from forward-mode tangents
+  /// through the filter (NaN where `out[e]` is `+∞`). A pass with gradients
+  /// costs more per element than one without, but far less than the
+  /// `dimension + 1` elements of a finite-difference gradient.
   void negLogPosterior(
     List<Subject> subjects,
     Int32List subjectOf,
@@ -171,33 +197,55 @@ final class HgfModel {
     Float64List out, {
     bool jacobian = false,
     Float64List? negLogLikelihood,
+    Float64List? gradient,
   }) {
     final k = dimension, nE = subjectOf.length;
     if (y.length != nE * k) {
       throw ArgumentError('y must have ${nE * k} entries ($nE x $k)');
     }
     if (out.length != nE) throw ArgumentError('out must have $nE entries');
+    final exact = gradient != null;
+    if (exact) {
+      if (!hasExactGradients) {
+        throw UnsupportedError(
+          'This model has no exact gradients (see hasExactGradients)',
+        );
+      }
+      if (gradient.length != nE * k) {
+        throw ArgumentError('gradient must have ${nE * k} entries');
+      }
+    }
     final groups = _group(subjects, subjectOf);
     final x = Float64List(nE * k);
+    final dxdy = exact ? Float64List(nE * k) : null;
     for (var e = 0; e < nE; e++) {
       for (var i = 0; i < k; i++) {
-        x[e * k + i] = parameters[i].transform.toConstrained(y[e * k + i]);
+        final t = parameters[i].transform, yi = y[e * k + i];
+        x[e * k + i] = t.toConstrained(yi);
+        dxdy?[e * k + i] = t.dToConstrained(yi);
       }
     }
     for (final g in groups) {
       final b = g.elements.length;
-      final batch = _batch(b);
-      final params = _applyParameters(batch, g.elements, x);
+      final batch = _batch(b, tangents: exact);
+      final (params, paramTangents) = _applyParameters(
+        batch,
+        g.elements,
+        x,
+        dxdy,
+      );
       final (data, observed, perElement) = _data(subjects, subjectOf, g);
       final bound = _BoundResponse(response, params, _responseNames.length, [
         for (final e in g.elements) subjects[subjectOf[e]].responses,
-      ]);
+      ], paramTangents);
+      final grad = exact ? Float64List(b * k) : null;
       final totals = batch.surprise(
         data,
         bound,
         observed: observed,
         timeSteps: g.timeSteps,
         perElement: perElement,
+        gradient: grad,
       );
       for (var j = 0; j < b; j++) {
         final e = g.elements[j];
@@ -209,7 +257,15 @@ final class HgfModel {
           v -= p.prior.logDensity(x[e * k + i]);
           if (jacobian) v -= p.transform.logAbsJacobian(y[e * k + i]);
         }
-        out[e] = v.isNaN ? double.infinity : v;
+        final value = v.isNaN ? double.infinity : v;
+        out[e] = value;
+        if (!exact) continue;
+        for (var i = 0; i < k; i++) {
+          final p = parameters[i], ei = e * k + i;
+          var gi = grad![j * k + i] - p.prior.dLogDensity(x[ei]) * dxdy![ei];
+          if (jacobian) gi -= p.transform.dLogAbsJacobian(y[ei]);
+          gradient[ei] = value.isFinite ? gi : double.nan;
+        }
       }
     }
   }
@@ -245,7 +301,7 @@ final class HgfModel {
     for (final g in _group(subjects, subjectOf, needResponses: false)) {
       final b = g.elements.length;
       final batch = _batch(b);
-      final params = _applyParameters(batch, g.elements, flat);
+      final (params, _) = _applyParameters(batch, g.elements, flat);
       final (data, observed, perElement) = _data(subjects, subjectOf, g);
       final nIn = _nInputs, width = nIn * (perElement ? b : 1);
       final row = Float64List(width);
@@ -278,46 +334,93 @@ final class HgfModel {
 
   int get _nInputs => network.inputIdxs.length;
 
-  BatchNetwork _batch(int b) {
-    if (_batches.length > 16 && !_batches.containsKey(b)) _batches.clear();
-    return _batches[b] ??= BatchNetwork(network, b, blockSize: blockSize);
+  BatchNetwork _batch(int b, {bool tangents = false}) {
+    final key = (b, tangents);
+    if (_batches.length > 16 && !_batches.containsKey(key)) _batches.clear();
+    return _batches[key] ??= BatchNetwork(
+      network,
+      b,
+      blockSize: blockSize,
+      tangents: tangents ? dimension : 0,
+    );
   }
 
   /// Sets the batch's per-element node and coupling parameters from [x]
   /// (`x[e * dimension + i]` for the group's elements) and returns the
   /// response parameters, element-major.
-  Float64List _applyParameters(
+  ///
+  /// With [dxdy] (`dx/dy` per entry of [x]), the batch carries one tangent
+  /// direction per parameter, seeded with `dxᵢ/dyᵢ` on each of parameter
+  /// i's targets (and zero on the others, so a later parameter that sets the
+  /// same target replaces it, as it does the value); the response
+  /// parameters' tangents are returned too, `[(j * p + slot) * k + d]`.
+  (Float64List, Float64List?) _applyParameters(
     BatchNetwork batch,
     List<int> elements,
-    Float64List x,
-  ) {
+    Float64List x, [
+    Float64List? dxdy,
+  ]) {
     final b = elements.length, k = dimension, p = _responseNames.length;
     final params = Float64List(b * p);
     for (var j = 0; j < b; j++) {
       params.setRange(j * p, (j + 1) * p, _responseDefaults);
     }
+    final paramTangents = dxdy == null ? null : Float64List(b * p * k);
+    if (dxdy != null) batch.clearTangents();
     final values = Float64List(b);
+    final seed = Float64List(b), zero = Float64List(b);
     for (var i = 0; i < k; i++) {
       for (var j = 0; j < b; j++) {
         values[j] = x[elements[j] * k + i];
+        if (dxdy != null) seed[j] = dxdy[elements[j] * k + i];
       }
       for (final t in parameters[i].targets) {
         switch (t) {
           case NodeTarget(:final node, :final field):
             batch.setInitial(node, field, values);
+            if (dxdy != null) {
+              for (var d = 0; d < k; d++) {
+                batch.setInitialTangent(node, field, d, d == i ? seed : zero);
+              }
+            }
           case ValueCouplingTarget(:final parent, :final child):
             batch.setValueCoupling(parent, child, values);
+            if (dxdy != null) {
+              for (var d = 0; d < k; d++) {
+                batch.setValueCouplingTangent(
+                  parent,
+                  child,
+                  d,
+                  d == i ? seed : zero,
+                );
+              }
+            }
           case VolatilityCouplingTarget(:final parent, :final child):
             batch.setVolatilityCoupling(parent, child, values);
+            if (dxdy != null) {
+              for (var d = 0; d < k; d++) {
+                batch.setVolatilityCouplingTangent(
+                  parent,
+                  child,
+                  d,
+                  d == i ? seed : zero,
+                );
+              }
+            }
           case ResponseTarget(:final name):
             final slot = _responseNames.indexOf(name);
             for (var j = 0; j < b; j++) {
               params[j * p + slot] = values[j];
+              if (paramTangents != null) {
+                final o = (j * p + slot) * k;
+                paramTangents.fillRange(o, o + k, 0.0);
+                paramTangents[o + i] = seed[j];
+              }
             }
         }
       }
     }
-    return params;
+    return (params, paramTangents);
   }
 
   /// The group's observations: shared if every element filters the same
@@ -423,12 +526,51 @@ final class _Group {
 /// A [ResponseModel] bound to one batch: per-element parameters and
 /// responses.
 final class _BoundResponse extends ResponseFunction {
-  _BoundResponse(this.model, this.params, this.nParams, this.responses);
+  _BoundResponse(
+    this.model,
+    this.params,
+    this.nParams,
+    this.responses, [
+    this.paramTangents,
+  ]);
 
   final ResponseModel model;
   final Float64List params;
   final int nParams;
   final List<Float64List?> responses;
+  final Float64List? paramTangents;
+
+  ResponsePartials? _partials;
+
+  @override
+  bool get supportsGradients => model.supportsGradients;
+
+  @override
+  double batchSurprisePartials(
+    BatchNetwork network,
+    int t,
+    int element,
+    SurprisePartials partials,
+  ) {
+    final r = responses[element];
+    final offset = element * nParams;
+    final p = _partials = bindResponsePartials(
+      _partials,
+      paramTangents!,
+      partials,
+      offset,
+      network.tangents,
+    );
+    return model.surprisePartials(
+      network,
+      element,
+      t,
+      r == null ? double.nan : r[t],
+      params,
+      offset,
+      p,
+    );
+  }
 
   @override
   double surprise(Network network, int t) =>

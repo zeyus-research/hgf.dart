@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-06, after MAP, Laplace and NUTS)
+## Where things stand (2026-11-06, after MAP, Laplace, NUTS and exact gradients)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -21,7 +21,7 @@ supersedes its phase list.
     data, bit-identical to `Network` (W4);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
-- 463 engine tests pass (plus 69 fitting, 17 widget and 15 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+- 506 engine tests pass (plus 84 fitting, 17 widget and 15 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
   `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
@@ -43,8 +43,11 @@ supersedes its phase list.
   objective to 3e-13. `laplace` adds standard errors, intervals and the log
   evidence (within 0.01 nats of quadrature) in one more pass. `sampleNuts`
   draws full posteriors (Stan's NUTS, all chains of all subjects in lock
-  step); on the notebook's 20 agents it is 2.3× faster than NumPyro in
-  wall time on one core, 0.75× in ESS/s.
+  step). Gradients are exact (forward-mode tangents through the batched
+  filter): MAP is now 6.9× (20 agents) to 13× (200 agents) faster than
+  pyhgf + JAX + SciPy, and NUTS on the notebook's 20 agents 3.3× faster
+  than NumPyro in wall time on one core and ahead in ESS/s (1.2× min,
+  1.08× median).
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -665,7 +668,8 @@ First part done 2026-11-06: MAP estimation.
     driver answers every running chain of every subject with one
     `BatchNetwork` pass. Draws of a subject are bit-identical whether it is
     sampled alone or with others (tested).
-  - Forward differences by default (`Differences.forward`, `k + 1`
+  - Forward differences by default then (`Gradients.forward` now; exact
+    gradients replaced them as the default, see below; `k + 1`
     filters per step instead of `2k + 1`): leapfrog with any deterministic
     force is reversible and volume preserving, and the multinomial weights
     use the exact density, so the chain stays exact; only efficiency could
@@ -695,16 +699,59 @@ First part done 2026-11-06: MAP estimation.
     antithetic), so in ESS/s (median) NumPyro 39.5 > hgf_fit 30.0 > PyMC
     25.8. Posterior means agree with both (rms z 0.94 / 1.10).
     Central differences took 101 s for the same draws per step count.
+- [x] Exact gradients (2026-11-06): hand-written forward-mode tangents of
+      every batched update step (`BatchNetwork(tangents: k)`,
+      `batch/batch_tangents.dart`).
+  - Fused with the primal: each `_t*` kernel computes exactly what its
+    `_b*` kernel computes (bit-identical, tested) plus the derivatives,
+    stage-wise: per-element partials into coefficient arrays, then a tight
+    element loop per direction. Tangents are `[node][direction][element]`.
+  - Derivatives of the function as computed: branches pass the side taken,
+    active clamps pass nothing, Lambert W contributes `W/(z(1+W))`.
+    Variances can reach 1e300, so tangents are formed as `π̂ (π̂ dV)` and
+    `(dx − (x/V) dV)/V`, never through `1/V²` (which underflowed and gave
+    wrong tangents on `constant_bias_eHGF` and the overflow fixture before).
+    Non-linear value coupling needs g''': `Coupling.d3f`.
+  - Response functions report partial derivatives, not tangents
+    (`batchSurprisePartials`, `SurprisePartials.add(node, field, ∂s/∂x)`);
+    the engine contracts them. Calling `getTangent` per direction made
+    `TotalGaussianSurprise` cost more than the filter.
+  - Directions no seed moves are skipped (`_scanSeeds` at reset), as are
+    zero coupling / autoconnection seeds: a response parameter (β) costs
+    nothing in the filter.
+  - Checked: every tangent field of every node and the total surprise
+    against Richardson central differences on the 37 batchable fixtures, 6
+    directions each (ω, drift, μ₀, π₀, α, κ), on the VM, dart2js and
+    dart2wasm; the gradient of every built-in response; `hgf_fit`'s
+    objective gradients (all priors and transforms, Jacobian on/off, three
+    update modes with 5 parameters, missing data, time steps, response
+    parameters, overwritten targets, `ResponseModel.fn`). Two fixtures
+    need care: `continuous_2level_eHGF` turns chaotic after ~150 trials
+    (finite differences disagree with each other at every step; checked on
+    its first 120 trials), and the binary 3-level ones sit in P17's runaway
+    regime (tangents ~1e8; differences converge onto them only below
+    h = 1e-5).
+  - Cost per element-trial, AOT (`benchmark/bin/tangent_cost.dart`): one
+    direction ≈ the primal's arithmetic again (the exps are shared), each
+    more about half to two-thirds of that. Two directions: 155 ns vs 195 ns
+    for forward differences on the binary 2-level model, about level on
+    continuous 3-level standard/eHGF, 764 vs 942 ns with unbounded updates.
+    Wasm keeps the same ratios. Per direction this is about 330
+    instructions on the binary model; a fused per-element direction loop
+    and the element-innermost layout cost the same, so the arithmetic is
+    the floor. Reverse mode would only pay for many parameters.
+  - End to end: MAP 29 → 13.7 ms (20 agents), 292 → 120 ms (200 agents);
+    NUTS 64 → 43.7 s, ESS/s 30.0 → 43.0 (median), 12.9 → 23.0 (min);
+    NumPyro, same session: 145 s, 39.9 / 18.7.
+  - Not done: the Laplace Hessian still uses second differences of values
+    (`2k² + 1` plain elements); central differences of exact gradients
+    would be more accurate but not cheaper for small k.
 - [ ] Next:
   - hierarchical (group-level) priors: the objective is then not separable
     per subject;
   - isolate-parallel passes (split a pass's elements across isolates; web
     workers on the web);
-  - exact gradients (now the main NUTS cost: `k + 1` filters per leapfrog
-    step; would beat NumPyro in ESS/s on one core): hand-written forward-mode tangents
-    of each update step, or a dual-number engine variant (a generic numeric
-    type would cost the f64 fast path, so a separate, perhaps generated,
-    code path);
+  - tangents for the vector node kinds, once they have batched kernels;
   - a fitting view in the playground (fit the loaded CSV's responses).
 
 ### Phase 7: GPU probe (go/no-go)

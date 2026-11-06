@@ -3,8 +3,9 @@ import 'dart:math' as math;
 import 'math.dart';
 
 /// A value-coupling function `g` between a parent and its value children,
-/// with its first and second derivatives (the updates need `g`, `g'` and
-/// `g''`; there is no autodiff).
+/// with its first three derivatives (the updates need `g`, `g'` and `g''`;
+/// exact gradients through the updates (`BatchNetwork.tangents`) also need
+/// `g'''`; there is no autodiff).
 ///
 /// The function is declared on the **parent** and applies to all of its value
 /// children, as in rshgf. Use one of the named [CouplingFn]s, or your own
@@ -18,6 +19,9 @@ abstract interface class Coupling {
 
   /// g''(x)
   double d2f(double x);
+
+  /// g'''(x)
+  double d3f(double x);
 }
 
 /// A user-defined value-coupling function, given with its closed-form
@@ -29,6 +33,7 @@ abstract interface class Coupling {
 ///   g: math.sin,
 ///   dg: math.cos,
 ///   d2g: (x) => -math.sin(x),
+///   d3g: (x) => -math.cos(x), // optional, for exact gradients
 /// );
 /// hgf.addNodes(valueChildren: [0], coupling: sine);
 /// ```
@@ -41,6 +46,7 @@ final class CustomCoupling implements Coupling {
     required this.g,
     required this.dg,
     required this.d2g,
+    this.d3g,
   });
 
   /// A name for diagnostics and for `NetworkSpec` (see `NetworkSpec.build`).
@@ -48,6 +54,11 @@ final class CustomCoupling implements Coupling {
 
   /// g, g' and g''.
   final double Function(double x) g, dg, d2g;
+
+  /// g''', used only for exact gradients (`BatchNetwork.tangents`) through
+  /// a nonlinear value coupling. Without it, [d3f] takes central
+  /// differences of [d2g] (relative error around 1e-10 for smooth `g`).
+  final double Function(double x)? d3g;
 
   @override
   double f(double x) => g(x);
@@ -57,6 +68,15 @@ final class CustomCoupling implements Coupling {
 
   @override
   double d2f(double x) => d2g(x);
+
+  @override
+  double d3f(double x) {
+    final d3 = d3g;
+    if (d3 != null) return d3(x);
+    final h = 6e-6 * (x.abs() > 1.0 ? x.abs() : 1.0);
+    final xp = x + h, xm = x - h;
+    return (d2g(xp) - d2g(xm)) / (xp - xm);
+  }
 
   /// Throws [StateError] if [dg] or [d2g] disagree with central finite
   /// differences of [g] (resp. [dg]) at any of [at], beyond [tolerance]
@@ -80,6 +100,9 @@ final class CustomCoupling implements Coupling {
 
       cmp("g'", dg(x), fd1);
       cmp("g''", d2g(x), fd2);
+      if (d3g case final d3?) {
+        cmp("g'''", d3(x), (d2g(x + h) - d2g(x - h)) / (2 * h));
+      }
     }
   }
 
@@ -165,6 +188,28 @@ enum CouplingFn implements Coupling {
       case gelu:
         final pdf = math.exp(-(x * x) / 2.0) / math.sqrt(2.0 * math.pi);
         return pdf * (2.0 - x * x);
+    }
+  }
+
+  @override
+  double d3f(double x) {
+    switch (this) {
+      case linear:
+      case relu:
+      case leakyRelu:
+        return 0.0;
+      case sigmoid:
+        final s = _sigmoid(x);
+        final q = s * (1.0 - s);
+        final r = 1.0 - 2.0 * s;
+        return q * (r * r - 2.0 * q);
+      case tanh:
+        final t = _tanh(x);
+        final u = 1.0 - t * t;
+        return u * (6.0 * t * t - 2.0);
+      case gelu:
+        final pdf = math.exp(-(x * x) / 2.0) / math.sqrt(2.0 * math.pi);
+        return pdf * x * (x * x - 4.0);
     }
   }
 }

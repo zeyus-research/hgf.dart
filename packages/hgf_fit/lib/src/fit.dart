@@ -5,8 +5,13 @@ import 'model.dart';
 import 'optim/lbfgs.dart';
 import 'optim/optimizer.dart';
 
-/// How [BatchedObjective] differentiates.
-enum Differences {
+/// How [BatchedObjective] computes gradients.
+enum Gradients {
+  /// Exact: forward-mode tangents through the filter, one direction per
+  /// parameter (`HgfModel.hasExactGradients`). One batch element per
+  /// gradient, each costing about `1 + k/2` plain ones (`k` parameters).
+  exact,
+
   /// `(f(y + hᵢ) − f(y − hᵢ)) / 2hᵢ`: `2k + 1` elements per gradient,
   /// error `O(h²)`. Where one side isn't finite, the one-sided difference
   /// is used.
@@ -20,22 +25,32 @@ enum Differences {
 
 /// Evaluates [model]'s objective (negative log posterior, on the
 /// unconstrained scale) for many (subject, point) pairs in one batched pass,
-/// with gradients by finite differences in the same pass.
+/// with gradients in the same pass.
 ///
-/// A point with a gradient costs `2k + 1` batch elements with [central]
-/// differences, `k + 1` with forward ones (`k` parameters). The step along
-/// `yᵢ` is `fdStep · max(1, |yᵢ|)`.
+/// Gradients are exact by default where the model allows it
+/// ([HgfModel.hasExactGradients]), otherwise central differences.
+/// A point with a finite-difference gradient costs `2k + 1` batch elements
+/// with [Gradients.central], `k + 1` with [Gradients.forward] (`k`
+/// parameters); the step along `yᵢ` is `fdStep · max(1, |yᵢ|)`.
 final class BatchedObjective {
   BatchedObjective(
     this.model,
     this.subjects, {
     this.fdStep = 1e-5,
     this.jacobian = false,
-    this.differences = Differences.central,
-  });
+    Gradients? gradients,
+  }) : gradients =
+           gradients ??
+           (model.hasExactGradients ? Gradients.exact : Gradients.central) {
+    if (this.gradients == Gradients.exact && !model.hasExactGradients) {
+      throw ArgumentError(
+        'The model has no exact gradients (see HgfModel.hasExactGradients)',
+      );
+    }
+  }
 
-  /// The finite-difference scheme for gradients.
-  final Differences differences;
+  /// How gradients are computed.
+  final Gradients gradients;
 
   final HgfModel model;
   final List<Subject> subjects;
@@ -61,8 +76,11 @@ final class BatchedObjective {
     List<Float64List> points,
     List<bool> gradient,
   ) {
+    if (gradients == Gradients.exact) {
+      return _evaluateExact(subjectOf, points, gradient);
+    }
     final k = model.dimension, nP = points.length;
-    final central = differences == Differences.central;
+    final central = gradients == Gradients.central;
     final sides = central ? const [1.0, -1.0] : const [1.0];
     var nE = 0;
     for (var j = 0; j < nP; j++) {
@@ -122,6 +140,53 @@ final class BatchedObjective {
         };
       }
       grads[j] = g;
+    }
+    return (values, grads);
+  }
+
+  /// [evaluate] with exact gradients: the points that need one in a pass
+  /// with tangents, the others (if any) in a plain pass.
+  (Float64List, List<Float64List?>) _evaluateExact(
+    List<int> subjectOf,
+    List<Float64List> points,
+    List<bool> gradient,
+  ) {
+    final k = model.dimension, nP = points.length;
+    final values = Float64List(nP);
+    final grads = List<Float64List?>.filled(nP, null);
+    for (final withGradient in [true, false]) {
+      final idx = [
+        for (var j = 0; j < nP; j++)
+          if (gradient[j] == withGradient) j,
+      ];
+      if (idx.isEmpty) continue;
+      final n = idx.length;
+      final subj = Int32List(n);
+      final y = Float64List(n * k);
+      for (var q = 0; q < n; q++) {
+        final p = points[idx[q]];
+        if (p.length != k) throw ArgumentError('Points must have $k entries');
+        subj[q] = subjectOf[idx[q]];
+        y.setRange(q * k, (q + 1) * k, p);
+      }
+      final out = Float64List(n);
+      final g = withGradient ? Float64List(n * k) : null;
+      model.negLogPosterior(
+        subjects,
+        subj,
+        y,
+        out,
+        jacobian: jacobian,
+        gradient: g,
+      );
+      passes++;
+      elements += n;
+      for (var q = 0; q < n; q++) {
+        values[idx[q]] = out[q];
+        if (g != null) {
+          grads[idx[q]] = Float64List.sublistView(g, q * k, (q + 1) * k);
+        }
+      }
     }
     return (values, grads);
   }
@@ -282,8 +347,9 @@ final class MapFit {
 
 /// Maximum a posteriori estimates of [model]'s parameters for each of
 /// [subjects], fitted independently but in lock step: each pass evaluates
-/// the pending points (and finite-difference stencils) of every subject's
-/// optimiser in one `BatchNetwork` run.
+/// the pending points (with their gradients) of every subject's optimiser
+/// in one `BatchNetwork` run. [gradients] defaults to exact gradients where
+/// the model allows them (see [BatchedObjective]).
 ///
 /// Each subject starts from `start[s]` (constrained scale; default the
 /// parameters' starting values), plus [restarts] starts drawn from the
@@ -296,13 +362,19 @@ MapFit fitMap(
   int restarts = 0,
   math.Random? random,
   double fdStep = 1e-5,
+  Gradients? gradients,
 }) {
   if (start != null && start.length != subjects.length) {
     throw ArgumentError('start must have one vector per subject');
   }
   if (restarts < 0) throw ArgumentError.value(restarts, 'restarts');
   final rng = random ?? math.Random(0);
-  final objective = BatchedObjective(model, subjects, fdStep: fdStep);
+  final objective = BatchedObjective(
+    model,
+    subjects,
+    fdStep: fdStep,
+    gradients: gradients,
+  );
   final tasks = <_Task>[];
   for (var s = 0; s < subjects.length; s++) {
     final starts = [

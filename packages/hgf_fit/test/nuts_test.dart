@@ -306,15 +306,14 @@ void main() {
         expect(p.sd / sd, closeTo(1, 0.15), reason: p.name);
         expect(p.rhat, lessThan(1.02));
       }
-      // Each pass is one leapfrog step of every running chain, with a
-      // forward-difference gradient: k + 1 = 3 filters per chain.
-      expect(fit.elements % 3, 0);
-      expect(fit.elements, lessThanOrEqualTo(fit.passes * 2 * 3));
+      // Each pass is one leapfrog step of every running chain, with an
+      // exact gradient: one filter per chain.
+      expect(fit.elements, lessThanOrEqualTo(fit.passes * 2));
       final leapfrog = r.chains.fold(
         0,
         (a, c) => a + c.leapfrogSteps.fold(0, (b, v) => b + v),
       );
-      expect(fit.elements, greaterThan(leapfrog * 3));
+      expect(fit.elements, greaterThan(leapfrog));
     });
 
     test('subjects sampled together give the same draws as alone', () {

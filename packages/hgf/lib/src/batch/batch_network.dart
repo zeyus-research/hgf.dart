@@ -31,19 +31,58 @@ part of '../network.dart';
 /// State is stored `[field][node][element]`, so each stage reads the same
 /// node of consecutive elements. The batch runs [blockSize] elements at a
 /// time through the whole series.
+///
+/// ## Exact gradients
+///
+/// With [tangents] `k > 0`, every element also carries `k` forward-mode
+/// tangents (directional derivatives) through the filter: seed how the
+/// initial state and coupling strengths depend on `k` parameters
+/// ([setInitialTangent], [setValueCouplingTangent],
+/// [setVolatilityCouplingTangent]), run, and read the derivatives of the
+/// state ([getTangent], [readTangent]) or of the total surprise
+/// ([surprise] with `gradient:`). The primal values stay bit-identical to a
+/// batch without tangents.
+///
+/// ```dart
+/// final batch = BatchNetwork(hgf, omegas.length, tangents: 1)
+///   ..setInitial(1, NodeField.tonicVolatility, omegas)
+///   ..setInitialTangent(1, NodeField.tonicVolatility, 0, ones);
+/// final grad = Float64List(omegas.length); // d nll / d ω, per element
+/// batch.surprise(u, const TotalGaussianSurprise(), gradient: grad);
+/// ```
+///
+/// Only the fields in [tangentFields] carry tangents (the others are
+/// discrete or unused by the batched node kinds). The derivatives are those
+/// of the computed function: through each update's branches as taken (a
+/// clamp that is active passes no derivative) and, for the Lambert W in the
+/// unbounded update, the derivative of `W` itself rather than of its
+/// iterations.
 final class BatchNetwork {
   /// A batch of [batchSize] copies of [network], every element starting
-  /// from the network's initial values and coupling strengths.
+  /// from the network's initial values and coupling strengths, carrying
+  /// [tangents] forward-mode tangents (none by default).
   ///
   /// Throws [UnsupportedError] if the network has a node kind the batched
   /// engine doesn't support yet; run those on [Network].
-  BatchNetwork(Network network, int batchSize, {int blockSize = 256})
-    : this._(network..build(), _positive(batchSize, 'batchSize'), blockSize);
+  BatchNetwork(
+    Network network,
+    int batchSize, {
+    int blockSize = 256,
+    int tangents = 0,
+  }) : this._(
+         network..build(),
+         _positive(batchSize, 'batchSize'),
+         blockSize,
+         tangents >= 0
+             ? tangents
+             : throw ArgumentError.value(tangents, 'tangents', 'Negative'),
+       );
 
-  BatchNetwork._(Network net, int b, int blockSize)
+  BatchNetwork._(Network net, int b, int blockSize, int k)
     : _template = net,
       _n = net._n,
       _b = b,
+      _k = k,
       blockSize = _positive(blockSize, 'blockSize'),
       _kind = net._kind,
       _couplingFn = net._couplingFn,
@@ -88,6 +127,25 @@ final class BatchNetwork {
       _updNode = net._updNode,
       _updStep = net._updStep,
       _s = _BatchScratch(blockSize < b ? blockSize : b, net._u.capacity),
+      _dInitial = Float64List(_kTangentFields * net._n * b * k),
+      _dMean = Float64List(net._n * b * k),
+      _dExpectedMean = Float64List(net._n * b * k),
+      _dPrecision = Float64List(net._n * b * k),
+      _dExpectedPrecision = Float64List(net._n * b * k),
+      _dConditionalExpectedPrecision = Float64List(net._n * b * k),
+      _dTonicVolatility = Float64List(net._n * b * k),
+      _dTonicDrift = Float64List(net._n * b * k),
+      _dAutoconnectionStrength = Float64List(net._n * b * k),
+      _dCurrentVariance = Float64List(net._n * b * k),
+      _dEffectivePrecision = Float64List(net._n * b * k),
+      _dValuePredictionError = Float64List(net._n * b * k),
+      _dVolatilityPredictionError = Float64List(net._n * b * k),
+      _dVpK = Float64List(net._vpIdx.length * b * k),
+      _dVcK = Float64List(net._vcIdx.length * b * k),
+      _dVolpK = Float64List(net._volpIdx.length * b * k),
+      _dVolcK = Float64List(net._volcIdx.length * b * k),
+      _ts = _TangentScratch(blockSize < b ? blockSize : b, net._u.capacity, k),
+      _activeDirs = Int32List(k),
       meanFieldUpdates = net.meanFieldUpdates,
       ehgfMgfCorrection = net.ehgfMgfCorrection,
       maxPosteriorPrecision = net.maxPosteriorPrecision,
@@ -124,6 +182,9 @@ final class BatchNetwork {
   final Network _template;
   final int _n;
   final int _b;
+
+  /// Number of tangent directions (0: none).
+  final int _k;
 
   /// How many elements run through the series together. Larger blocks give
   /// the CPU more independent work per stage; smaller ones keep the block's
@@ -170,6 +231,35 @@ final class BatchNetwork {
 
   final _BatchScratch _s;
 
+  // Tangents, `[node][direction][element]` per field (index
+  // `(node * k + d) * B + element`), and `[edge][direction][element]` per
+  // coupling column; `_dInitial` is `[slot][node][direction][element]`.
+  // Empty without tangents.
+  final Float64List _dInitial;
+  final Float64List _dMean,
+      _dExpectedMean,
+      _dPrecision,
+      _dExpectedPrecision,
+      _dConditionalExpectedPrecision,
+      _dTonicVolatility,
+      _dTonicDrift,
+      _dAutoconnectionStrength,
+      _dCurrentVariance,
+      _dEffectivePrecision,
+      _dValuePredictionError,
+      _dVolatilityPredictionError;
+  final Float64List _dVpK, _dVcK, _dVolpK, _dVolcK;
+  final _TangentScratch _ts;
+
+  // Set by [reset] from the seeds: the directions some seed moves (the
+  // others stay zero through the filter, e.g. a response parameter's, and
+  // the kernels skip them), and which constant tangent columns are all zero
+  // (their terms are skipped).
+  final Int32List _activeDirs;
+  int _nActive = 0;
+  bool _zeroAuto = true, _zeroVpK = true, _zeroVcK = true, _zeroVolpK = true;
+  late final SurprisePartials _partials = SurprisePartials._(this);
+
   /// As [Network.meanFieldUpdates].
   final bool meanFieldUpdates;
 
@@ -184,6 +274,26 @@ final class BatchNetwork {
 
   /// Number of elements.
   int get batchSize => _b;
+
+  /// Number of forward-mode tangent directions each element carries (see
+  /// the class documentation); 0 if none.
+  int get tangents => _k;
+
+  /// The fields that carry tangents, in the order of their tangent slots.
+  static const List<NodeField> tangentFields = [
+    NodeField.mean,
+    NodeField.expectedMean,
+    NodeField.precision,
+    NodeField.expectedPrecision,
+    NodeField.conditionalExpectedPrecision,
+    NodeField.tonicVolatility,
+    NodeField.tonicDrift,
+    NodeField.autoconnectionStrength,
+    NodeField.currentVariance,
+    NodeField.effectivePrecision,
+    NodeField.valuePredictionError,
+    NodeField.volatilityPredictionError,
+  ];
 
   /// Number of nodes in each element.
   int get nNodes => _n;
@@ -309,6 +419,184 @@ final class BatchNetwork {
   void setInitialAt(int element, int node, NodeField field, double value) =>
       _initial[(field.index * _n) * _b + _index(element, node)] = value;
 
+  // ---------------------------------------------------------------------------
+  // Tangents
+  // ---------------------------------------------------------------------------
+
+  /// The tangent column of [f], or null if [f] carries none.
+  Float64List? _tangentColumn(NodeField f) => switch (f) {
+    NodeField.mean => _dMean,
+    NodeField.expectedMean => _dExpectedMean,
+    NodeField.precision => _dPrecision,
+    NodeField.expectedPrecision => _dExpectedPrecision,
+    NodeField.conditionalExpectedPrecision => _dConditionalExpectedPrecision,
+    NodeField.tonicVolatility => _dTonicVolatility,
+    NodeField.tonicDrift => _dTonicDrift,
+    NodeField.autoconnectionStrength => _dAutoconnectionStrength,
+    NodeField.currentVariance => _dCurrentVariance,
+    NodeField.effectivePrecision => _dEffectivePrecision,
+    NodeField.valuePredictionError => _dValuePredictionError,
+    NodeField.volatilityPredictionError => _dVolatilityPredictionError,
+    _ => null,
+  };
+
+  int _tangentSlot(NodeField field) {
+    final slot = tangentFields.indexOf(field);
+    if (slot < 0) {
+      throw ArgumentError.value(
+        field,
+        'field',
+        'Carries no tangent (see BatchNetwork.tangentFields)',
+      );
+    }
+    return slot;
+  }
+
+  int _direction(int d) {
+    if (d < 0 || d >= _k) {
+      if (_k == 0) {
+        throw StateError('This BatchNetwork carries no tangents');
+      }
+      throw RangeError.range(d, 0, _k - 1, 'direction');
+    }
+    return d;
+  }
+
+  /// Set how the initial value of [field] on [node] depends on parameter
+  /// [direction]: `values[e]` is `d initial / d θ_direction` for element
+  /// `e`. Takes effect on the next [reset] / run, like [setInitial].
+  void setInitialTangent(
+    int node,
+    NodeField field,
+    int direction,
+    Float64List values,
+  ) {
+    final slot = _tangentSlot(field), d = _direction(direction);
+    if (values.length != _b) {
+      throw ArgumentError('values must have one entry per element');
+    }
+    _index(0, node);
+    _dInitial.setRange(
+      ((slot * _n + node) * _k + d) * _b,
+      ((slot * _n + node) * _k + d + 1) * _b,
+      values,
+    );
+  }
+
+  /// Set how the value coupling strength from [parent] to [child] depends
+  /// on parameter [direction], per element.
+  void setValueCouplingTangent(
+    int parent,
+    int child,
+    int direction,
+    Float64List values,
+  ) => _setCouplingTangent(
+    parent,
+    child,
+    _direction(direction),
+    values,
+    _vcStart,
+    _vcIdx,
+    _dVcK,
+    _vpStart,
+    _vpIdx,
+    _dVpK,
+    'value',
+  );
+
+  /// Set how the volatility coupling strength from [parent] to [child]
+  /// depends on parameter [direction], per element.
+  void setVolatilityCouplingTangent(
+    int parent,
+    int child,
+    int direction,
+    Float64List values,
+  ) => _setCouplingTangent(
+    parent,
+    child,
+    _direction(direction),
+    values,
+    _volcStart,
+    _volcIdx,
+    _dVolcK,
+    _volpStart,
+    _volpIdx,
+    _dVolpK,
+    'volatility',
+  );
+
+  void _setCouplingTangent(
+    int parent,
+    int child,
+    int d,
+    Float64List values,
+    Int32List childStart,
+    Int32List childIdx,
+    Float64List childK,
+    Int32List parentStart,
+    Int32List parentIdx,
+    Float64List parentK,
+    String what,
+  ) {
+    _index(0, parent);
+    _index(0, child);
+    if (values.length != _b) {
+      throw ArgumentError('values must have one entry per element');
+    }
+    final b = _b, k = _k;
+    var found = false;
+    void set(Float64List col, int edge) =>
+        col.setRange((edge * k + d) * b, (edge * k + d + 1) * b, values);
+
+    for (var e = childStart[parent]; e < childStart[parent + 1]; e++) {
+      if (childIdx[e] == child) {
+        set(childK, e);
+        found = true;
+      }
+    }
+    for (var e = parentStart[child]; e < parentStart[child + 1]; e++) {
+      if (parentIdx[e] == parent) set(parentK, e);
+    }
+    if (!found) {
+      throw ArgumentError('Node $parent is not a $what parent of node $child');
+    }
+  }
+
+  /// Zero every tangent seed (initial values and coupling strengths), so
+  /// nothing depends on any parameter. Takes effect on the next run.
+  void clearTangents() {
+    _dInitial.fillRange(0, _dInitial.length, 0.0);
+    for (final c in [_dVpK, _dVcK, _dVolpK, _dVolcK]) {
+      c.fillRange(0, c.length, 0.0);
+    }
+  }
+
+  /// The current derivative of [field] on [node] of [element] along
+  /// [direction]. Throws for fields outside [tangentFields].
+  double getTangent(int element, int node, NodeField field, int direction) {
+    final col = _tangentColumn(field);
+    if (col == null) _tangentSlot(field); // throws
+    _index(element, node);
+    return col![(node * _k + _direction(direction)) * _b + element];
+  }
+
+  /// [getTangent] for every element, copied into [into] (length
+  /// [batchSize]) if given.
+  Float64List readTangent(
+    int node,
+    NodeField field,
+    int direction, [
+    Float64List? into,
+  ]) {
+    final col = _tangentColumn(field);
+    if (col == null) _tangentSlot(field); // throws
+    final d = _direction(direction);
+    _index(0, node);
+    final out = into ?? Float64List(_b);
+    if (out.length != _b) throw ArgumentError('into must have batchSize items');
+    return out..setRange(0, _b, col!, (node * _k + d) * _b);
+  }
+
   /// Set the value coupling strength from [parent] to [child] per element
   /// ([strengths] has one entry per element).
   void setValueCoupling(int parent, int child, Float64List strengths) =>
@@ -378,12 +666,59 @@ final class BatchNetwork {
     }
   }
 
-  /// Restore every element to its initial state.
+  /// Restore every element to its initial state (and initial tangents).
   void reset() {
     final nb = _n * _b;
     for (final f in NodeField.values) {
       _column(f).setRange(0, nb, _initial, f.index * nb);
     }
+    if (_k == 0) return;
+    final nbk = nb * _k;
+    for (var slot = 0; slot < _kTangentFields; slot++) {
+      _tangentColumn(
+        tangentFields[slot],
+      )!.setRange(0, nbk, _dInitial, slot * nbk);
+    }
+    _scanSeeds();
+  }
+
+  /// Which directions and constant tangent columns are non-zero.
+  void _scanSeeds() {
+    final k = _k, b = _b, n = _n;
+    bool zero(Float64List a, int from, int to) {
+      for (var q = from; q < to; q++) {
+        if (a[q] != 0.0) return false; // NaN counts as non-zero
+      }
+      return true;
+    }
+
+    // Does direction d of a `[row][direction][element]` array have a
+    // non-zero entry?
+    bool anyIn(Float64List a, int rows, int d) {
+      for (var r = 0; r < rows; r++) {
+        final o = (r * k + d) * b;
+        if (!zero(a, o, o + b)) return true;
+      }
+      return false;
+    }
+
+    _nActive = 0;
+    for (var d = 0; d < k; d++) {
+      if (anyIn(_dInitial, _kTangentFields * n, d) ||
+          anyIn(_dVpK, _vpIdx.length, d) ||
+          anyIn(_dVcK, _vcIdx.length, d) ||
+          anyIn(_dVolpK, _volpIdx.length, d) ||
+          anyIn(_dVolcK, _volcIdx.length, d)) {
+        _activeDirs[_nActive++] = d;
+      }
+    }
+    final nbk = n * b * k;
+    int slotOf(NodeField f) => tangentFields.indexOf(f) * nbk;
+    final auto = slotOf(NodeField.autoconnectionStrength);
+    _zeroAuto = zero(_dInitial, auto, auto + nbk);
+    _zeroVpK = zero(_dVpK, 0, _dVpK.length);
+    _zeroVcK = zero(_dVcK, 0, _dVcK.length);
+    _zeroVolpK = zero(_dVolpK, 0, _dVolpK.length);
   }
 
   // ---------------------------------------------------------------------------
@@ -407,7 +742,7 @@ final class BatchNetwork {
     bool append = false,
   }) {
     final nTime = _prepareRun(data, observed, timeSteps, perElement, append);
-    _run(data, observed, timeSteps, perElement, nTime, null, null, null);
+    _run(data, observed, timeSteps, perElement, nTime, null, null, null, null);
   }
 
   /// Filter [data] (as in [inputData]) and return the total surprise of
@@ -418,6 +753,11 @@ final class BatchNetwork {
   /// [into] (length [batchSize]) receives the totals if given. [perTrial]
   /// (length `nTime * batchSize`) receives each trial's surprise,
   /// `perTrial[t * batchSize + e]`.
+  ///
+  /// With [gradient] (length `batchSize * tangents`), the batch must carry
+  /// tangents and [response] must support them
+  /// ([ResponseFunction.batchSurprisePartials]): `gradient[e * tangents + d]`
+  /// receives the derivative of element `e`'s total along direction `d`.
   Float64List surprise(
     Float64List data,
     ResponseFunction response, {
@@ -427,7 +767,14 @@ final class BatchNetwork {
     bool append = false,
     Float64List? into,
     Float64List? perTrial,
+    Float64List? gradient,
   }) {
+    if (gradient != null) {
+      if (_k == 0) throw StateError('This BatchNetwork carries no tangents');
+      if (gradient.length != _b * _k) {
+        throw ArgumentError('gradient must have batchSize x tangents entries');
+      }
+    }
     final nTime = _prepareRun(data, observed, timeSteps, perElement, append);
     response.prepare(_template, nTime);
     final totals = into ?? Float64List(_b);
@@ -438,6 +785,7 @@ final class BatchNetwork {
       throw ArgumentError('perTrial must have nTime x batchSize entries');
     }
     totals.fillRange(0, _b, 0.0);
+    gradient?.fillRange(0, gradient.length, 0.0);
     _run(
       data,
       observed,
@@ -447,6 +795,7 @@ final class BatchNetwork {
       response,
       totals,
       perTrial,
+      gradient,
     );
     return totals;
   }
@@ -509,8 +858,10 @@ final class BatchNetwork {
     ResponseFunction? response,
     Float64List? totals,
     Float64List? perTrial,
+    Float64List? gradient,
   ) {
-    final b = _b, width = _inputs.length * (perElement ? b : 1);
+    final b = _b, k = _k, width = _inputs.length * (perElement ? b : 1);
+    final partials = _partials;
     for (var lo = 0; lo < b; lo += blockSize) {
       final hi = lo + blockSize < b ? lo + blockSize : b;
       for (var t = 0; t < nTime; t++) {
@@ -523,7 +874,14 @@ final class BatchNetwork {
           lo,
           hi,
         );
-        if (response != null) {
+        if (gradient != null) {
+          for (var e = lo; e < hi; e++) {
+            partials._bind(e, gradient, e * k);
+            final s = response!.batchSurprisePartials(this, t, e, partials);
+            totals![e] += s;
+            if (perTrial != null) perTrial[t * b + e] = s;
+          }
+        } else if (response != null) {
           for (var e = lo; e < hi; e++) {
             final s = response.batchSurprise(this, t, e);
             totals![e] += s;
@@ -547,6 +905,10 @@ final class BatchNetwork {
     int lo,
     int hi,
   ) {
+    if (_k != 0) {
+      _tPropagate(data, observed, offset, timeStep, perElement, lo, hi);
+      return;
+    }
     final predNode = _predNode, predStep = _predStep;
     for (var k = 0; k < predNode.length; k++) {
       _dispatch(predStep[k], predNode[k], timeStep, lo, hi);
@@ -598,6 +960,55 @@ final class BatchNetwork {
         _bPredictionErrorContinuous(node, lo, hi);
       case _kPredictionErrorBinary:
         _bPredictionErrorBinary(node, lo, hi);
+    }
+  }
+}
+
+/// Where a response function reports the partial derivatives of one
+/// trial's surprise ([ResponseFunction.batchSurprisePartials]); the
+/// [BatchNetwork] combines them with the beliefs' tangents into the
+/// gradient, so a response function never sees the tangent directions.
+final class SurprisePartials {
+  SurprisePartials._(this._net);
+
+  final BatchNetwork _net;
+  int _element = 0, _offset = 0;
+  Float64List _gradient = _f64;
+
+  void _bind(int element, Float64List gradient, int offset) {
+    _element = element;
+    _gradient = gradient;
+    _offset = offset;
+  }
+
+  /// The surprise changes by [derivative] per unit of [field] on [node]
+  /// (of the element being scored). [field] must carry tangents
+  /// (`BatchNetwork.tangentFields`).
+  @pragma('vm:unsafe:no-bounds-checks')
+  void add(int node, NodeField field, double derivative) {
+    final net = _net;
+    final col = net._tangentColumn(field);
+    if (col == null) net._tangentSlot(field); // throws
+    if (node < 0 || node >= net._n) {
+      throw RangeError.range(node, 0, net._n - 1, 'node');
+    }
+    if (derivative == 0.0) return;
+    final k = net._k, b = net._b, act = net._activeDirs;
+    final g = _gradient, o = _offset, base = node * k * b + _element;
+    for (var a = 0; a < net._nActive; a++) {
+      final d = act[a];
+      g[o + d] += derivative * col![base + d * b];
+    }
+  }
+
+  /// The surprise changes by [derivative] per unit of a quantity outside
+  /// the network whose derivative along direction `d` is
+  /// `tangents[offset + d]` (e.g. a response model's own parameter).
+  void addTangents(double derivative, Float64List tangents, int offset) {
+    if (derivative == 0.0) return;
+    final g = _gradient, o = _offset;
+    for (var d = 0; d < _net._k; d++) {
+      g[o + d] += derivative * tangents[offset + d];
     }
   }
 }

@@ -15,6 +15,7 @@ import 'package:test/test.dart';
 
 import 'src/batch_check.dart';
 import 'src/parity_check.dart';
+import 'src/tangent_check.dart';
 
 const _reader = '''
 import 'dart:io';
@@ -52,6 +53,10 @@ void main() {
   });
   test('BatchNetwork matches Network bit for bit on this compiler', () {
     final failures = [for (final f in fixtures) ...batchMismatches(f)];
+    expect(failures, isEmpty, reason: failures.take(10).join('\n'));
+  });
+  test('BatchNetwork tangents match finite differences on this compiler', () {
+    final failures = [for (final f in fixtures) ...?checkTangents(f)?.$1];
     expect(failures, isEmpty, reason: failures.take(10).join('\n'));
   });
 }

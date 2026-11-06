@@ -60,7 +60,9 @@ final Map<String, Coupling> testCouplings = {
     g: math.sin,
     dg: math.cos,
     d2g: (x) => -math.sin(x),
+    d3g: (x) => -math.cos(x),
   ),
+  // Without d3g: exact gradients use central differences of d2g.
   'softplus': CustomCoupling(
     'softplus',
     g: (x) => math.max(x, 0.0) + math.log(1.0 + math.exp(-x.abs())),

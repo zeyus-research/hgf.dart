@@ -1,5 +1,19 @@
 ## Unreleased
 
+- Exact gradients: `HgfModel.negLogPosterior(gradient:)` differentiates the
+  negative log posterior with forward-mode tangents through the filter
+  (`BatchNetwork.tangents`, one direction per parameter), the priors
+  (`Prior.dLogDensity`) and the transforms (`Transform.dToConstrained`,
+  `dLogAbsJacobian`). `HgfModel.hasExactGradients` says whether the model
+  allows it (the response model reports partials and every parameter
+  target carries tangents). `Gradients` (`exact`, `central`, `forward`,
+  replacing `Differences`) picks the method for `BatchedObjective`,
+  `fitMap` and `sampleNuts`; exact is the default where available.
+- `ResponseModel.surprisePartials` / `supportsGradients` and
+  `ResponsePartials` (`add` for beliefs, `addParameter` for the model's own
+  parameters); implemented by `GaussianReadout`, `BinarySoftmaxReadout`
+  and `ObservationSurprise`, and by `ResponseModel.fn(surprisePartials:)`.
+
 - First version: `HgfModel`, `Subject`, `Parameter` (node fields, couplings,
   response parameters), priors (`Normal`, `TruncatedNormal`, `Uniform`,
   `HalfNormal`, `LogNormal`, `GammaPrior`, `Flat`) with matching transforms,

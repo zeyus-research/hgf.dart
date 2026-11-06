@@ -7,8 +7,8 @@ import 'optimizer.dart';
 /// interpolates with the gradient at each trial point.
 ///
 /// Every trial point is evaluated with its gradient, so an accepted step
-/// needs no extra round; with finite-difference gradients a trial costs
-/// `2k + 1` batch elements but one pass. Curvature pairs with
+/// needs no extra round: a trial costs one batch element with exact
+/// gradients (`2k + 1` with central differences) and one pass. Curvature pairs with
 /// `sᵀy ≤ 1e-10 ‖s‖‖y‖` are skipped, which keeps the update positive
 /// definite without a Wolfe line search.
 ///

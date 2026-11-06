@@ -27,7 +27,7 @@ enum MetricKind {
 /// (`sampleNuts`) advances many chains (and subjects) in lock step, one
 /// batched pass per step.
 ///
-/// The gradients may be finite differences: the leapfrog integrator is
+/// The gradients may also be finite differences: the leapfrog integrator is
 /// volume preserving and reversible for any deterministic force field, and
 /// the multinomial weights use the exact density, so the chain still targets
 /// the exact posterior; gradient error only costs efficiency.

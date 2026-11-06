@@ -56,6 +56,29 @@ abstract class ResponseFunction {
   /// [UnsupportedError] when used with a batch.
   double batchSurprise(BatchNetwork network, int t, int element) =>
       throw UnsupportedError('$runtimeType has no batched form');
+
+  /// Whether [batchSurprisePartials] is implemented, so the response can
+  /// be differentiated (`BatchNetwork.surprise` with `gradient:`).
+  bool get supportsGradients => false;
+
+  /// [batchSurprise], also reporting the surprise's partial derivatives
+  /// with respect to the beliefs it reads: for each, call
+  /// `partials.add(node, field, ∂surprise/∂belief)`. The batch combines
+  /// them with the beliefs' tangents into the gradient.
+  ///
+  /// ```dart
+  /// // surprise = gaussianSurprise(r, μ̂₀, π): ∂/∂μ̂₀ = −π (r − μ̂₀)
+  /// partials.add(0, NodeField.expectedMean, -precision * (r - m));
+  /// ```
+  ///
+  /// The built-in models implement it (where the surprise is `+∞` the
+  /// partials are meaningless). Others throw [UnsupportedError].
+  double batchSurprisePartials(
+    BatchNetwork network,
+    int t,
+    int element,
+    SurprisePartials partials,
+  ) => throw UnsupportedError('$runtimeType has no gradient form');
 }
 
 final class _FnResponse extends ResponseFunction {
@@ -136,6 +159,27 @@ final class FirstLevelGaussianSurprise extends ResponseFunction {
       network.get(element, 1, NodeField.expectedPrecision),
     ),
   );
+
+  @override
+  bool get supportsGradients => true;
+
+  @override
+  double batchSurprisePartials(
+    BatchNetwork network,
+    int t,
+    int element,
+    SurprisePartials partials,
+  ) {
+    final x = network.get(element, 0, NodeField.mean);
+    final m = network.get(element, 1, NodeField.expectedMean);
+    final p = network.get(element, 1, NodeField.expectedPrecision);
+    final d = x - m;
+    partials
+      ..add(0, NodeField.mean, p * d)
+      ..add(1, NodeField.expectedMean, -p * d)
+      ..add(1, NodeField.expectedPrecision, 0.5 * (d * d - 1.0 / p));
+    return _nanToInf(gaussianSurprise(x, m, p));
+  }
 }
 
 /// Sum of the Gaussian surprise `gaussianSurprise(μᵢ, μ̂ᵢ, π̂ᵢ)` over every
@@ -184,6 +228,33 @@ final class TotalGaussianSurprise extends ResponseFunction {
     }
     return _nanToInf(s);
   }
+
+  @override
+  bool get supportsGradients => true;
+
+  @override
+  double batchSurprisePartials(
+    BatchNetwork network,
+    int t,
+    int element,
+    SurprisePartials partials,
+  ) {
+    if (network.get(element, 1, NodeField.mean).isNaN) return double.infinity;
+    var s = 0.0;
+    for (var i = 0, n = network.nNodes; i < n; i++) {
+      if (network.kindOf(i) != NodeKind.continuousState) continue;
+      final x = network.get(element, i, NodeField.mean);
+      final m = network.get(element, i, NodeField.expectedMean);
+      final p = network.get(element, i, NodeField.expectedPrecision);
+      s += gaussianSurprise(x, m, p);
+      final d = x - m;
+      partials
+        ..add(i, NodeField.mean, p * d)
+        ..add(i, NodeField.expectedMean, -p * d)
+        ..add(i, NodeField.expectedPrecision, 0.5 * (d * d - 1.0 / p));
+    }
+    return _nanToInf(s);
+  }
 }
 
 /// Sum of the binary surprise of each input node's observation under its
@@ -228,6 +299,26 @@ final class FirstLevelBinarySurprise extends ResponseFunction {
     }
     return _nanToInf(s);
   }
+
+  @override
+  bool get supportsGradients => true;
+
+  @override
+  double batchSurprisePartials(
+    BatchNetwork network,
+    int t,
+    int element,
+    SurprisePartials partials,
+  ) {
+    var s = 0.0;
+    for (final i in network.inputIdxs) {
+      final x = network.get(element, i, NodeField.mean);
+      final m = network.get(element, i, NodeField.expectedMean);
+      s += binarySurprise(x, m);
+      partials.add(i, NodeField.expectedMean, binarySurpriseDerivative(x, m));
+    }
+    return _nanToInf(s);
+  }
 }
 
 /// Binary decisions (`1` or `0`) made with the probability the agent
@@ -266,6 +357,23 @@ final class BinarySoftmax extends ResponseFunction {
     return _nanToInf(
       binarySurprise(r, network.get(element, node, NodeField.expectedMean)),
     );
+  }
+
+  @override
+  bool get supportsGradients => true;
+
+  @override
+  double batchSurprisePartials(
+    BatchNetwork network,
+    int t,
+    int element,
+    SurprisePartials partials,
+  ) {
+    final r = responses[t];
+    if (r.isNaN) return 0.0;
+    final m = network.get(element, node, NodeField.expectedMean);
+    partials.add(node, NodeField.expectedMean, binarySurpriseDerivative(r, m));
+    return _nanToInf(binarySurprise(r, m));
   }
 }
 
@@ -316,6 +424,30 @@ final class BinarySoftmaxInverseTemperature extends ResponseFunction {
     final p = sigmoidInverseTemperature(
       network.get(element, node, NodeField.expectedMean),
       inverseTemperature,
+    );
+    return _nanToInf(binarySurprise(r, p));
+  }
+
+  @override
+  bool get supportsGradients => true;
+
+  @override
+  double batchSurprisePartials(
+    BatchNetwork network,
+    int t,
+    int element,
+    SurprisePartials partials,
+  ) {
+    final r = responses[t];
+    if (r.isNaN) return 0.0;
+    final m = network.get(element, node, NodeField.expectedMean);
+    final beta = inverseTemperature;
+    final p = sigmoidInverseTemperature(m, beta);
+    // p = σ(β logit m): ∂p/∂m = p (1 − p) β / (m (1 − m)).
+    partials.add(
+      node,
+      NodeField.expectedMean,
+      binarySurpriseDerivative(r, p) * p * (1.0 - p) * beta / (m * (1.0 - m)),
     );
     return _nanToInf(binarySurprise(r, p));
   }
@@ -375,5 +507,22 @@ final class GaussianResponse extends ResponseFunction {
     return _nanToInf(
       gaussianSurprise(r, network.get(element, node, field), precision),
     );
+  }
+
+  @override
+  bool get supportsGradients => BatchNetwork.tangentFields.contains(field);
+
+  @override
+  double batchSurprisePartials(
+    BatchNetwork network,
+    int t,
+    int element,
+    SurprisePartials partials,
+  ) {
+    final r = responses[t];
+    if (r.isNaN) return 0.0;
+    final m = network.get(element, node, field);
+    partials.add(node, field, -precision * (r - m));
+    return _nanToInf(gaussianSurprise(r, m, precision));
   }
 }

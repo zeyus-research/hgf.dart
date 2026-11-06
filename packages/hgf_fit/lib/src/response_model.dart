@@ -42,6 +42,16 @@ abstract class ResponseModel {
     )?
     sample,
     bool usesResponses,
+    double Function(
+      BatchNetwork network,
+      int element,
+      int t,
+      double response,
+      Float64List params,
+      int offset,
+      ResponsePartials partials,
+    )?
+    surprisePartials,
   }) = _FnResponseModel;
 
   /// The parameter names with their default values (used when a parameter
@@ -71,6 +81,24 @@ abstract class ResponseModel {
     int offset,
   );
 
+  /// Whether [surprisePartials] is implemented, so the model can be fitted
+  /// with exact gradients.
+  bool get supportsGradients => false;
+
+  /// [surprise], also reporting its partial derivatives: with respect to
+  /// each belief it reads (`partials.add(node, field, ∂s/∂belief)`) and to
+  /// each of its parameters (`partials.addParameter(i, ∂s/∂params[offset +
+  /// i])`). The fitting code turns them into the gradient.
+  double surprisePartials(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    Float64List params,
+    int offset,
+    ResponsePartials partials,
+  ) => throw UnsupportedError('$runtimeType has no gradient form');
+
   /// A response drawn from the model for [element] (for simulation).
   double sample(
     BatchNetwork network,
@@ -90,8 +118,19 @@ final class _FnResponseModel extends ResponseModel {
     double Function(BatchNetwork, int, int, Float64List, int, math.Random)?
     sample,
     this.usesResponses = true,
+    double Function(
+      BatchNetwork,
+      int,
+      int,
+      double,
+      Float64List,
+      int,
+      ResponsePartials,
+    )?
+    surprisePartials,
   }) : surpriseFn = surprise,
-       sampleFn = sample;
+       sampleFn = sample,
+       surprisePartialsFn = surprisePartials;
 
   @override
   final Map<String, double> parameters;
@@ -101,6 +140,44 @@ final class _FnResponseModel extends ResponseModel {
   surpriseFn;
   final double Function(BatchNetwork, int, int, Float64List, int, math.Random)?
   sampleFn;
+  final double Function(
+    BatchNetwork,
+    int,
+    int,
+    double,
+    Float64List,
+    int,
+    ResponsePartials,
+  )?
+  surprisePartialsFn;
+
+  @override
+  bool get supportsGradients => surprisePartialsFn != null;
+
+  @override
+  double surprisePartials(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    Float64List params,
+    int offset,
+    ResponsePartials partials,
+  ) {
+    final f = surprisePartialsFn;
+    if (f == null) {
+      return super.surprisePartials(
+        network,
+        element,
+        t,
+        response,
+        params,
+        offset,
+        partials,
+      );
+    }
+    return f(network, element, t, response, params, offset, partials);
+  }
 
   @override
   double surprise(
@@ -184,6 +261,29 @@ final class GaussianReadout extends ResponseModel {
   }
 
   @override
+  bool get supportsGradients => BatchNetwork.tangentFields.contains(field);
+
+  @override
+  double surprisePartials(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    Float64List params,
+    int offset,
+    ResponsePartials partials,
+  ) {
+    if (response.isNaN) return 0.0;
+    final belief = network.get(element, node, field);
+    final precision = params[offset];
+    final d = response - belief;
+    partials
+      ..add(node, field, -precision * d)
+      ..addParameter(0, 0.5 * (d * d - 1.0 / precision));
+    return _nanToInf(gaussianSurprise(response, belief, precision));
+  }
+
+  @override
   double sample(
     BatchNetwork network,
     int element,
@@ -237,6 +337,32 @@ final class BinarySoftmaxReadout extends ResponseModel {
   }
 
   @override
+  bool get supportsGradients => true;
+
+  @override
+  double surprisePartials(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    Float64List params,
+    int offset,
+    ResponsePartials partials,
+  ) {
+    if (response.isNaN) return 0.0;
+    final m = network.get(element, node, NodeField.expectedMean);
+    final beta = params[offset];
+    final p = sigmoidInverseTemperature(m, beta);
+    // p = σ(β logit m): ∂p/∂m = p (1 − p) β / (m (1 − m)),
+    // ∂p/∂β = p (1 − p) logit m.
+    final ds = binarySurpriseDerivative(response, p) * p * (1.0 - p);
+    partials
+      ..add(node, NodeField.expectedMean, ds * beta / (m * (1.0 - m)))
+      ..addParameter(0, ds * math.log(m / (1.0 - m)));
+    return _nanToInf(binarySurprise(response, p));
+  }
+
+  @override
   double sample(
     BatchNetwork network,
     int element,
@@ -277,4 +403,53 @@ final class ObservationSurprise extends ResponseModel {
     Float64List params,
     int offset,
   ) => function.batchSurprise(network, t, element);
+
+  @override
+  bool get supportsGradients => function.supportsGradients;
+
+  @override
+  double surprisePartials(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    Float64List params,
+    int offset,
+    ResponsePartials partials,
+  ) => function.batchSurprisePartials(network, t, element, partials._inner!);
+}
+
+/// Where a [ResponseModel] reports the partial derivatives of one trial's
+/// surprise ([ResponseModel.surprisePartials]).
+final class ResponsePartials {
+  ResponsePartials._(this._paramTangents);
+
+  final Float64List _paramTangents;
+  SurprisePartials? _inner;
+  int _offset = 0, _k = 0;
+
+  /// The surprise changes by [derivative] per unit of [field] on [node].
+  void add(int node, NodeField field, double derivative) =>
+      _inner!.add(node, field, derivative);
+
+  /// The surprise changes by [derivative] per unit of the model's parameter
+  /// [i] (`params[offset + i]`).
+  void addParameter(int i, double derivative) =>
+      _inner!.addTangents(derivative, _paramTangents, (_offset + i) * _k);
+}
+
+/// Binds [partials] to one element's [SurprisePartials] (for `HgfModel`).
+ResponsePartials bindResponsePartials(
+  ResponsePartials? partials,
+  Float64List paramTangents,
+  SurprisePartials inner,
+  int offset,
+  int k,
+) {
+  final p = partials ?? ResponsePartials._(paramTangents);
+  p
+    .._inner = inner
+    .._offset = offset
+    .._k = k;
+  return p;
 }

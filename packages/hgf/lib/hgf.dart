@@ -9,6 +9,7 @@ export 'src/math.dart'
     show
         binarySurprise,
         binarySurpriseFinitePrecision,
+        binarySurpriseDerivative,
         digamma,
         dirichletKullbackLeibler,
         gammaSign,
@@ -19,7 +20,8 @@ export 'src/math.dart'
         logAddExp,
         sigmoid,
         sigmoidInverseTemperature;
-export 'src/network.dart' show BatchNetwork, Network, NetworkState;
+export 'src/network.dart'
+    show BatchNetwork, Network, NetworkState, SurprisePartials;
 export 'src/response.dart';
 export 'src/spec.dart' show NetworkSpec;
 export 'src/trajectories.dart' show Trajectories;
