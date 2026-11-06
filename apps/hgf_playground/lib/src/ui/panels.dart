@@ -214,13 +214,22 @@ class NodeCard extends StatelessWidget {
         ],
       );
     }
-    final kind = pg.network.kindOf(i);
+    final net = pg.network;
+    final kind = net.kindOf(i);
     final input = pg.layout.level[i] == 0;
     final defs = paramsFor(kind, input: input);
-    final out = pg.layout.edges.where((e) => e.parent == i).toList();
+    // Couplings between continuous and binary nodes; the edges into
+    // categorical and dp-state nodes are fixed by those nodes.
+    bool scalar(int j) =>
+        net.kindOf(j) == NodeKind.continuousState ||
+        net.kindOf(j) == NodeKind.binaryState;
+    final out = pg.layout.edges
+        .where((e) => e.parent == i && scalar(e.parent) && scalar(e.child))
+        .toList();
+    final about = _about(net, i);
     return _Section(
       title:
-          '${defaultNodeLabel(i)} · ${kind == NodeKind.binaryState ? 'binary' : 'continuous'}'
+          '${defaultNodeLabel(i)} · ${_kindNames[kind]}'
           '${input ? ' input' : ''}',
       action: IconButton(
         tooltip: 'Reset this node',
@@ -228,12 +237,7 @@ class NodeCard extends StatelessWidget {
         onPressed: () => pg.resetNode(i),
       ),
       children: [
-        if (kind == NodeKind.binaryState)
-          Text(
-            'Observes binary outcomes u ∈ {0, 1}. Its prediction is the '
-            'sigmoid of its value parent\'s mean.',
-            style: theme.textTheme.bodySmall,
-          ),
+        if (about != null) Text(about, style: theme.textTheme.bodySmall),
         for (final d in defs)
           LabeledSlider(
             label: '${d.symbol}  ${d.name}',
@@ -268,6 +272,51 @@ class NodeCard extends StatelessWidget {
   }
 }
 
+const _kindNames = {
+  NodeKind.continuousState: 'continuous',
+  NodeKind.binaryState: 'binary',
+  NodeKind.constantState: 'constant',
+  NodeKind.efState: 'exponential family',
+  NodeKind.categoricalState: 'categorical',
+  NodeKind.dpState: 'Dirichlet process',
+};
+
+/// A sentence on what node [i] does, for the kinds that need one.
+String? _about(Network net, int i) {
+  final children = net.valueChildrenOf(i);
+  switch (net.kindOf(i)) {
+    case NodeKind.binaryState:
+      final cat = children.where(
+        (c) => net.kindOf(c) == NodeKind.categoricalState,
+      );
+      if (cat.isNotEmpty) {
+        return 'Observes whether its category came up (1) or not (0); its '
+            'prediction, the sigmoid of its value parent\'s mean, is that '
+            'category\'s probability.';
+      }
+      return 'Observes binary outcomes u ∈ {0, 1}. Its prediction is the '
+          'sigmoid of its value parent\'s mean.';
+    case NodeKind.categoricalState:
+      return 'Observes one of ${net.valueParentsOf(i).length} categories, '
+          'passes each binary parent its indicator, and derives a Dirichlet '
+          'distribution over the categories from how much each one learned. '
+          'It has no parameters of its own: edit its parents.';
+    case NodeKind.dpState:
+      return 'Assigns each observation to the cluster that explains it '
+          'best, or opens a new one. The panel colours each observation by '
+          'its cluster and draws each open cluster\'s predicted mean ± sd.';
+    case NodeKind.efState:
+      if (children.isNotEmpty) {
+        return 'A cluster of ${defaultNodeLabel(children.first)}: it learns '
+            'the mean and variance of the observations assigned to it.';
+      }
+      return 'Learns the expected sufficient statistics (x, x²) of its '
+          'observations, so their mean and variance, at a fixed rate.';
+    case NodeKind.continuousState || NodeKind.constantState:
+      return null;
+  }
+}
+
 // -----------------------------------------------------------------------------
 // Data
 // -----------------------------------------------------------------------------
@@ -290,11 +339,14 @@ class DataCard extends StatelessWidget {
       final text = utf8.decode(await file.readAsBytes(), allowMalformed: true);
       final values = parseColumn(text);
       if (values.isEmpty) throw const FormatException('No numbers found');
-      if (playground.preset.input == InputKind.binary &&
-          !values.every((v) => v.isNaN || v == 0 || v == 1)) {
-        throw const FormatException(
-          'This network has a binary input: the values must be 0 or 1',
-        );
+      final pg = playground;
+      if (!Playground.loadedFits(pg.preset, values, pg.nCategories)) {
+        throw FormatException(switch (pg.preset.input) {
+          InputKind.categorical =>
+            'This network has a categorical input: the values must be '
+                'category indices 0 to ${pg.nCategories - 1}',
+          _ => 'This network has a binary input: the values must be 0 or 1',
+        });
       }
       playground.load(values, file.name);
     } catch (e) {
@@ -307,7 +359,7 @@ class DataCard extends StatelessWidget {
     final pg = playground;
     final d = pg.data;
     final theme = Theme.of(context);
-    final binary = pg.preset.input == InputKind.binary;
+    final model = pg.preset.data;
     return _Section(
       title: 'Data',
       action: TextButton.icon(
@@ -333,37 +385,72 @@ class DataCard extends StatelessWidget {
             ],
           )
         else ...[
-          Text(
-            binary
-                ? 'Simulated reversal learning: the likely outcome swaps '
-                      'every few trials.'
-                : 'A simulated random walk whose step size switches between '
-                      'calm and volatile phases, observed with noise.',
-            style: theme.textTheme.bodySmall,
-          ),
+          Text(switch (model) {
+            DataModel.reversal =>
+              'Simulated reversal learning: the likely outcome swaps every '
+                  'few trials.',
+            DataModel.categoricalReversal =>
+              'Simulated choices among ${pg.nCategories} outcomes: one is '
+                  'likely, and which one changes every few trials.',
+            DataModel.mixture =>
+              'Draws from a few Gaussian sources (grey: the current '
+                  'source\'s mean), switching source every few trials.',
+            DataModel.randomWalk =>
+              'A simulated random walk whose step size switches between '
+                  'calm and volatile phases, observed with noise.',
+          }, style: theme.textTheme.bodySmall),
           LabeledSlider(
             label: 'trials',
-            // log₁₀ of the number of trials, 50 to 10 000.
+            // log₁₀ of the number of trials, 50 to the preset's maximum.
             value: math.log(d.nTrials) / math.ln10,
             min: math.log(50) / math.ln10,
-            max: 4,
+            max: math.log(pg.preset.maxTrials) / math.ln10,
             display: '${d.nTrials}',
             onChanged: (v) => pg.updateData(
               (d) => d.nTrials = (math.pow(10, v) / 10).round() * 10,
             ),
             onChangeEnd: (_) => settings.remember(nTrials: d.nTrials),
           ),
-          if (binary) ...[
+          if (model == DataModel.mixture) ...[
+            LabeledSlider(
+              label: 'sources',
+              value: d.nSources.toDouble(),
+              min: 1,
+              max: 6,
+              divisions: 5,
+              display: '${d.nSources}',
+              onChanged: (v) => pg.updateData((d) => d.nSources = v.round()),
+            ),
+            LabeledSlider(
+              label: 'source sd',
+              value: d.sourceSd,
+              min: 0.05,
+              max: 2,
+              display: d.sourceSd.toStringAsFixed(2),
+              onChanged: (v) => pg.updateData((d) => d.sourceSd = v),
+            ),
+            LabeledSlider(
+              label: 'switch every',
+              value: d.block.toDouble(),
+              min: 5,
+              max: 200,
+              display: '${d.block} trials',
+              onChanged: (v) => pg.updateData((d) => d.block = v.round()),
+            ),
+          ] else if (model == DataModel.reversal ||
+              model == DataModel.categoricalReversal) ...[
             LabeledSlider(
               label: 'P(likely outcome)',
               value: d.pHigh,
-              min: 0.5,
+              min: model == DataModel.reversal ? 0.5 : 1 / pg.nCategories,
               max: 1,
               display: d.pHigh.toStringAsFixed(2),
               onChanged: (v) => pg.updateData((d) => d.pHigh = v),
             ),
             LabeledSlider(
-              label: 'reversal every',
+              label: model == DataModel.reversal
+                  ? 'reversal every'
+                  : 'switch every',
               value: d.block.toDouble(),
               min: 5,
               max: 200,
@@ -436,6 +523,10 @@ class AboutCard extends StatelessWidget {
           'deviation (1/√π̂). Input panels add the observations (dots) and, '
           'for simulated data, the hidden truth (grey). The bottom panel is '
           'the total surprise per trial.\n\n'
+          'Categorical inputs show each category\'s predicted probability '
+          'with the observed category as a row of dots on top; a Dirichlet '
+          'process colours each observation by the cluster it joined, with '
+          'each cluster\'s predicted mean ± sd.\n\n'
           'Hover or drag across the plots to read values. Play runs the '
           'network one trial at a time with predict/step, as in a real-time '
           'experiment.\n\n'

@@ -90,6 +90,8 @@ class _HomePageState extends State<HomePage>
     final input = pg.network.inputIdxs.first;
     final hidden = pg.hidden;
     final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    final colors = HgfColors.of(context);
+    final categorical = pg.preset.input == InputKind.categorical;
     return HgfTrajectoryView(
       network: pg.network,
       trajectories: traj,
@@ -99,14 +101,23 @@ class _HomePageState extends State<HomePage>
       hover: _hover,
       panelHeight: panelHeight,
       extraLayers: {
-        if (hidden != null && hidden.length == traj.nTime)
+        if (hidden != null && hidden.first.length == traj.nTime)
           input: [
-            LineLayer(
-              hidden,
-              color: muted.withValues(alpha: 0.7),
-              width: 1,
-              label: pg.preset.input == InputKind.binary ? 'true p' : 'hidden',
-            ),
+            for (final (k, h) in hidden.indexed)
+              LineLayer(
+                h,
+                // Categories keep their colour; one hidden series is grey.
+                color: categorical
+                    ? colors.category(k).withValues(alpha: 0.45)
+                    : muted.withValues(alpha: 0.7),
+                width: 1,
+                label: switch (pg.preset.data) {
+                  DataModel.reversal => 'true p',
+                  DataModel.categoricalReversal => 'true P($k)',
+                  DataModel.mixture => 'source',
+                  DataModel.randomWalk => 'hidden',
+                },
+              ),
           ],
       },
     );
@@ -141,12 +152,9 @@ class _HomePageState extends State<HomePage>
 
   Widget _narrow(BuildContext context) {
     final traj = pg.trajectories;
-    var panels = 1;
-    if (traj != null) {
-      for (var i = 0; i < pg.network.nNodes; i++) {
-        if (HgfTrajectoryView.plottable(pg.network.kindOf(i))) panels++;
-      }
-    }
+    final panels = traj == null
+        ? 1
+        : HgfTrajectoryView.panelCount(pg.network, layout: pg.layout);
     const h = 150.0;
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),

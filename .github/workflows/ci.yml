@@ -23,7 +23,9 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: dart run melos run lint:all --no-select
+      # Melos scripts call `melos` themselves, so it must be on PATH.
+      - run: dart pub global activate melos ^8.2.2
+      - run: melos run lint:all --no-select
 
   test:
     name: Tests (VM and Flutter)
@@ -35,8 +37,10 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
+      # Melos scripts call `melos` themselves, so it must be on PATH.
+      - run: dart pub global activate melos ^8.2.2
       # Engine (incl. the pyhgf parity suites), widgets and playground.
-      - run: dart run melos run test --no-select
+      - run: melos run test --no-select
 
   web:
     name: Parity on dart2js and dart2wasm
@@ -54,7 +58,9 @@ jobs:
       - uses: browser-actions/setup-chrome@v2
         id: chrome
       - run: flutter pub get
-      - run: dart run melos run test:web --no-select
+      # Melos scripts call `melos` themselves, so it must be on PATH.
+      - run: dart pub global activate melos ^8.2.2
+      - run: melos run test:web --no-select
         env:
           CHROME_EXECUTABLE: ${{ steps.chrome.outputs.chrome-path }}
-      - run: dart run melos run test:wasm-release --no-select
+      - run: melos run test:wasm-release --no-select

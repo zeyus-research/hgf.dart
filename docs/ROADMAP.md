@@ -21,7 +21,7 @@ supersedes its phase list.
     data, bit-identical to `Network` (W4);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
-- 462 engine tests pass (plus 13 widget and 9 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+- 462 engine tests pass (plus 17 widget and 15 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
   `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
@@ -521,15 +521,50 @@ First version done 2026-11-06.
       Recording 3 fields instead of 7 took the 10k filter from 13.7 to
       11.3 ms. On the web, `FrameTiming` reports only ~20 of 300 frames
       with implausible durations, so the app shows the frame interval there.
-- [ ] Next: categorical / ef-state / dp-state views (vector fields: one
-      line per category, cluster means); zoom and pan on the time axis;
+- [x] Views for the vector node kinds (2026-11-06). `HgfTrajectoryView`
+      plans its panels from the graph and folds implied nodes into the
+      panel they serve:
+  - **categorical:** each category's predicted probability (its binary
+    parents' `μ̂`) with the observed category as a row of dots per
+    category above it; the binary parents get no panels, their value
+    parents (the logits) share one;
+  - **dp-state:** observations coloured by the cluster they joined (where
+    `VectorField.n` grew), and each open cluster's predicted mean ± sd
+    (`expectedMeans`/`expectedSigmas`, from the trial after it opened);
+    the clusters get no panels;
+  - **ef-state:** observations and, before each, the mean ± sd implied by
+    the previous trial's `ξ` (one line per dimension for d > 1);
+  - categories and clusters take the 8-slot categorical palette in fixed
+    order (`HgfColors.categories`, light and dark steps), past 8 a grey
+    overflow; no surprise panel when no node defines one (dp/ef only);
+    `BandLayer.bounds` reads out its half-width (it read the lower bound);
+    `PlotLayer.readoutGaps: false` keeps sparse layers out of the readout.
+- [x] Playground presets for them: *Categorical HGF (3 outcomes)*
+      (simulated: one likely outcome that switches), *Dirichlet process*
+      (4 cluster slots, α = 0.1, ν = 3; simulated: Gaussian sources visited
+      in turn, which it recovers as 3 clusters of 50 on the default 150
+      trials), *Exponential family* (ν = 10 on the random walk, to contrast
+      with the HGF's adaptive learning rate). Sliders for α and π_s (dp)
+      and ν (ef); edits now live in a per-node map on top of the preset,
+      so implied nodes are editable too. Playback (`predict`/`step`)
+      records the vector fields as well, tested equal to `inputData`.
+      CSV loading takes category indices for categorical inputs.
+      `?preset=<id>&trials=N` links to a preset on the web.
+  - dp-state is slow for live re-filtering: ~375 ms for 150 trials on Wasm
+    (pyhgf's 20 000 proposals per trial), so the preset caps trials at 1000
+    and starts at 150. A web worker (below) would keep the UI responsive.
+  - The categorical preset's shared volatility parent uses ω = −8: at
+    pyhgf's −4 the unbounded update runs away by trial ~300, at −6 by
+    ~2400 (the P17 structure: binary HGFs under a volatility parent).
+- [ ] Next: zoom and pan on the time axis;
       editable structure (add/remove nodes); export (CSV of trajectories,
       PNG); a guided "lessons" mode for teaching; measure desktop (GPU)
       frame times (`flutter run --profile --dart-define=HGF_BENCH=10000`);
       if 10k-trial drags must hold 60 fps on Wasm, filter in a web worker
       or the engine needs to get faster there.
 - Found with it: [P17](upstream/README.md#p17), the default unbounded
-  update runs away on binary 3-level HGFs (pyhgf too).
+  update runs away on binary 3-level HGFs (pyhgf too), and on the
+  categorical node's implied network, which has the same structure.
 
 ### Phase 6: fitting probe (`packages/hgf_fit`)
 
@@ -652,8 +687,11 @@ only). Phase 4's node kinds are all done: ef-state (2026-11-05),
 categorical-state and dp-state (2026-11-06). Left in Phase 4: per-child
 coupling functions (only if needed), and batched kernels / `sample` for the
 vector kinds (`BatchNetwork` rejects them). Phase 5's first version is
-done (2026-11-06): `packages/hgf_widgets` and `apps/hgf_playground`; see
-its open items. Then Phase 6 (fitting).
+done (2026-11-06): `packages/hgf_widgets` and `apps/hgf_playground`, with
+views and presets for every node kind; see its open items. CI runs on
+every push, and the playground deploys to
+https://zeyus-research.github.io/hgf.dart/ from `main`. Then Phase 6
+(fitting).
 
 ```sh
 cd hgf.dart

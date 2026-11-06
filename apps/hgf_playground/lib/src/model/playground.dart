@@ -23,10 +23,11 @@ enum DataSource { simulated, loaded }
 class Playground extends ChangeNotifier {
   Playground({String? presetId, int? nTrials, this.coalesce = false}) {
     _preset = presetById(presetId ?? presets.first.id);
-    data.nTrials = (nTrials != null && nTrials > 0)
-        ? nTrials
-        : _preset.defaultTrials;
-    _specs = _preset.nodes();
+    data.nTrials = math.min(
+      (nTrials != null && nTrials > 0) ? nTrials : _preset.defaultTrials,
+      _preset.maxTrials,
+    );
+    _volatilityUpdates = _preset.volatilityUpdates ?? _volatilityUpdates;
     _rebuild();
     _simulate();
     _rerun();
@@ -46,7 +47,11 @@ class Playground extends ChangeNotifier {
 
   late Preset _preset;
   Preset get preset => _preset;
-  late List<NodeSpec> _specs;
+
+  // Parameter and coupling edits on top of the preset, re-applied whenever
+  // the network is rebuilt.
+  final Map<int, Map<NodeField, double>> _paramEdits = {};
+  final Map<(int, int, EdgeKind), double> _couplingEdits = {};
 
   VolatilityUpdates _volatilityUpdates = VolatilityUpdates.unbounded;
   VolatilityUpdates get volatilityUpdates => _volatilityUpdates;
@@ -64,14 +69,24 @@ class Playground extends ChangeNotifier {
   DataSource source = DataSource.simulated;
   String? loadedName;
 
-  /// The observations being filtered.
+  /// The observations being filtered, one per trial (a category index for
+  /// a categorical input).
   Float64List observations = Float64List(0);
+
+  /// What the network takes: [observations], or their one-hot rows for a
+  /// categorical input ([Network.nInputColumns] values per trial).
+  Float64List _input = Float64List(0);
 
   /// `1` observed / `0` missing, per trial (null: all observed).
   Float64List? observed;
 
-  /// What generated simulated data (P(u = 1) or the hidden value).
-  Float64List? hidden;
+  /// What generated simulated data: one series (P(u = 1), the hidden
+  /// value or the source mean), or one per category.
+  List<Float64List>? hidden;
+
+  /// The number of categories of a categorical input (else 0).
+  int get nCategories =>
+      _preset.input == InputKind.categorical ? network.nInputColumns : 0;
 
   /// Wall time of the last full re-filter, in microseconds.
   int filterMicros = 0;
@@ -91,8 +106,14 @@ class Playground extends ChangeNotifier {
     if (p.id == _preset.id) return;
     player = null;
     _preset = p;
-    _specs = p.nodes();
+    _paramEdits.clear();
+    _couplingEdits.clear();
     selected = null;
+    // Slow presets (a lower cap) start at their own default.
+    data.nTrials = p.maxTrials < presets.first.maxTrials
+        ? p.defaultTrials
+        : math.min(data.nTrials, p.maxTrials);
+    _volatilityUpdates = p.volatilityUpdates ?? _volatilityUpdates;
     _rebuild();
     if (source == DataSource.loaded && !_loadedFits()) {
       source = DataSource.simulated;
@@ -116,11 +137,19 @@ class Playground extends ChangeNotifier {
   }
 
   void _rebuild() {
-    network = _preset.build(
-      volatilityUpdates: _volatilityUpdates,
-      specs: _specs,
-    );
+    network = _preset.build(volatilityUpdates: _volatilityUpdates);
     network.build();
+    _paramEdits.forEach((node, edits) {
+      edits.forEach((f, v) => network.setInitial(node, f, v));
+    });
+    _couplingEdits.forEach((edge, v) {
+      final (parent, child, kind) = edge;
+      if (kind == EdgeKind.value) {
+        network.setValueCoupling(parent, child, v);
+      } else {
+        network.setVolatilityCoupling(parent, child, v);
+      }
+    });
     layout = NetworkLayout.of(network);
     trajectories = null; // shape may have changed
   }
@@ -132,27 +161,24 @@ class Playground extends ChangeNotifier {
   double param(int node, NodeField field) => network.getInitial(node, field);
 
   void setParam(int node, NodeField field, double value) {
-    _specs[node].params[field] = value;
+    (_paramEdits[node] ??= {})[field] = value;
     network.setInitial(node, field, value);
     _afterEdit();
   }
 
-  /// Reset [node]'s parameters to the preset's.
+  /// Reset [node]'s parameters and outgoing couplings to the preset's.
   void resetNode(int node) {
-    final fresh = _preset.nodes()[node];
-    _specs[node] = fresh;
+    _paramEdits.remove(node);
+    _couplingEdits.removeWhere((e, _) => e.$1 == node);
     _rebuild();
     _afterEdit();
   }
 
   void setCoupling(GraphEdge edge, double strength) {
-    final spec = _specs[edge.parent];
+    _couplingEdits[(edge.parent, edge.child, edge.kind)] = strength;
     if (edge.kind == EdgeKind.value) {
-      spec.valueStrengths[spec.valueChildren.indexOf(edge.child)] = strength;
       network.setValueCoupling(edge.parent, edge.child, strength);
     } else {
-      spec.volatilityStrengths[spec.volatilityChildren.indexOf(edge.child)] =
-          strength;
       network.setVolatilityCoupling(edge.parent, edge.child, strength);
     }
     // The layout caches strengths for the edge labels.
@@ -186,6 +212,7 @@ class Playground extends ChangeNotifier {
 
   void updateData(void Function(DataSettings d) edit) {
     edit(data);
+    data.nTrials = data.nTrials.clamp(1, _preset.maxTrials);
     source = DataSource.simulated;
     loadedName = null;
     player = null;
@@ -206,12 +233,26 @@ class Playground extends ChangeNotifier {
     _rerun();
   }
 
-  bool _loadedFits() =>
-      _preset.input == InputKind.continuous ||
-      observations.every((v) => v.isNaN || v == 0 || v == 1);
+  bool _loadedFits() => loadedFits(_preset, observations, nCategories);
+
+  /// Whether [values] suit [preset]'s input: anything for a continuous
+  /// one, 0/1 for a binary one, category indices for a categorical one
+  /// (non-finite values are missing observations).
+  static bool loadedFits(
+    Preset preset,
+    Float64List values,
+    int nCategories,
+  ) => switch (preset.input) {
+    InputKind.continuous => true,
+    InputKind.binary => values.every((v) => !v.isFinite || v == 0 || v == 1),
+    InputKind.categorical => values.every(
+      (v) =>
+          !v.isFinite || (v == v.roundToDouble() && v >= 0 && v < nCategories),
+    ),
+  };
 
   void _simulate() {
-    final sim = simulate(_preset.input, data);
+    final sim = simulate(_preset.data, data, nCategories: nCategories);
     hidden = sim.hidden;
     _setObservations(sim.observations);
     trajectories = null;
@@ -219,19 +260,21 @@ class Playground extends ChangeNotifier {
 
   void _setObservations(Float64List values) {
     final missing = values.any((v) => !v.isFinite);
+    final n = nCategories;
     if (!missing) {
       observations = values;
       observed = null;
-      return;
+    } else {
+      observations = Float64List(values.length);
+      final obs = Float64List(values.length);
+      for (var t = 0; t < values.length; t++) {
+        final v = values[t];
+        observations[t] = v.isFinite ? v : (n > 0 ? double.nan : 0);
+        obs[t] = v.isFinite ? 1 : 0;
+      }
+      observed = obs;
     }
-    observations = Float64List(values.length);
-    final obs = Float64List(values.length);
-    for (var t = 0; t < values.length; t++) {
-      final v = values[t];
-      observations[t] = v.isFinite ? v : 0;
-      obs[t] = v.isFinite ? 1 : 0;
-    }
-    observed = obs;
+    _input = n > 0 ? oneHot(observations, n) : observations;
   }
 
   // ---------------------------------------------------------------------------
@@ -248,7 +291,7 @@ class Playground extends ChangeNotifier {
     try {
       final into = trajectories;
       trajectories = network.inputData(
-        observations,
+        _input,
         observed: observed,
         // A reused buffer keeps the fields it was made with.
         fields: into == null ? recordedFields : defaultRecordedFields,
@@ -271,11 +314,12 @@ class Playground extends ChangeNotifier {
       totalSurprise = double.nan;
       return;
     }
-    var sum = 0.0;
+    // NaN when no node defines a surprise (ef-state and dp-state only).
+    var sum = double.nan;
     final s = traj.totalSurprise();
     final end = player?.t ?? traj.nTime;
     for (var t = 0; t < end; t++) {
-      if (!s[t].isNaN) sum += s[t];
+      if (!s[t].isNaN) sum = (sum.isNaN ? 0 : sum) + s[t];
     }
     totalSurprise = sum;
     error = _divergence(traj, end);
@@ -286,7 +330,7 @@ class Playground extends ChangeNotifier {
   String? _divergence(Trajectories traj, int end) {
     var scale = 1.0;
     for (final v in observations) {
-      if (v.abs() > scale) scale = v.abs();
+      if (v.isFinite && v.abs() > scale) scale = v.abs();
     }
     final limit = 1000 * scale;
     for (var i = 0; i < traj.nNodes; i++) {
@@ -376,9 +420,28 @@ class Playground extends ChangeNotifier {
           network.nNodes,
           recordedFields,
           kinds: [for (var i = 0; i < network.nNodes; i++) network.kindOf(i)],
+          vectorStarts: {
+            for (final f in VectorField.values)
+              if (_hasVector(f)) f: _vectorStarts(f),
+          },
         );
     trajectories = traj;
     return Player(this, traj)..restart();
+  }
+
+  bool _hasVector(VectorField f) {
+    for (var i = 0; i < network.nNodes; i++) {
+      if (network.vectorLength(i, f) > 0) return true;
+    }
+    return false;
+  }
+
+  Int32List _vectorStarts(VectorField f) {
+    final starts = Int32List(network.nNodes + 1);
+    for (var i = 0; i < network.nNodes; i++) {
+      starts[i + 1] = starts[i] + network.vectorLength(i, f);
+    }
+    return starts;
   }
 }
 
@@ -395,13 +458,16 @@ class Player {
   bool playing = false;
   double carry = 0;
 
-  final Float64List _obs = Float64List(1);
+  late final Float64List _obs = Float64List(owner.network.nInputColumns);
   final Float64List _flag = Float64List(1);
 
   void restart() {
     owner.network.reset();
     for (final f in traj.fields) {
       traj.raw(f).fillRange(0, traj.raw(f).length, double.nan);
+    }
+    for (final f in traj.vectorFields) {
+      traj.rawVector(f).fillRange(0, traj.rawVector(f).length, double.nan);
     }
     t = 0;
     carry = 0;
@@ -413,7 +479,8 @@ class Player {
     final observed = owner.observed;
     for (; t < end; t++) {
       net.predict();
-      _obs[0] = owner.observations[t];
+      final w = _obs.length;
+      _obs.setRange(0, w, owner._input, t * w);
       if (observed != null) {
         _flag[0] = observed[t];
         net.step(_obs, observed: _flag);
@@ -424,6 +491,15 @@ class Player {
         final col = traj.raw(f);
         for (var i = 0; i < traj.nNodes; i++) {
           col[i * traj.nTime + t] = net.get(i, f);
+        }
+      }
+      for (final f in traj.vectorFields) {
+        final raw = traj.rawVector(f);
+        final starts = traj.vectorStart(f);
+        for (var i = 0; i < traj.nNodes; i++) {
+          final len = starts[i + 1] - starts[i];
+          if (len == 0) continue;
+          raw.setAll(starts[i] * traj.nTime + t * len, net.getVector(i, f));
         }
       }
     }

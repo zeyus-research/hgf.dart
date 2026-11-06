@@ -3,6 +3,8 @@
 [![CI](https://github.com/zeyus-research/hgf.dart/actions/workflows/ci.yml/badge.svg)](https://github.com/zeyus-research/hgf.dart/actions/workflows/ci.yml)
 
 **[Try the playground](https://zeyus-research.github.io/hgf.dart/)** (Wasm; needs a recent Chrome, Firefox or Safari, or falls back to JS).
+Every node kind has a preset; link to one with `?preset=binary3`,
+`continuous2`, `continuous3`, `categorical3`, `dp` or `ef` (and `&trials=N`).
 
 Hierarchical Gaussian Filter (HGF) networks in Dart and Flutter. This is a
 pure-Dart port of the nodalised engine of

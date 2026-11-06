@@ -1,7 +1,32 @@
 import 'package:hgf/hgf.dart';
 
 /// What kind of observations a preset's input node takes.
-enum InputKind { binary, continuous }
+enum InputKind {
+  /// 0 or 1.
+  binary,
+
+  /// Any number.
+  continuous,
+
+  /// A category index, `0 .. nCategories − 1` (one-hot coded for the
+  /// network).
+  categorical,
+}
+
+/// How a preset's observations are simulated.
+enum DataModel {
+  /// Binary outcomes whose likely value swaps every block.
+  reversal,
+
+  /// A random walk whose step size switches between calm and volatile.
+  randomWalk,
+
+  /// Categories, one of which is likely; which one changes every block.
+  categoricalReversal,
+
+  /// Draws from a few Gaussian sources, switching source every block.
+  mixture,
+}
 
 /// An editable node description; the network is rebuilt from these when its
 /// structure or update scheme changes, and edited in place otherwise.
@@ -28,15 +53,23 @@ class NodeSpec {
 }
 
 /// A ready-made network with matching simulated data.
+///
+/// The network is either a list of [nodes] (continuous and binary), or
+/// added by [addTo] (for node kinds that imply others: categorical,
+/// ef-state, dp-state).
 class Preset {
   const Preset({
     required this.id,
     required this.name,
     required this.summary,
     required this.input,
-    required this.nodes,
+    required this.data,
+    this.nodes,
+    this.addTo,
     this.defaultTrials = 400,
-  });
+    this.maxTrials = 10000,
+    this.volatilityUpdates,
+  }) : assert((nodes == null) != (addTo == null));
 
   final String id;
   final String name;
@@ -44,19 +77,30 @@ class Preset {
   /// One or two sentences on what the network models.
   final String summary;
   final InputKind input;
-  final List<NodeSpec> Function() nodes;
+  final DataModel data;
+  final List<NodeSpec> Function()? nodes;
+  final void Function(Network net)? addTo;
   final int defaultTrials;
+
+  /// The most trials the data slider offers (slow node kinds take fewer).
+  final int maxTrials;
+
+  /// The volatility update to switch to with this preset (null: keep).
+  final VolatilityUpdates? volatilityUpdates;
 
   Network build({
     VolatilityUpdates volatilityUpdates = VolatilityUpdates.unbounded,
     bool meanField = false,
-    required List<NodeSpec> specs,
   }) {
     final net = Network(
       volatilityUpdates: volatilityUpdates,
       meanFieldUpdates: meanField,
     );
-    for (final s in specs) {
+    if (addTo case final add?) {
+      add(net);
+      return net;
+    }
+    for (final s in nodes!()) {
       net.addNodes(
         kind: s.kind,
         valueChildren: s.valueChildren.isEmpty ? null : s.valueChildren,
@@ -85,6 +129,7 @@ final presets = <Preset>[
         'and how fast it changes (x₂, its volatility), as in reversal '
         'learning tasks.',
     input: InputKind.binary,
+    data: DataModel.reversal,
     nodes: () => [
       NodeSpec(NodeKind.binaryState),
       NodeSpec(
@@ -108,6 +153,7 @@ final presets = <Preset>[
         'Tracking a noisy continuous signal: x₁ follows the hidden value, '
         'its tonic volatility ω sets how fast it is expected to move.',
     input: InputKind.continuous,
+    data: DataModel.randomWalk,
     nodes: () => [
       NodeSpec(NodeKind.continuousState, params: {NodeField.precision: 100.0}),
       NodeSpec(
@@ -124,6 +170,7 @@ final presets = <Preset>[
         'As the 2-level HGF, plus x₂, which learns how volatile the signal '
         'is, so x₁ speeds up its learning when the signal starts to jump.',
     input: InputKind.continuous,
+    data: DataModel.randomWalk,
     nodes: () => [
       NodeSpec(NodeKind.continuousState, params: {NodeField.precision: 100.0}),
       NodeSpec(
@@ -137,6 +184,51 @@ final presets = <Preset>[
         params: {NodeField.tonicVolatility: -4.0},
       ),
     ],
+  ),
+  Preset(
+    id: 'categorical3',
+    name: 'Categorical HGF (3 outcomes)',
+    summary:
+        'Learning the probabilities of three outcomes. Each category gets '
+        'a binary HGF (x₁–x₃ and their logits x₄–x₆), sharing one '
+        'volatility parent (x₇); the categorical node x₀ turns them into a '
+        'Dirichlet belief.',
+    input: InputKind.categorical,
+    data: DataModel.categoricalReversal,
+    // ω₇ = −8: with pyhgf's −4 (or −6) the shared volatility parent runs
+    // away under the default unbounded update within a few hundred (or a
+    // few thousand) trials, as in the binary 3-level HGF (upstream P17).
+    addTo: (net) => net.addCategoricalState(
+      nCategories: 3,
+      volatilityTonicVolatility: -8.0,
+    ),
+  ),
+  Preset(
+    id: 'dp',
+    name: 'Dirichlet process (clustering)',
+    summary:
+        'Sorting observations into clusters, opening a new one when no '
+        'open cluster explains an observation well (a Chinese restaurant '
+        'process). x₁–x₄ are the clusters; α sets how readily new ones '
+        'open. Slow: 20 000 proposals per trial, as in pyhgf.',
+    input: InputKind.continuous,
+    data: DataModel.mixture,
+    addTo: (net) => net
+      ..addDpState(batchSize: 4, alpha: 0.1)
+      ..addEfState(nNodes: 4, valueChildren: [0], nus: 3.0),
+    defaultTrials: 150,
+    maxTrials: 1000,
+  ),
+  Preset(
+    id: 'ef',
+    name: 'Exponential family (mean and variance)',
+    summary:
+        'Tracking the mean and variance of a signal by updating its '
+        'sufficient statistics (x, x²) at a fixed rate 1/(1 + ν): no '
+        'hierarchy, so it cannot speed up when the signal turns volatile.',
+    input: InputKind.continuous,
+    data: DataModel.randomWalk,
+    addTo: (net) => net.addEfState(nus: 10.0),
   ),
 ];
 
@@ -167,6 +259,48 @@ class ParamDef {
 
 /// The sliders for a node of [kind]; [input] when it has no children.
 List<ParamDef> paramsFor(NodeKind kind, {required bool input}) {
+  if (kind == NodeKind.dpState) {
+    return const [
+      ParamDef(
+        NodeField.alpha,
+        'α',
+        'concentration',
+        -3,
+        2,
+        log: true,
+        help:
+            'How readily a new cluster opens. Higher: more, smaller '
+            'clusters; once every cluster is open, further openings are '
+            'dropped (as in pyhgf).',
+      ),
+      ParamDef(
+        NodeField.sensoryPrecision,
+        'π_s',
+        'sensory precision',
+        -1,
+        2,
+        log: true,
+        help:
+            'How tightly a new cluster is fitted to the observation that '
+            'opens it.',
+      ),
+    ];
+  }
+  if (kind == NodeKind.efState) {
+    return const [
+      ParamDef(
+        NodeField.nus,
+        'ν',
+        'pseudo-count',
+        0,
+        3,
+        log: true,
+        help:
+            'How many past observations the estimate is worth: each new '
+            'one moves it by 1/(1 + ν). Higher: slower, smoother.',
+      ),
+    ];
+  }
   if (kind != NodeKind.continuousState) return const [];
   if (input) {
     return const [

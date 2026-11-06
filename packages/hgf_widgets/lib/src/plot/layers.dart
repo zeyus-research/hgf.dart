@@ -8,13 +8,18 @@ import 'dart:ui';
 /// Layers hold the series by reference: to redraw after the data changed in
 /// place (e.g. `Network.inputData(into: ...)`), bump the plot's `revision`.
 sealed class PlotLayer {
-  const PlotLayer({this.color, this.label});
+  const PlotLayer({this.color, this.label, this.readoutGaps = true});
 
   /// Defaults to the theme's primary colour.
   final Color? color;
 
   /// Shown in the hover readout; layers without one are not listed.
   final String? label;
+
+  /// Whether the hover readout lists this layer where it has no value
+  /// (as `—`). Turn off for sparse layers, such as observations split by
+  /// category, where only the one with a value matters.
+  final bool readoutGaps;
 
   /// Whether the automatic y range should cover this layer.
   bool get affectsRange;
@@ -37,6 +42,7 @@ final class LineLayer extends PlotLayer {
     super.label,
     this.width = 1.5,
     this.affectsRange = true,
+    super.readoutGaps,
   });
 
   final Float64List values;
@@ -72,6 +78,7 @@ final class PointLayer extends PlotLayer {
     super.label,
     this.radius = 2.0,
     this.affectsRange = true,
+    super.readoutGaps,
   });
 
   final Float64List values;
@@ -141,10 +148,10 @@ final class BandLayer extends PlotLayer {
   double upper(int t) =>
       _fromPrecision ? _a[t] + scale / math.sqrt(_b[t]) : _b[t];
 
-  /// The half-width at trial [t] for [BandLayer.precision], else the
-  /// midpoint.
+  /// The half-width at trial [t] (the hover readout's `±` value).
   @override
-  double valueAt(int t) => _fromPrecision ? scale / math.sqrt(_b[t]) : _a[t];
+  double valueAt(int t) =>
+      _fromPrecision ? scale / math.sqrt(_b[t]) : (_b[t] - _a[t]) / 2;
 
   @override
   (double, double)? rangeOver(int first, int last) {

@@ -375,6 +375,16 @@ parent of a binary-input node's value parent keeps one sign.
 **hgf.dart:** matches pyhgf. The playground's binary preset uses ω₂ = −4,
 ω₃ = −6 and flags runaway beliefs.
 
+**Also the categorical node** (`add_nodes(kind="categorical-state")`),
+whose implied network has the same shape: binary nodes, their continuous
+value parents, and one shared volatility parent. With pyhgf's defaults
+(ω = −4 throughout), 3 categories and a likely outcome (p = 0.8) that
+switches every 50 trials, a logit runs away at trials 290–320 (seeds 1–3,
+hgf.dart; pyhgf not run on this case yet, but the update is the same
+code). With the shared parent at ω = −6 it runs away at trials 2377–2564
+(seeds 1–6); at −8 it stays bounded for 10 000 trials. Standard and eHGF
+stay bounded at all three. The playground's categorical preset uses −8.
+
 ## rshgf
 
 P1 and P2 apply to rshgf too.

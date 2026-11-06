@@ -555,6 +555,7 @@ class _HoverPainter extends CustomPainter {
       final label = l.label;
       if (label == null || l is ReferenceLine || t >= l.length) continue;
       final v = l.valueAt(t);
+      if (!v.isFinite && !l.readoutGaps) continue;
       lines.add((
         _text('$label ${v.isFinite ? _fmt(v) : '—'}', style),
         l.color ?? style.accent,

@@ -19,15 +19,72 @@ void main() {
         final expected = {
           for (final f in whole.fields) f: Float64List.fromList(whole.raw(f)),
         };
+        final expectedVectors = {
+          for (final f in whole.vectorFields)
+            f: Float64List.fromList(whole.rawVector(f)),
+        };
         pg.stepOnce();
         pg.player!.advance(1000);
         expect(pg.player!.t, 120);
         for (final f in whole.fields) {
           expect(pg.trajectories!.raw(f), expected[f], reason: '$f');
         }
+        for (final f in whole.vectorFields) {
+          expect(
+            pg.trajectories!.rawVector(f),
+            expectedVectors[f],
+            reason: '$f',
+          );
+        }
         expect(pg.error, isNull);
       });
     }
+
+    test('categorical preset: one-hot input, per-category hidden truth', () {
+      final pg = Playground(presetId: 'categorical3', nTrials: 200);
+      expect(pg.nCategories, 3);
+      expect(pg.hidden, hasLength(3));
+      for (var t = 0; t < 200; t++) {
+        final p = pg.hidden!.fold(0.0, (s, h) => s + h[t]);
+        expect(p, closeTo(1, 1e-12));
+      }
+      expect(pg.observations.every((v) => v == 0 || v == 1 || v == 2), isTrue);
+      // The binary node of the observed category saw a 1.
+      final t = 17, k = pg.observations[t].toInt();
+      expect(pg.trajectories!.at(1 + k, NodeField.mean, t), 1);
+      // Loading category indices (with a gap) works; other values don't fit.
+      pg.load(Float64List.fromList([0, 2, double.nan, 1]), 'c.csv');
+      expect(pg.observed, [1, 1, 0, 1]);
+      expect(pg.error, isNull);
+      expect(
+        Playground.loadedFits(pg.preset, Float64List.fromList([0, 3]), 3),
+        isFalse,
+      );
+      expect(
+        Playground.loadedFits(pg.preset, Float64List.fromList([0.5]), 3),
+        isFalse,
+      );
+    });
+
+    test('dp preset finds the simulated sources', () {
+      final pg = Playground(presetId: 'dp', nTrials: 150);
+      final traj = pg.trajectories!;
+      final n = traj.vectorAt(0, VectorField.n, 149);
+      // Three sources, 50 trials each, three clusters.
+      expect(n.where((c) => c > 0), hasLength(3));
+      expect(n.reduce((a, b) => a + b), 150);
+      // Edits on implied nodes survive a rebuild.
+      pg.setParam(0, NodeField.alpha, 5);
+      pg.setVolatilityUpdates(VolatilityUpdates.eHGF);
+      expect(pg.param(0, NodeField.alpha), 5);
+    });
+
+    test('the trial count is capped per preset', () {
+      final pg = Playground(presetId: 'binary3', nTrials: 5000);
+      pg.setPreset('dp');
+      expect(pg.data.nTrials, pg.preset.defaultTrials);
+      expect(Playground(presetId: 'dp', nTrials: 5000).data.nTrials, 1000);
+    });
 
     test('parameter edits re-filter into the same buffers', () {
       final pg = Playground(presetId: 'binary3', nTrials: 200);
@@ -98,6 +155,44 @@ void main() {
         await tester.pump();
         expect(tester.takeException(), isNull);
         expect(find.byType(TrajectoryPlot), findsNWidgets(4));
+      }
+    }
+    // Every preset renders: the vector nodes get their own panels, and the
+    // nodes folded into them none.
+    const panels = {
+      'binary3': 4,
+      'continuous2': 3,
+      'continuous3': 4,
+      // x₇, the logits, the categorical input, surprise.
+      'categorical3': 4,
+      // Only the input: no node kind with a surprise.
+      'dp': 1,
+      'ef': 1,
+    };
+    tester.view.physicalSize = const Size(1400, 900);
+    for (final p in presets) {
+      final pg = Playground(presetId: p.id, nTrials: 100);
+      await tester.pumpWidget(
+        PlaygroundApp(settings: settings, playground: pg),
+      );
+      await tester.pump();
+      expect(tester.takeException(), isNull, reason: p.id);
+      expect(
+        find.byType(TrajectoryPlot),
+        findsNWidgets(panels[p.id]!),
+        reason: p.id,
+      );
+      expect(
+        HgfTrajectoryView.panelCount(pg.network),
+        panels[p.id],
+        reason: p.id,
+      );
+      // Each node's card renders.
+      for (var i = 0; i < pg.network.nNodes; i++) {
+        pg.select(i);
+        await tester.pump();
+        expect(tester.takeException(), isNull, reason: '${p.id} x$i');
+        pg.select(i);
       }
     }
     // Selecting a node shows its sliders.
