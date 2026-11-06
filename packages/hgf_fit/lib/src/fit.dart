@@ -4,6 +4,8 @@ import 'dart:typed_data';
 import 'model.dart';
 import 'optim/lbfgs.dart';
 import 'optim/optimizer.dart';
+import 'pass.dart';
+import 'workers.dart';
 
 /// How [BatchedObjective] computes gradients.
 enum Gradients {
@@ -80,9 +82,19 @@ final class BatchedObjective {
     List<int> subjectOf,
     List<Float64List> points,
     List<bool> gradient,
-  ) {
+  ) => runInline((o) => evaluatePasses(subjectOf, points, gradient, o));
+
+  /// [evaluate] as a program: yields the batched passes it needs and puts
+  /// the result in [result].
+  Iterable<Step> evaluatePasses(
+    List<int> subjectOf,
+    List<Float64List> points,
+    List<bool> gradient,
+    Out<(Float64List, List<Float64List?>)> result,
+  ) sync* {
     if (gradients == Gradients.exact) {
-      return _evaluateExact(subjectOf, points, gradient);
+      yield* _evaluateExact(subjectOf, points, gradient, result);
+      return;
     }
     final k = model.dimension, nP = points.length;
     final central = gradients == Gradients.central;
@@ -114,15 +126,16 @@ final class BatchedObjective {
         }
       }
     }
-    final out = Float64List(nE);
-    model.negLogPosterior(
+    final pass = Pass(
+      model,
       subjects,
       subj,
       y,
-      out,
       jacobian: jacobian,
       includePrior: includePrior,
     );
+    yield pass;
+    final out = pass.out;
     passes++;
     elements += nE;
     final values = Float64List(nP);
@@ -153,16 +166,17 @@ final class BatchedObjective {
       }
       grads[j] = g;
     }
-    return (values, grads);
+    result.value = (values, grads);
   }
 
   /// [evaluate] with exact gradients: the points that need one in a pass
   /// with tangents, the others (if any) in a plain pass.
-  (Float64List, List<Float64List?>) _evaluateExact(
+  Iterable<Step> _evaluateExact(
     List<int> subjectOf,
     List<Float64List> points,
     List<bool> gradient,
-  ) {
+    Out<(Float64List, List<Float64List?>)> result,
+  ) sync* {
     final k = model.dimension, nP = points.length;
     final values = Float64List(nP);
     final grads = List<Float64List?>.filled(nP, null);
@@ -181,17 +195,17 @@ final class BatchedObjective {
         subj[q] = subjectOf[idx[q]];
         y.setRange(q * k, (q + 1) * k, p);
       }
-      final out = Float64List(n);
-      final g = withGradient ? Float64List(n * k) : null;
-      model.negLogPosterior(
+      final pass = Pass(
+        model,
         subjects,
         subj,
         y,
-        out,
         jacobian: jacobian,
         includePrior: includePrior,
-        gradient: g,
+        gradient: withGradient,
       );
+      yield pass;
+      final out = pass.out, g = pass.gradient;
       passes++;
       elements += n;
       for (var q = 0; q < n; q++) {
@@ -201,7 +215,7 @@ final class BatchedObjective {
         }
       }
     }
-    return (values, grads);
+    result.value = (values, grads);
   }
 
   /// The objective and its Hessian (row-major `k x k`) at each of [points],
@@ -216,7 +230,15 @@ final class BatchedObjective {
     List<int> subjectOf,
     List<Float64List> points, {
     double step = 1e-4,
-  }) {
+  }) => runInline((o) => hessianPasses(subjectOf, points, o, step: step));
+
+  /// [hessians] as a program.
+  Iterable<Step> hessianPasses(
+    List<int> subjectOf,
+    List<Float64List> points,
+    Out<(Float64List, List<Float64List>)> result, {
+    double step = 1e-4,
+  }) sync* {
     final k = model.dimension, nP = points.length;
     final per = 2 * k * k + 1;
     final nE = nP * per;
@@ -261,15 +283,16 @@ final class BatchedObjective {
         }
       }
     }
-    final out = Float64List(nE);
-    model.negLogPosterior(
+    final pass = Pass(
+      model,
       subjects,
       subj,
       y,
-      out,
       jacobian: jacobian,
       includePrior: includePrior,
     );
+    yield pass;
+    final out = pass.out;
     passes++;
     elements += nE;
     final values = Float64List(nP);
@@ -300,7 +323,7 @@ final class BatchedObjective {
       if (!f0.isFinite) hm.fillRange(0, k * k, double.nan);
       hess.add(hm);
     }
-    return (values, hess);
+    result.value = (values, hess);
   }
 }
 
@@ -383,7 +406,69 @@ MapFit fitMap(
   math.Random? random,
   double fdStep = 1e-5,
   Gradients? gradients,
-}) {
+}) => runInline(
+  (o) => _fitMap(
+    model,
+    subjects,
+    optimizer,
+    start,
+    restarts,
+    random,
+    fdStep,
+    gradients,
+    1,
+    o,
+  ),
+);
+
+/// [fitMap] with each batched pass split across the pool's isolates.
+extension FitMapOnWorkers on FitWorkers {
+  /// [fitMap] on this pool; the same result, bit for bit.
+  Future<MapFit> fitMap(
+    HgfModel model,
+    List<Subject> subjects, {
+    Optimizer optimizer = const Lbfgs(),
+    List<List<double>>? start,
+    int restarts = 0,
+    math.Random? random,
+    double fdStep = 1e-5,
+    Gradients? gradients,
+  }) => run(
+    (o) => _fitMap(
+      model,
+      subjects,
+      optimizer,
+      start,
+      restarts,
+      random,
+      fdStep,
+      gradients,
+      streams,
+      o,
+    ),
+  );
+
+  /// [BatchedObjective.evaluate] on this pool.
+  Future<(Float64List values, List<Float64List?> gradients)> evaluate(
+    BatchedObjective objective,
+    List<int> subjectOf,
+    List<Float64List> points,
+    List<bool> gradient,
+  ) => run((o) => objective.evaluatePasses(subjectOf, points, gradient, o));
+}
+
+Iterable<Step> _fitMap(
+  HgfModel model,
+  List<Subject> subjects,
+  Optimizer optimizer,
+  List<List<double>>? start,
+  int restarts,
+  math.Random? random,
+  double fdStep,
+  Gradients? gradients,
+  int streams,
+  Out<MapFit> result,
+) sync* {
   if (start != null && start.length != subjects.length) {
     throw ArgumentError('start must have one vector per subject');
   }
@@ -410,7 +495,15 @@ MapFit fitMap(
       tasks.add((subject: s, y0: model.toUnconstrained(x0)));
     }
   }
-  final results = minimizeAll(objective, optimizer, tasks);
+  final minimized = Out<List<OptimizeResult>>();
+  yield* minimizeAllPasses(
+    objective,
+    optimizer,
+    tasks,
+    minimized,
+    streams: streams,
+  );
+  final results = minimized.value;
 
   // The best run per subject, then its likelihood and prior parts.
   final best = List<OptimizeResult?>.filled(subjects.length, null);
@@ -426,16 +519,17 @@ MapFit fitMap(
   for (var s = 0; s < n; s++) {
     y.setRange(s * k, (s + 1) * k, best[s]!.x);
   }
-  final post = Float64List(n), nll = Float64List(n);
-  model.negLogPosterior(
+  final pass = Pass(
+    model,
     subjects,
     Int32List.fromList([for (var s = 0; s < n; s++) s]),
     y,
-    post,
-    negLogLikelihood: nll,
+    negLogLikelihood: true,
   );
+  yield pass;
+  final post = pass.out, nll = pass.negLogLikelihood!;
   final names = model.names;
-  return MapFit(
+  result.value = MapFit(
     [
       for (var s = 0; s < n; s++)
         FitResult(
@@ -461,7 +555,44 @@ List<OptimizeResult> minimizeAll(
   BatchedObjective objective,
   Optimizer optimizer,
   List<({int subject, Float64List y0})> tasks,
-) {
+) => runInline((o) => minimizeAllPasses(objective, optimizer, tasks, o));
+
+/// [minimizeAll] as a program; with [streams] > 1, the tasks are split
+/// into that many [Concurrent] streams (each in lock step).
+Iterable<Step> minimizeAllPasses(
+  BatchedObjective objective,
+  Optimizer optimizer,
+  List<({int subject, Float64List y0})> tasks,
+  Out<List<OptimizeResult>> result, {
+  int streams = 1,
+}) sync* {
+  if (streams <= 1 || tasks.length < 2) {
+    yield* _minimizeAll(objective, optimizer, tasks, result);
+    return;
+  }
+  final groups = splitTasks(tasks.length, streams);
+  final outs = [for (final _ in groups) Out<List<OptimizeResult>>()];
+  yield Concurrent([
+    for (var g = 0; g < groups.length; g++)
+      _minimizeAll(objective, optimizer, [
+        for (final t in groups[g]) tasks[t],
+      ], outs[g]),
+  ]);
+  final results = List<OptimizeResult?>.filled(tasks.length, null);
+  for (var g = 0; g < groups.length; g++) {
+    for (var i = 0; i < groups[g].length; i++) {
+      results[groups[g][i]] = outs[g].value[i];
+    }
+  }
+  result.value = [for (final r in results) r!];
+}
+
+Iterable<Step> _minimizeAll(
+  BatchedObjective objective,
+  Optimizer optimizer,
+  List<({int subject, Float64List y0})> tasks,
+  Out<List<OptimizeResult>> result,
+) sync* {
   final slots = [for (final _ in tasks) ResultSlot()];
   final its = [
     for (var t = 0; t < tasks.length; t++)
@@ -471,6 +602,7 @@ List<OptimizeResult> minimizeAll(
     for (var t = 0; t < tasks.length; t++)
       if (its[t].moveNext()) t,
   ];
+  final evaluated = Out<(Float64List, List<Float64List?>)>();
   while (active.isNotEmpty) {
     final subjectOf = <int>[], points = <Float64List>[], grad = <bool>[];
     for (final t in active) {
@@ -481,7 +613,8 @@ List<OptimizeResult> minimizeAll(
         grad.add(r.gradient);
       }
     }
-    final (values, grads) = objective.evaluate(subjectOf, points, grad);
+    yield* objective.evaluatePasses(subjectOf, points, grad, evaluated);
+    final (values, grads) = evaluated.value;
     var j = 0;
     for (final t in active) {
       final r = its[t].current;
@@ -497,5 +630,5 @@ List<OptimizeResult> minimizeAll(
         if (its[t].moveNext()) t,
     ];
   }
-  return [for (final s in slots) s.result!];
+  result.value = [for (final s in slots) s.result!];
 }

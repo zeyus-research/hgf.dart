@@ -5,6 +5,8 @@ import 'dart:typed_data';
 import '../fit.dart';
 import '../model.dart';
 import '../optim/optimizer.dart';
+import '../pass.dart';
+import '../workers.dart';
 import 'diagnostics.dart';
 import 'nuts.dart';
 
@@ -370,7 +372,73 @@ NutsFit sampleNuts(
   int seed = 0,
   double fdStep = 1e-5,
   Gradients? gradients,
-}) {
+}) => runInline(
+  (o) => _sampleNuts(
+    model,
+    subjects,
+    sampler,
+    chains,
+    warmup,
+    draws,
+    start,
+    jitter,
+    seed,
+    fdStep,
+    gradients,
+    1,
+    o,
+  ),
+);
+
+/// [sampleNuts] with each leapfrog pass split across the pool's isolates.
+extension SampleNutsOnWorkers on FitWorkers {
+  /// [sampleNuts] on this pool; the same draws, bit for bit.
+  Future<NutsFit> sampleNuts(
+    HgfModel model,
+    List<Subject> subjects, {
+    Nuts sampler = const Nuts(),
+    int chains = 4,
+    int warmup = 1000,
+    int draws = 1000,
+    List<List<double>>? start,
+    double jitter = 1,
+    int seed = 0,
+    double fdStep = 1e-5,
+    Gradients? gradients,
+  }) => run(
+    (o) => _sampleNuts(
+      model,
+      subjects,
+      sampler,
+      chains,
+      warmup,
+      draws,
+      start,
+      jitter,
+      seed,
+      fdStep,
+      gradients,
+      streams,
+      o,
+    ),
+  );
+}
+
+Iterable<Step> _sampleNuts(
+  HgfModel model,
+  List<Subject> subjects,
+  Nuts sampler,
+  int chains,
+  int warmup,
+  int draws,
+  List<List<double>>? start,
+  double jitter,
+  int seed,
+  double fdStep,
+  Gradients? gradients,
+  int streams,
+  Out<NutsFit> result,
+) sync* {
   if (start != null && start.length != subjects.length) {
     throw ArgumentError('start must have one vector per subject');
   }
@@ -413,15 +481,22 @@ NutsFit sampleNuts(
     }
     outs.add(row);
   }
-  driveChains(tasks, (subjectOf, points) {
-    final (v, g) = objective.evaluate(
+  yield* driveChainPasses(tasks, streams: streams, (
+    subjectOf,
+    points,
+    o,
+  ) sync* {
+    final evaluated = Out<(Float64List, List<Float64List?>)>();
+    yield* objective.evaluatePasses(
       subjectOf,
       points,
       List.filled(points.length, true),
+      evaluated,
     );
-    return (v, [for (final x in g) x!]);
+    final (v, g) = evaluated.value;
+    o.value = (v, [for (final x in g) x!]);
   });
-  return NutsFit(
+  result.value = NutsFit(
     [
       for (var s = 0; s < subjects.length; s++)
         PosteriorDraws(
@@ -499,6 +574,44 @@ void driveChains(
   )
   evaluate,
 ) {
+  for (final _ in driveChainPasses(tasks, (subjectOf, points, o) sync* {
+    o.value = evaluate(subjectOf, points);
+  })) {}
+}
+
+/// [driveChains] as a program: [evaluate] is a program too. With
+/// [streams] > 1 the tasks are split into that many [Concurrent] streams
+/// (each in lock step).
+Iterable<Step> driveChainPasses(
+  List<({int subject, Iterator<EvalRequest> it})> tasks,
+  Iterable<Step> Function(
+    List<int> subjectOf,
+    List<Float64List> points,
+    Out<(Float64List, List<Float64List>)> result,
+  )
+  evaluate, {
+  int streams = 1,
+}) sync* {
+  if (streams > 1 && tasks.length > 1) {
+    yield Concurrent([
+      for (final group in splitTasks(tasks.length, streams))
+        _driveChains([for (final t in group) tasks[t]], evaluate),
+    ]);
+  } else {
+    yield* _driveChains(tasks, evaluate);
+  }
+}
+
+Iterable<Step> _driveChains(
+  List<({int subject, Iterator<EvalRequest> it})> tasks,
+  Iterable<Step> Function(
+    List<int> subjectOf,
+    List<Float64List> points,
+    Out<(Float64List, List<Float64List>)> result,
+  )
+  evaluate,
+) sync* {
+  final evaluated = Out<(Float64List, List<Float64List>)>();
   var active = [
     for (final t in tasks)
       if (t.it.moveNext()) t,
@@ -511,7 +624,8 @@ void driveChains(
         points.add(p);
       }
     }
-    final (values, grads) = evaluate(subjectOf, points);
+    yield* evaluate(subjectOf, points, evaluated);
+    final (values, grads) = evaluated.value;
     var j = 0;
     for (final t in active) {
       final r = t.it.current;

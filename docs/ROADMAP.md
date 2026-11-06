@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-06, after MAP, Laplace, NUTS, exact gradients and hierarchical models)
+## Where things stand (2026-11-06, after MAP, Laplace, NUTS, exact gradients, hierarchical models and isolate pools)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -51,6 +51,10 @@ supersedes its phase list.
   `HierarchicalModel` adds group-level inference: `sampleHierarchical`
   (joint NUTS; on pyhgf's multilevel notebook 1.2× NumPyro's and 1.85×
   PyMC's ESS/s on one core) and `fitEmpiricalBayes` (Laplace-EM, 45 ms).
+  `FitWorkers` runs all of these on a pool of isolates with bit-identical
+  results: 3.5–3.8× on 4 cores for large problems (MAP and NUTS on 200
+  agents), 3× for NUTS on 20 agents (42 s → 13.8 s), 2.6× for
+  hierarchical NUTS.
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -797,9 +801,74 @@ First part done 2026-11-06: MAP estimation.
   - Not done: empirical Bayes with shared parameters (needs a gradient
     M-step); hyperpriors in EB (MAP-II); group-level covariates
     (regressions on μ).
+- [x] Isolate-parallel passes (2026-11-06): `FitWorkers`
+      (`lib/src/workers_io.dart`, `pass.dart`).
+  - The drivers became `Program`s: `sync*` generators yielding `Pass`es
+    (one `negLogPosterior` call each) and `Concurrent` streams. `runInline`
+    answers them on the calling isolate (the synchronous functions, as
+    before); a `FitWorkers` pool answers them on worker isolates
+    (`workers.fitMap`, `.laplace`, `.sampleNuts`, `.sampleHierarchical`,
+    `.fitEmpiricalBayes`, `.evaluate`). One copy of each driver serves both.
+    Batch elements are independent, so the results are bit-identical
+    (tested on every driver, mixed lengths, time steps, shared series,
+    `ResponseModel.fn` closures, errors raised in a worker).
+  - Two kinds of parallelism: each pass splits into contiguous slices of
+    about equal cost (`minSliceTrials`, default 2048), and drivers with
+    independent tasks (per-subject optimisers and NUTS chains,
+    hierarchical chains) deal them, strided, into one stream per worker,
+    each in lock step. All slices go into one queue; idle workers take one
+    at a time.
+  - The main isolate only routes. Letting it filter slices too stalled
+    every stream: the drivers resume there, and a stream resumed after a
+    local slice found every worker busy (their replies were still unread
+    behind the microtask) and ran entirely on the main isolate. Even with
+    the steal moved to the event loop, a busy main isolate holds the
+    workers' streams back, so the default is one worker per processor.
+  - Persistent pool, spawned once (the VM limits running isolates per
+    group; the user hit this in liblsl.dart). Models (by `withPriors`
+    family, sharing compiled batches) and subjects (in one message, so
+    shared series stay shared) are copied to each worker once and dropped
+    via a `Finalizer` when collected on the main isolate.
+  - Measured costs (AOT, i7-7700, 4 cores / 8 threads): a slice-sized
+    message round trip takes ~5 µs against ~350 µs of filtering per 2048
+    trials; the drivers' serial share is ~3%. Typed data is always copied
+    (`asUnmodifiableView` too; 80 MB in 7 ms).
+    `@pragma('vm:deeply-immutable')` objects are shared, not copied:
+    100k of them send in 1.3 ms against 33 ms for plain lists. That
+    doesn't pay here, because only small typed lists cross per slice, and
+    `Prior`/`ResponseModel` are user-extensible, which the pragma doesn't
+    allow. Small batches cost more per element (b = 5: 229 ns,
+    b = 40: 167 ns per element-trial), so more streams than workers lose.
+  - `melos run bench:parallel` (150 + 150 draws for the NUTS rows):
+
+    | job | 1 isolate | 2 workers | 4 workers | 8 workers |
+    |---|---|---|---|---|
+    | MAP, 20 agents | 12.8 ms | 1.56× | 1.55× | 1.80× |
+    | Laplace, 20 agents | 4.6 ms | 1.83× | 2.16× | 2.64× |
+    | NUTS, 20 agents | 7.44 s | 1.87× | 3.07× | 2.90× |
+    | MAP, 200 agents | 115 ms | 1.82× | 3.60× | 3.66× |
+    | Laplace, 200 agents | 48.9 ms | 2.02× | 3.84× | 4.57× |
+    | NUTS, 200 agents | 72.0 s | 1.97× | 3.53× | 3.97× |
+    | hierarchical NUTS, 10 agents | 11.7 s | 1.86× | 2.72× | 2.80× |
+    | empirical Bayes, 10 agents | 35.4 ms | 1.51× | 2.04× | 1.80× |
+
+    Four physical cores bound it at about 4× (8 workers add the usual
+    hyper-threading gain on the large jobs). Small problems are limited by
+    lock-step barriers and small batches. Full-length runs (4 chains ×
+    (1000 + 1000), as in the PyMC/NumPyro comparisons): per-agent NUTS on
+    20 agents 42.0 s → 13.8 s on 4 workers (3.0×), 13.3 s on 8;
+    hierarchical NUTS 57.7 s → 21.8 s (2.6×), 21.6 s on 8. (Those
+    comparisons ran NumPyro and PyMC on one core; NumPyro can run chains
+    in parallel too, `chain_method="parallel"` with several host devices,
+    not measured.)
+  - The web gets a pool without workers (`workers_stub.dart`, chosen by
+    `dart.library.io`; dart2wasm defines `dart.library.isolate` but throws
+    at run time), so the same code runs everywhere.
 - [ ] Next:
-  - isolate-parallel passes (split a pass's elements across isolates; web
-    workers on the web);
+  - web workers for `FitWorkers` on the web: needs a serialisable model
+    description (network spec, response model, priors), since workers only
+    take structured-clone data; closures (`ResponseModel.fn`, custom
+    couplings) can't cross;
   - tangents for the vector node kinds, once they have batched kernels;
   - a fitting view in the playground (fit the loaded CSV's responses).
 
@@ -915,7 +984,8 @@ every push, and the playground deploys to
 https://zeyus-research.github.io/hgf.dart/ from `main`. Phase 6 has
 started: `packages/hgf_fit` does MAP estimation, the Laplace
 approximation, NUTS, exact gradients and hierarchical models
-(2026-11-06); see its open items (isolate-parallel passes next).
+(2026-11-06), and runs them on isolate pools (`FitWorkers`, 2026-11-06);
+see its open items (web workers next).
 
 ```sh
 cd hgf.dart
@@ -926,6 +996,7 @@ melos run bench:playground                        # playground frame times (Wasm
 melos run bench:fit                               # MAP fitting vs pyhgf + JAX
 melos run bench:nuts                              # NUTS vs PyMC and NumPyro (~8 min)
 melos run bench:hier                              # hierarchical NUTS vs NumPyro, PyMC (~4 min)
+melos run bench:parallel                          # FitWorkers speed-ups (~15 min)
 (cd apps/hgf_playground && flutter run -d chrome --wasm)   # try it
 dart compile exe packages/hgf/benchmark/bin/profile_modes.dart -o /tmp/pm && \
   (cd packages/hgf && /tmp/pm)                    # ns/trial baseline per mode

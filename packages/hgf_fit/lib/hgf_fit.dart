@@ -10,7 +10,9 @@
 /// [sampleNuts] draws full posteriors per subject. For group-level
 /// inference, a [HierarchicalModel] pools parameters across subjects:
 /// [sampleHierarchical] samples the joint posterior, [fitEmpiricalBayes]
-/// estimates the populations by Laplace-EM.
+/// estimates the populations by Laplace-EM. Each of these runs on a
+/// [FitWorkers] pool of isolates too (`workers.fitMap(...)`, …), with the
+/// same results.
 ///
 /// ```dart
 /// final model = HgfModel(
@@ -37,17 +39,19 @@ export 'src/empirical_bayes.dart';
 export 'src/fit.dart';
 export 'src/hierarchical.dart';
 export 'src/laplace.dart';
-export 'src/model.dart';
+export 'src/model.dart' hide modelFamily, modelWithParameters;
 export 'src/optim/lbfgs.dart';
 export 'src/optim/nelder_mead.dart';
 export 'src/optim/optimizer.dart'
     show EvalRequest, OptimizeResult, Optimizer, ResultSlot, minimizeFunction;
 export 'src/parameter.dart';
+export 'src/pass.dart' hide splitTasks;
 export 'src/prior.dart';
 export 'src/response_model.dart' hide bindResponsePartials;
 export 'src/sample/diagnostics.dart'
     show essBulk, essMean, essTail, mcseMean, quantileOf, rhat;
 export 'src/sample/nuts.dart';
-export 'src/sample/sample.dart' hide chainSeed, driveChains;
+export 'src/sample/sample.dart' hide chainSeed, driveChainPasses, driveChains;
 export 'src/special.dart' show erf, erfc, logNormalCdf, normalQuantile;
 export 'src/transform.dart';
+export 'src/workers.dart';

@@ -565,6 +565,15 @@ final class HgfModel {
   }
 }
 
+/// The token shared by [model] and every copy made from it by
+/// `withPriors` (they share compiled batches). Package-internal.
+Object modelFamily(HgfModel model) => model._batches;
+
+/// [base] with [parameters] in place of its own, sharing its compiled
+/// batches (what `withPriors` makes). Package-internal.
+HgfModel modelWithParameters(HgfModel base, List<Parameter> parameters) =>
+    HgfModel._withParameters(base, parameters);
+
 final class _Group {
   _Group(this.nTime, this.timeSteps);
 

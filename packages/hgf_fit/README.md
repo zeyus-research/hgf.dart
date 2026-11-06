@@ -192,8 +192,36 @@ differences when every parameter is in the network, and faster when some
 are response parameters, or than the central differences MAP needs; their
 real gain there is exactness.
 
+## Parallel fitting
+
+Every fitting function also runs on a pool of worker isolates, with the
+same results bit for bit:
+
+```dart
+final workers = await FitWorkers.spawn();          // one per processor
+final fit = await workers.fitMap(model, subjects);
+final lap = await workers.laplace(model, fit);
+final post = await workers.sampleNuts(model, subjects);
+await workers.close();
+```
+
+Each batched pass is split into slices across the workers, and drivers
+with independent tasks (each subject's optimiser and chains) run them as
+concurrent streams, so one slow chain doesn't hold the others at every
+pass. Spawn one pool and reuse it. On the web the pool has no workers and
+runs on the calling isolate, so the same code works there.
+
+On 4 cores (`melos run bench:parallel`, i7-7700): MAP on 200 agents
+115 → 32 ms (3.6×), the Laplace pass 3.8×, NUTS on 200 agents 3.5×; NUTS on
+the 20 agents above 42.0 → 13.8 s (3.0×), hierarchical NUTS 57.7 → 21.8 s
+(2.6×). Small problems gain less (1.5–2× for MAP on 20 agents).
+
+Custom drivers can use the pool too: write a `Program` (a `sync*`
+generator yielding `Pass`es, or `Concurrent` streams of them) and run it
+with `workers.run(program)` or `runInline(program)`.
+
 ## Status
 
 Phase 6 of the [roadmap](../../docs/ROADMAP.md): MAP estimation, the
-Laplace approximation, NUTS, exact gradients and hierarchical models work.
-Planned: isolate-parallel passes.
+Laplace approximation, NUTS, exact gradients, hierarchical models and
+isolate-parallel fitting work. Planned: web workers for the pool.

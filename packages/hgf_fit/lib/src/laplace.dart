@@ -4,7 +4,9 @@ import 'dart:typed_data';
 import 'fit.dart';
 import 'linalg.dart';
 import 'model.dart';
+import 'pass.dart';
 import 'special.dart';
+import 'workers.dart';
 
 /// The Laplace approximation around one subject's MAP estimate: a Gaussian
 /// with the inverse Hessian of the negative log posterior as covariance,
@@ -165,17 +167,38 @@ final class LaplaceFit {
 /// The Hessian is taken on the unconstrained scale with relative step
 /// [step] (see `BatchedObjective.hessians`). The approximation assumes the
 /// estimate is a mode: check `FitResult.converged`.
-LaplaceFit laplace(HgfModel model, MapFit fit, {double step = 1e-4}) {
+LaplaceFit laplace(HgfModel model, MapFit fit, {double step = 1e-4}) =>
+    runInline((o) => _laplace(model, fit, step, o));
+
+/// [laplace] with the Hessian pass split across the pool's isolates.
+extension LaplaceOnWorkers on FitWorkers {
+  /// [laplace] on this pool; the same result, bit for bit.
+  Future<LaplaceFit> laplace(
+    HgfModel model,
+    MapFit fit, {
+    double step = 1e-4,
+  }) => run((o) => _laplace(model, fit, step, o));
+}
+
+Iterable<Step> _laplace(
+  HgfModel model,
+  MapFit fit,
+  double step,
+  Out<LaplaceFit> result,
+) sync* {
   final objective = BatchedObjective(model, [
     for (final r in fit.results) r.subject,
   ]);
   final n = fit.results.length, k = model.dimension;
-  final (_, hessians) = objective.hessians(
+  final h = Out<(Float64List, List<Float64List>)>();
+  yield* objective.hessianPasses(
     [for (var s = 0; s < n; s++) s],
     [for (final r in fit.results) r.y],
+    h,
     step: step,
   );
-  return LaplaceFit(
+  final (_, hessians) = h.value;
+  result.value = LaplaceFit(
     [
       for (var s = 0; s < n; s++)
         LaplaceResult._(

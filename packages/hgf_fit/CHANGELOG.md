@@ -1,5 +1,20 @@
 ## Unreleased
 
+- Isolate-parallel fitting: `FitWorkers` is a pool of worker isolates
+  (`FitWorkers.spawn()`, one per processor by default), and
+  `workers.fitMap`, `.laplace`, `.sampleNuts`, `.sampleHierarchical`,
+  `.fitEmpiricalBayes` and `.evaluate` give the same results as the
+  synchronous functions, bit for bit. Each batched pass is split into
+  slices across the workers, and drivers with independent tasks run them as
+  concurrent streams, so the slowest chain doesn't set every pass's barrier.
+  On the web the pool has no workers and runs inline.
+- The drivers are now `Program`s: `sync*` generators yielding `Pass`es
+  (one `HgfModel.negLogPosterior` call each) and `Concurrent` streams,
+  answered by `runInline` or a `FitWorkers` pool, and public so that custom
+  drivers can run on the pool too. `BatchedObjective.evaluatePasses` /
+  `hessianPasses`, `HierarchicalObjective.evaluatePasses` and
+  `minimizeAllPasses` are the program forms of the existing methods.
+
 - Hierarchical models: `HierarchicalModel` over a subject-level `HgfModel`,
   with pooled parameters (each subject's value, on the parameter's
   unconstrained scale, drawn from a `Population` `N(μ, σ²)` with hyperpriors

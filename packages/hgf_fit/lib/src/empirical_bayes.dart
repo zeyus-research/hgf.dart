@@ -7,9 +7,11 @@ import 'linalg.dart';
 import 'model.dart';
 import 'optim/lbfgs.dart';
 import 'optim/optimizer.dart';
+import 'pass.dart';
 import 'prior.dart';
 import 'special.dart';
 import 'transform.dart';
+import 'workers.dart';
 
 const double _logSqrt2Pi = 0.9189385332046727;
 
@@ -188,7 +190,62 @@ EmpiricalBayesFit fitEmpiricalBayes(
   double tolerance = 1e-4,
   double minSd = 1e-3,
   Gradients? gradients,
-}) {
+}) => runInline(
+  (o) => _fitEmpiricalBayes(
+    model,
+    subjects,
+    optimizer,
+    start,
+    maxIterations,
+    tolerance,
+    minSd,
+    gradients,
+    1,
+    o,
+  ),
+);
+
+/// [fitEmpiricalBayes] with each batched pass split across the pool's
+/// isolates.
+extension EmpiricalBayesOnWorkers on FitWorkers {
+  /// [fitEmpiricalBayes] on this pool; the same result, bit for bit.
+  Future<EmpiricalBayesFit> fitEmpiricalBayes(
+    HierarchicalModel model,
+    List<Subject> subjects, {
+    Optimizer optimizer = const Lbfgs(),
+    List<List<double>>? start,
+    int maxIterations = 200,
+    double tolerance = 1e-4,
+    double minSd = 1e-3,
+    Gradients? gradients,
+  }) => run(
+    (o) => _fitEmpiricalBayes(
+      model,
+      subjects,
+      optimizer,
+      start,
+      maxIterations,
+      tolerance,
+      minSd,
+      gradients,
+      streams,
+      o,
+    ),
+  );
+}
+
+Iterable<Step> _fitEmpiricalBayes(
+  HierarchicalModel model,
+  List<Subject> subjects,
+  Optimizer optimizer,
+  List<List<double>>? start,
+  int maxIterations,
+  double tolerance,
+  double minSd,
+  Gradients? gradients,
+  int streams,
+  Out<EmpiricalBayesFit> result,
+) sync* {
   if (model.shared.isNotEmpty) {
     throw UnsupportedError(
       'Shared parameters need sampleHierarchical, not empirical Bayes',
@@ -239,15 +296,21 @@ EmpiricalBayesFit fitEmpiricalBayes(
       jacobian: true,
       gradients: gradients,
     );
-    results = minimizeAll(objective, optimizer, [
-      for (var s = 0; s < n; s++) (subject: s, y0: ys[s]),
-    ]);
+    final minimized = Out<List<OptimizeResult>>();
+    yield* minimizeAllPasses(
+      objective,
+      optimizer,
+      [for (var s = 0; s < n; s++) (subject: s, y0: ys[s])],
+      minimized,
+      streams: streams,
+    );
+    results = minimized.value;
     for (var s = 0; s < n; s++) {
       ys[s] = Float64List.fromList(results[s].x);
     }
-    final (v, hessians) = objective.hessians([
-      for (var s = 0; s < n; s++) s,
-    ], ys);
+    final hess = Out<(Float64List, List<Float64List>)>();
+    yield* objective.hessianPasses([for (var s = 0; s < n; s++) s], ys, hess);
+    final (v, hessians) = hess.value;
     values = v;
     passes += objective.passes;
     elements += objective.elements;
@@ -291,7 +354,7 @@ EmpiricalBayesFit fitEmpiricalBayes(
     }
   }
 
-  return EmpiricalBayesFit._(
+  result.value = EmpiricalBayesFit._(
     model,
     {
       for (var p = 0; p < pooled.length; p++)

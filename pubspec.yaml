@@ -142,6 +142,16 @@ melos:
         β pooled, 4 chains, 1000 + 1000, centred), one core: hgf_fit's
         empirical Bayes and sampleHierarchical against NumPyro and PyMC (the
         notebook's route). Linux (taskset).
+    bench:parallel:
+      run: >-
+        cd packages/hgf_fit &&
+        dart compile exe benchmark/bin/parallel_benchmark.dart -o .dart_tool/parallel_benchmark &&
+        .dart_tool/parallel_benchmark --agents 20,200 --workers 2,4,8 --draws 150
+      description: >-
+        FitWorkers (isolate-parallel passes) against the single-isolate
+        functions: MAP, Laplace, NUTS, hierarchical NUTS and empirical Bayes
+        on pyhgf's parameter-recovery problem; checks the results are
+        bit-identical. Takes about 15 minutes.
     bench:
       run: dart run tool/bench_compare.dart --rust
       description: >-

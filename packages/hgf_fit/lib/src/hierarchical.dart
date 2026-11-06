@@ -5,10 +5,12 @@ import 'dart:typed_data';
 import 'fit.dart';
 import 'model.dart';
 import 'optim/optimizer.dart';
+import 'pass.dart';
 import 'prior.dart';
 import 'sample/nuts.dart';
 import 'sample/sample.dart';
 import 'transform.dart';
+import 'workers.dart';
 
 const double _logSqrt2Pi = 0.9189385332046727;
 
@@ -360,7 +362,13 @@ final class HierarchicalObjective {
   /// `U` is `+∞` (and the gradient NaN) where the density isn't finite.
   (Float64List values, List<Float64List> gradients) evaluate(
     List<Float64List> thetas,
-  ) {
+  ) => runInline((o) => evaluatePasses(thetas, o));
+
+  /// [evaluate] as a program.
+  Iterable<Step> evaluatePasses(
+    List<Float64List> thetas,
+    Out<(Float64List, List<Float64List>)> result,
+  ) sync* {
     final hm = model, m = hm.model;
     final n = subjects.length, k = m.dimension, nP = thetas.length;
     final dim = hm.dimension(n), nG = hm._nGroup, nL = hm._nLocal;
@@ -391,13 +399,17 @@ final class HierarchicalObjective {
         points.add(y);
       }
     }
-    final (v, g) = n == 0
-        ? (Float64List(0), const <Float64List?>[])
-        : subjectObjective.evaluate(
-            subjectOf,
-            points,
-            List.filled(points.length, true),
-          );
+    final subjectValues = Out<(Float64List, List<Float64List?>)>()
+      ..value = (Float64List(0), const <Float64List?>[]);
+    if (n > 0) {
+      yield* subjectObjective.evaluatePasses(
+        subjectOf,
+        points,
+        List.filled(points.length, true),
+        subjectValues,
+      );
+    }
+    final (v, g) = subjectValues.value;
 
     final values = Float64List(nP);
     final grads = <Float64List>[];
@@ -469,7 +481,7 @@ final class HierarchicalObjective {
       }
       grads.add(grad);
     }
-    return (values, grads);
+    result.value = (values, grads);
   }
 }
 
@@ -577,7 +589,74 @@ HierarchicalFit sampleHierarchical(
   int seed = 0,
   double fdStep = 1e-5,
   Gradients? gradients,
-}) {
+}) => runInline(
+  (o) => _sampleHierarchical(
+    model,
+    subjects,
+    sampler,
+    chains,
+    warmup,
+    draws,
+    start,
+    jitter,
+    seed,
+    fdStep,
+    gradients,
+    1,
+    o,
+  ),
+);
+
+/// [sampleHierarchical] with each leapfrog pass split across the pool's
+/// isolates.
+extension SampleHierarchicalOnWorkers on FitWorkers {
+  /// [sampleHierarchical] on this pool; the same draws, bit for bit.
+  Future<HierarchicalFit> sampleHierarchical(
+    HierarchicalModel model,
+    List<Subject> subjects, {
+    Nuts sampler = const Nuts(),
+    int chains = 4,
+    int warmup = 1000,
+    int draws = 1000,
+    List<List<double>>? start,
+    double jitter = 1,
+    int seed = 0,
+    double fdStep = 1e-5,
+    Gradients? gradients,
+  }) => run(
+    (o) => _sampleHierarchical(
+      model,
+      subjects,
+      sampler,
+      chains,
+      warmup,
+      draws,
+      start,
+      jitter,
+      seed,
+      fdStep,
+      gradients,
+      streams,
+      o,
+    ),
+  );
+}
+
+Iterable<Step> _sampleHierarchical(
+  HierarchicalModel model,
+  List<Subject> subjects,
+  Nuts sampler,
+  int chains,
+  int warmup,
+  int draws,
+  List<List<double>>? start,
+  double jitter,
+  int seed,
+  double fdStep,
+  Gradients? gradients,
+  int streams,
+  Out<HierarchicalFit> result,
+) sync* {
   if (chains < 1) throw ArgumentError.value(chains, 'chains');
   final objective = model._objective(subjects, gradients, fdStep);
   final theta0 = model.initialPoint(subjects.length, start: start);
@@ -602,8 +681,12 @@ HierarchicalFit sampleHierarchical(
           .iterator,
     ));
   }
-  driveChains(tasks, (_, points) => objective.evaluate(points));
-  return HierarchicalFit(
+  yield* driveChainPasses(
+    tasks,
+    (_, points, o) => objective.evaluatePasses(points, o),
+    streams: streams,
+  );
+  result.value = HierarchicalFit(
     model,
     subjects,
     PosteriorDraws(
