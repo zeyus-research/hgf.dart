@@ -62,5 +62,5 @@ jobs:
       - run: dart pub global activate melos ^8.2.2
       - run: melos run test:web --no-select
         env:
-          CHROME_EXECUTABLE: ${{ steps.chrome.outputs.chrome-path }}
+          CHROME_EXECUTABLE: "${{ steps.chrome.outputs.chrome-path }} --no-sandbox"
       - run: melos run test:wasm-release --no-select
