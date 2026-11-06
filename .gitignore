@@ -10,6 +10,7 @@ doc/api/
 *.js.map
 *.wasm
 *.mjs
+!tool/web/*.mjs
 
 # FVM version cache
 .fvm/
