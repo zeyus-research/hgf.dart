@@ -1,8 +1,9 @@
 # hgf_fit
 
 Parameter estimation for [`hgf`](../hgf) networks: priors, response models,
-batched objectives with finite-difference gradients, and MAP optimisers that
-fit many subjects in one batched pass.
+batched objectives with finite-difference gradients, MAP optimisers that
+fit many subjects in one batched pass, and the Laplace approximation for
+uncertainty and model evidence.
 
 ```dart
 import 'package:hgf/hgf.dart';
@@ -26,6 +27,10 @@ final subjects = [
 ];
 final fit = fitMap(model, subjects);               // L-BFGS by default
 for (final r in fit.results) print(r.parameters);  // {omega2: …, inverseTemperature: …}
+
+final lap = laplace(model, fit);                   // one more pass
+for (final r in lap.results) print(r.interval());  // 95% intervals
+print(lap.logEvidence);                            // for model comparison
 ```
 
 - **Model.** `HgfModel` = a `Network` (the perceptual model), a
@@ -53,6 +58,14 @@ for (final r in fit.results) print(r.parameters);  // {omega2: …, inverseTempe
   yield evaluation requests, so `fitMap` runs every subject's optimiser in
   lock step and answers all their requests with one pass. `restarts:` adds
   random starts drawn from the priors and keeps the best.
+- **Laplace approximation.** `laplace(model, fit)` takes every subject's
+  Hessian at its estimate by finite differences, all in one pass (`2k² + 1`
+  elements per subject), and gives the posterior covariance, standard errors
+  (delta method), intervals that respect each parameter's support, and the
+  Laplace log evidence. On the recovery problem the evidence is within 0.01
+  nats of grid quadrature when the posterior is well identified (0.08 when
+  it isn't), the standard errors within 2% (13%), and 95% intervals cover
+  the true values 92–98% of the time.
 
 ## Performance
 
@@ -75,6 +88,6 @@ grows.
 
 ## Status
 
-Phase 6 of the [roadmap](../../docs/ROADMAP.md): MAP estimation works.
-Planned: Laplace (Hessian) uncertainty, HMC/NUTS, hierarchical priors,
+Phase 6 of the [roadmap](../../docs/ROADMAP.md): MAP estimation and the
+Laplace approximation work. Planned: HMC/NUTS, hierarchical priors,
 isolate-parallel passes, and draw export for ArviZ.

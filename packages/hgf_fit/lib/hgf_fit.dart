@@ -4,6 +4,8 @@
 /// [Parameter]s with [Prior]s), the data with [Subject]s, and fit with
 /// [fitMap]. Every subject is fitted at once: each optimiser step of every
 /// subject, with its finite-difference gradient, is one `BatchNetwork` pass.
+/// [laplace] adds the Laplace approximation around the estimates (standard
+/// errors, intervals, log evidence for model comparison) in one more pass.
 ///
 /// ```dart
 /// final model = HgfModel(
@@ -20,10 +22,14 @@
 /// );
 /// final fit = fitMap(model, subjects);
 /// for (final r in fit.results) print(r.parameters);
+/// final lap = laplace(model, fit);
+/// print(lap.logEvidence);
+/// for (final r in lap.results) print(r.interval());
 /// ```
 library;
 
 export 'src/fit.dart';
+export 'src/laplace.dart';
 export 'src/model.dart';
 export 'src/optim/lbfgs.dart';
 export 'src/optim/nelder_mead.dart';
@@ -32,5 +38,5 @@ export 'src/optim/optimizer.dart'
 export 'src/parameter.dart';
 export 'src/prior.dart';
 export 'src/response_model.dart';
-export 'src/special.dart' show erf, erfc, logNormalCdf;
+export 'src/special.dart' show erf, erfc, logNormalCdf, normalQuantile;
 export 'src/transform.dart';

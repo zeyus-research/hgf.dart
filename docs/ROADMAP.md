@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-06, after the first fitting package)
+## Where things stand (2026-11-06, after MAP + Laplace fitting)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -21,7 +21,7 @@ supersedes its phase list.
     data, bit-identical to `Network` (W4);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
-- 463 engine tests pass (plus 43 fitting, 17 widget and 15 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+- 463 engine tests pass (plus 54 fitting, 17 widget and 15 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
   `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
@@ -40,7 +40,8 @@ supersedes its phase list.
   batched pass per optimiser step. On pyhgf's parameter-recovery problem it
   is 3.2× (20 agents) to 5.4× (200 agents) faster than pyhgf + JAX
   gradients + SciPy L-BFGS-B, single-threaded, and evaluates the same
-  objective to 3e-13.
+  objective to 3e-13. `laplace` adds standard errors, intervals and the log
+  evidence (within 0.01 nats of quadrature) in one more pass.
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -629,10 +630,26 @@ First part done 2026-11-06: MAP estimation.
   - Found on the way: `sigmoidInverseTemperature`'s two non-integer `pow`s
     cost 46 ns per trial, more than the binary 2-level filter itself
     (43 ns). Now `σ(β · logit x)` (in `package:hgf`, agrees to 1e-13).
+- [x] Laplace approximation (2026-11-06): `laplace(model, mapFit)`.
+  - Hessian by central second differences of function values on the
+    unconstrained scale, `2k² + 1` elements per subject, every subject in
+    one pass (`BatchedObjective.hessians`; cheaper and `O(h²)`, unlike
+    forward differences of gradient stencils at `(k+1)(2k+1)`).
+  - Covariance `H_y⁻¹`, natural-scale standard errors by the delta method,
+    intervals `y ± z·sd` mapped through the transforms (they respect the
+    support), correlations, and the log evidence. The MAP is a mode on the
+    natural scale, so the evidence is the natural-scale Laplace
+    `−f + (k/2) log 2π − ½ log det H_x`, computed from `H_y = J H_x J`.
+    A Hessian that isn't positive definite gives NaN, not garbage.
+  - Checked against grid quadrature of the exact evidence (density on the
+    unconstrained scale with the Jacobian): within 0.002–0.008 nats on
+    well-identified binary 2-level fits, 0.08 on a weakly identified one;
+    standard errors within 2% (13%). 95% intervals cover 92–98% of true
+    values over 40 simulated agents (4 seeds). Model comparison: fixing ω
+    at the truth beats fitting it by ~2.4 nats per subject (Occam), and a
+    wrong fixed ω loses by ~80 nats per subject.
+  - Cost: ~0.4 ms per subject for the Hessian pass at k = 2.
 - [ ] Next:
-  - Laplace approximation: a finite-difference Hessian at the mode
-    (`(k+1)` gradient stencils, one pass) for standard errors, and the
-    log evidence for model comparison;
   - HMC/NUTS on `BatchedObjective(jacobian: true)`; many chains or
     subjects in one pass, the same lock-step trick;
   - hierarchical (group-level) priors: the objective is then not separable
@@ -756,8 +773,9 @@ done (2026-11-06): `packages/hgf_widgets` and `apps/hgf_playground`, with
 views and presets for every node kind; see its open items. CI runs on
 every push, and the playground deploys to
 https://zeyus-research.github.io/hgf.dart/ from `main`. Phase 6 has
-started: `packages/hgf_fit` does MAP estimation (2026-11-06); see its open
-items (Laplace, HMC/NUTS, hierarchical priors).
+started: `packages/hgf_fit` does MAP estimation and the Laplace
+approximation (2026-11-06); see its open items (HMC/NUTS, hierarchical
+priors).
 
 ```sh
 cd hgf.dart

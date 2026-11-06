@@ -7,3 +7,6 @@
   `ObservationSurprise`, `ResponseModel.fn`), batched objectives with
   finite-difference gradients (`BatchedObjective`), `Lbfgs` and `NelderMead`,
   and `fitMap`, which fits every subject in lock step.
+- `laplace`: Laplace approximation around MAP estimates (Hessian by finite
+  differences in one batched pass, `BatchedObjective.hessians`), with
+  covariance, standard errors, intervals and log evidence. `normalQuantile`.

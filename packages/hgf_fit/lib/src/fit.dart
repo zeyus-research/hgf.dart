@@ -100,6 +100,98 @@ final class BatchedObjective {
     }
     return (values, grads);
   }
+
+  /// The objective and its Hessian (row-major `k x k`) at each of [points],
+  /// all in one pass.
+  ///
+  /// Central second differences with step `hᵢ = step · max(1, |yᵢ|)`: the
+  /// diagonal from `f(y ± hᵢeᵢ)`, each off-diagonal entry from the four
+  /// points `f(y ± hᵢeᵢ ± hⱼeⱼ)`; `2k² + 1` elements per point. An entry
+  /// whose stencil touches a non-finite value is NaN. The default step
+  /// balances the `O(h²)` truncation error against rounding (`~ε/h²`).
+  (Float64List values, List<Float64List> hessians) hessians(
+    List<int> subjectOf,
+    List<Float64List> points, {
+    double step = 1e-4,
+  }) {
+    final k = model.dimension, nP = points.length;
+    final per = 2 * k * k + 1;
+    final nE = nP * per;
+    final subj = Int32List(nE);
+    final y = Float64List(nE * k);
+    final h = Float64List(nP * k);
+    var e = 0;
+    void add(
+      int j,
+      Float64List p, [
+      int i = -1,
+      double si = 0,
+      int l = -1,
+      double sl = 0,
+    ]) {
+      subj[e] = subjectOf[j];
+      y.setRange(e * k, (e + 1) * k, p);
+      if (i >= 0) y[e * k + i] = p[i] + si * h[j * k + i];
+      if (l >= 0) y[e * k + l] = p[l] + sl * h[j * k + l];
+      e++;
+    }
+
+    for (var j = 0; j < nP; j++) {
+      final p = points[j];
+      if (p.length != k) throw ArgumentError('Points must have $k entries');
+      for (var i = 0; i < k; i++) {
+        // Make the steps exactly representable offsets from p.
+        final hi = step * math.max(1.0, p[i].abs());
+        h[j * k + i] = (p[i] + hi) - p[i];
+      }
+      add(j, p);
+      for (var i = 0; i < k; i++) {
+        add(j, p, i, 1);
+        add(j, p, i, -1);
+      }
+      for (var i = 0; i < k; i++) {
+        for (var l = i + 1; l < k; l++) {
+          add(j, p, i, 1, l, 1);
+          add(j, p, i, 1, l, -1);
+          add(j, p, i, -1, l, 1);
+          add(j, p, i, -1, l, -1);
+        }
+      }
+    }
+    final out = Float64List(nE);
+    model.negLogPosterior(subjects, subj, y, out, jacobian: jacobian);
+    passes++;
+    elements += nE;
+    final values = Float64List(nP);
+    final hess = <Float64List>[];
+    for (var j = 0; j < nP; j++) {
+      final base = j * per;
+      final f0 = out[base];
+      values[j] = f0;
+      final hm = Float64List(k * k);
+      double fin(double v) => v.isFinite ? v : double.nan;
+      var o = base + 1;
+      for (var i = 0; i < k; i++) {
+        final hi = h[j * k + i];
+        hm[i * k + i] = fin((out[o] - 2 * f0 + out[o + 1]) / (hi * hi));
+        o += 2;
+      }
+      for (var i = 0; i < k; i++) {
+        for (var l = i + 1; l < k; l++) {
+          final v = fin(
+            (out[o] - out[o + 1] - out[o + 2] + out[o + 3]) /
+                (4 * h[j * k + i] * h[j * k + l]),
+          );
+          hm[i * k + l] = v;
+          hm[l * k + i] = v;
+          o += 4;
+        }
+      }
+      if (!f0.isFinite) hm.fillRange(0, k * k, double.nan);
+      hess.add(hm);
+    }
+    return (values, hess);
+  }
 }
 
 /// One subject's MAP estimate.

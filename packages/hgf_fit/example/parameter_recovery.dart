@@ -1,6 +1,7 @@
 // Parameter recovery on pyhgf's "4-Parameter_recovery" notebook setup: 20
 // simulated agents (binary 2-level HGF, sigmoid decisions with an inverse
-// temperature), refitted by MAP with every agent in one batch.
+// temperature), refitted by MAP with every agent in one batch, then the
+// Laplace approximation for 95% intervals and the log evidence.
 //
 //   dart run example/parameter_recovery.dart
 import 'dart:io';
@@ -76,6 +77,31 @@ void main() {
       );
     }
   }
+
+  // Laplace approximation around the L-BFGS estimates: one more pass.
+  final sw = Stopwatch()..start();
+  final lap = laplace(model, fitMap(model, subjects));
+  sw.stop();
+  print(
+    '\nLaplace (MAP + Hessian): ${sw.elapsedMilliseconds} ms, '
+    'log evidence ${lap.logEvidence.toStringAsFixed(2)}',
+  );
+  var covered = 0;
+  String fmt(double v) => v.toStringAsFixed(2);
+  for (final r in lap.results) {
+    final i = r.map.subject.id! as int;
+    final (lo, hi) = r.interval();
+    final truth = [omegas[i], betas[i]];
+    for (var p = 0; p < 2; p++) {
+      if (lo[p] <= truth[p] && truth[p] <= hi[p]) covered++;
+    }
+    print(
+      '  ${i.toString().padLeft(2)}: ω ${fmt(truth[0])} in '
+      '[${fmt(lo[0])}, ${fmt(hi[0])}], β ${fmt(truth[1])} in '
+      '[${fmt(lo[1])}, ${fmt(hi[1])}]',
+    );
+  }
+  print('  95% intervals cover $covered of ${2 * n} true values');
 }
 
 double _corr(List<double> a, List<double> b) {

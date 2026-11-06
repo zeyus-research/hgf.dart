@@ -49,6 +49,35 @@ void main() {
     });
   });
 
+  group('normalQuantile', () {
+    test('matches mpmath', () {
+      // Φ⁻¹(p), mpmath at 40 digits.
+      const cases = <(double, double)>[
+        (0.975, 1.9599639845400542355),
+        (0.3, -0.52440051270804078404),
+        (0.5, 0.0),
+        (1e-10, -6.3613409024040562047),
+        (1e-300, -37.047096299361199237),
+      ];
+      for (final (p, x) in cases) {
+        expect(normalQuantile(p), closeTo(x, 4e-16 * (1 + x.abs())));
+        // Symmetric by construction (1 − q is exact for q ≥ 0.5).
+        final q = 1 - p;
+        expect(normalQuantile(q), -normalQuantile(1 - q));
+      }
+      expect(normalQuantile(0), double.negativeInfinity);
+      expect(normalQuantile(1), double.infinity);
+      expect(normalQuantile(1.5), isNaN);
+    });
+    test('inverts the CDF', () {
+      for (var i = 1; i < 200; i++) {
+        final p = i / 200;
+        final x = normalQuantile(p);
+        expect(0.5 * erfc(-x / math.sqrt2), closeTo(p, 1e-15));
+      }
+    });
+  });
+
   group('priors', () {
     final priors = <(Prior, double, double)>[
       (const Normal(1, 2), -30, 30),
