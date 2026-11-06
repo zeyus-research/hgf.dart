@@ -157,6 +157,33 @@ class Network {
   /// The kind of node [i].
   NodeKind kindOf(int i) => _defs[i].kind;
 
+  /// The value parents of node [i], in the order the edges were added
+  /// (read-only; for inspection and drawing the graph).
+  List<int> valueParentsOf(int i) => List.unmodifiable(_defs[i].valueParents);
+
+  /// The value children of node [i].
+  List<int> valueChildrenOf(int i) => List.unmodifiable(_defs[i].valueChildren);
+
+  /// The volatility parents of node [i].
+  List<int> volatilityParentsOf(int i) =>
+      List.unmodifiable(_defs[i].volatilityParents);
+
+  /// The volatility children of node [i].
+  List<int> volatilityChildrenOf(int i) =>
+      List.unmodifiable(_defs[i].volatilityChildren);
+
+  /// The coupling strengths of [valueParentsOf] node [i], in the same order
+  /// (current values: [setValueCoupling] changes them).
+  List<double> valueParentStrengthsOf(int i) =>
+      List.unmodifiable(_defs[i].valueParentStrengths);
+
+  /// The coupling strengths of [volatilityParentsOf] node [i].
+  List<double> volatilityParentStrengthsOf(int i) =>
+      List.unmodifiable(_defs[i].volatilityParentStrengths);
+
+  /// The value-coupling function node [i] applies to its value children.
+  Coupling couplingOf(int i) => _defs[i].coupling;
+
   // ---------------------------------------------------------------------------
   // Construction
   // ---------------------------------------------------------------------------

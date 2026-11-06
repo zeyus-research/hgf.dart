@@ -34,14 +34,15 @@ app builds, tests and publishes on its own.
 | path | what |
 |---|---|
 | `packages/hgf` | the core engine (pure Dart, web-safe) |
+| `packages/hgf_widgets` | Flutter widgets: trajectory plots (10k trials per frame) and a network graph |
+| `apps/hgf_playground` | the interactive playground (web/Wasm first; desktop and mobile) |
 | `tool/parity` | pyhgf fixture generator and Python benchmarks (a `uv` project using `../pyhgf`) |
 | `tool/rs_native_bench` | rshgf timed natively, without Python |
 | `tool/bench_compare.dart` | runs every runtime and writes `docs/benchmark_results.md` |
 | `docs/` | feasibility report, roadmap, benchmark results |
 
-Planned, and created only when their phase starts: `packages/hgf_widgets` and
-`apps/hgf_playground` (Flutter), `packages/hgf_fit` (gradients, optimisers,
-samplers).
+Planned, and created only when its phase starts: `packages/hgf_fit`
+(gradients, optimisers, samplers).
 
 ## Development
 
@@ -52,6 +53,8 @@ melos run test                   # unit + parity tests (Dart VM)
 CHROME_EXECUTABLE=/usr/bin/chromium melos run test:web   # parity on dart2js/dart2wasm
 melos run fixtures               # regenerate pyhgf fixtures (needs ../pyhgf, uv, cargo)
 melos run bench                  # benchmarks: Dart AOT/JIT/JS/Wasm vs JAX vs rshgf
+melos run build:playground       # playground web build (Wasm)
+melos run bench:playground       # its frame times in headless Chromium (uv + playwright)
 ```
 
 Fixtures and benchmarks expect a pyhgf checkout next to this repository

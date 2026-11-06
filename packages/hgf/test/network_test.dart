@@ -78,6 +78,22 @@ void main() {
       ]);
     });
 
+    test('edges are readable from both ends, with current strengths', () {
+      final net = Network()
+        ..addNodes()
+        ..addNodes(valueChildren: [0], coupling: CouplingFn.tanh)
+        ..addNodes(volatilityChildren: [1], volatilityChildrenStrengths: [2]);
+      expect(net.valueParentsOf(0), [1]);
+      expect(net.valueChildrenOf(1), [0]);
+      expect(net.volatilityParentsOf(1), [2]);
+      expect(net.volatilityChildrenOf(2), [1]);
+      expect(net.volatilityParentStrengthsOf(1), [2.0]);
+      expect(net.couplingOf(1), CouplingFn.tanh);
+      net.setValueCoupling(1, 0, 0.5);
+      expect(net.valueParentStrengthsOf(0), [0.5]);
+      expect(() => net.valueParentsOf(0).add(2), throwsUnsupportedError);
+    });
+
     test('edges to nodes that do not exist yet are rejected', () {
       expect(() => Network().addNodes(valueChildren: [0]), throwsArgumentError);
     });

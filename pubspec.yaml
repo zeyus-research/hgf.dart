@@ -8,6 +8,8 @@ environment:
 
 workspace:
   - packages/hgf
+  - packages/hgf_widgets
+  - apps/hgf_playground
 
 dev_dependencies:
   melos: ^8.2.2
@@ -76,10 +78,29 @@ melos:
       packageFilters:
         fileExists: tool/parity_check.dart
       description: Run the parity suite on a dart2wasm -O4 (release) build under Node.
+    test:flutter:
+      exec:
+        command: flutter test --exclude-tags performance
+        concurrency: 1
+      packageFilters:
+        dirExists: test
+        flutter: true
+      description: Run `flutter test` for the Flutter packages and apps (no performance tags).
     test:
       steps:
         - melos run test:dart --no-select
+        - melos run test:flutter --no-select
       description: Run all default tests.
+    build:playground:
+      run: cd apps/hgf_playground && flutter build web --wasm
+      description: Build the playground for the web (Wasm, the primary target).
+    bench:playground:
+      run: >-
+        cd apps/hgf_playground && flutter build web --wasm &&
+        cd ../.. && uv run --with playwright python -I tool/web/playground_bench.py
+      description: >-
+        Frame times of the playground's Wasm build while a slider re-filters
+        300, 1000 and 10000 trials every frame (headless Chromium).
     fixtures:
       run: cd tool/parity && uv run python gen_fixtures.py
       description: Regenerate the pyhgf parity fixtures (needs ../pyhgf and uv).

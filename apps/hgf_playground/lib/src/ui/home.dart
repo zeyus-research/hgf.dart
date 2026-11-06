@@ -1,0 +1,291 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:hgf/hgf.dart';
+import 'package:hgf_widgets/hgf_widgets.dart';
+
+import '../model/playground.dart';
+import '../model/presets.dart';
+import '../settings.dart';
+import 'frame_stats.dart';
+import 'panels.dart';
+import 'playback_bar.dart';
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key, required this.settings, required this.playground});
+
+  final Settings settings;
+  final Playground playground;
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage>
+    with SingleTickerProviderStateMixin {
+  late final Ticker _ticker = createTicker(_onTick);
+  Duration _last = Duration.zero;
+  final ValueNotifier<int?> _hover = ValueNotifier(null);
+  final FrameStats _frames = FrameStats();
+
+  Playground get pg => widget.playground;
+
+  @override
+  void initState() {
+    super.initState();
+    pg.addListener(_syncTicker);
+  }
+
+  @override
+  void dispose() {
+    pg.removeListener(_syncTicker);
+    _ticker.dispose();
+    _hover.dispose();
+    _frames.dispose();
+    super.dispose();
+  }
+
+  void _syncTicker() {
+    if (pg.playing && !_ticker.isActive) {
+      _last = Duration.zero;
+      _ticker.start();
+    } else if (!pg.playing && _ticker.isActive) {
+      _ticker.stop();
+    }
+  }
+
+  void _onTick(Duration elapsed) {
+    final dt = (elapsed - _last).inMicroseconds / 1e6;
+    _last = elapsed;
+    pg.tick(dt);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: pg,
+      builder: (context, _) => Scaffold(
+        appBar: AppBar(
+          title: Text(
+            MediaQuery.sizeOf(context).width < 600 ? 'HGF' : 'HGF playground',
+          ),
+          actions: [
+            _PresetMenu(playground: pg, settings: widget.settings),
+            _ThemeMenu(settings: widget.settings),
+            const SizedBox(width: 8),
+          ],
+        ),
+        body: LayoutBuilder(
+          builder: (context, box) =>
+              box.maxWidth >= 900 ? _wide(context) : _narrow(context),
+        ),
+      ),
+    );
+  }
+
+  Widget _plots({double? panelHeight}) {
+    final traj = pg.trajectories;
+    if (traj == null) {
+      return Center(child: Text(pg.error ?? 'No data'));
+    }
+    final input = pg.network.inputIdxs.first;
+    final hidden = pg.hidden;
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    return HgfTrajectoryView(
+      network: pg.network,
+      trajectories: traj,
+      layout: pg.layout,
+      revision: pg.revision,
+      limit: pg.player?.t,
+      hover: _hover,
+      panelHeight: panelHeight,
+      extraLayers: {
+        if (hidden != null && hidden.length == traj.nTime)
+          input: [
+            LineLayer(
+              hidden,
+              color: muted.withValues(alpha: 0.7),
+              width: 1,
+              label: pg.preset.input == InputKind.binary ? 'true p' : 'hidden',
+            ),
+          ],
+      },
+    );
+  }
+
+  Widget _status() => PlaybackBar(playground: pg, frames: _frames);
+
+  Widget _wide(BuildContext context) => Row(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      SizedBox(
+        width: 360,
+        child: ListView(padding: const EdgeInsets.all(12), children: _cards()),
+      ),
+      const VerticalDivider(width: 1),
+      Expanded(
+        child: Column(
+          children: [
+            _status(),
+            if (pg.error != null) _ErrorBanner(pg.error!),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(4, 0, 12, 8),
+                child: _plots(),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ],
+  );
+
+  Widget _narrow(BuildContext context) {
+    final traj = pg.trajectories;
+    var panels = 1;
+    if (traj != null) {
+      for (var i = 0; i < pg.network.nNodes; i++) {
+        if (HgfTrajectoryView.plottable(pg.network.kindOf(i))) panels++;
+      }
+    }
+    const h = 150.0;
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      children: [
+        _status(),
+        if (pg.error != null) _ErrorBanner(pg.error!),
+        SizedBox(
+          height: panels * h,
+          child: _plots(panelHeight: h),
+        ),
+        const SizedBox(height: 12),
+        ..._cards(),
+      ],
+    );
+  }
+
+  List<Widget> _cards() => [
+    NetworkCard(playground: pg, hover: _hover),
+    const SizedBox(height: 12),
+    NodeCard(playground: pg),
+    const SizedBox(height: 12),
+    DataCard(playground: pg, settings: widget.settings),
+    const SizedBox(height: 12),
+    const AboutCard(),
+  ];
+}
+
+class _ErrorBanner extends StatelessWidget {
+  const _ErrorBanner(this.message);
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      color: scheme.errorContainer,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Row(
+        children: [
+          Icon(Icons.warning_amber, size: 18, color: scheme.onErrorContainer),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: TextStyle(color: scheme.onErrorContainer),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PresetMenu extends StatelessWidget {
+  const _PresetMenu({required this.playground, required this.settings});
+
+  final Playground playground;
+  final Settings settings;
+
+  @override
+  Widget build(BuildContext context) => PopupMenuButton<String>(
+    tooltip: 'Network',
+    initialValue: playground.preset.id,
+    onSelected: (id) {
+      playground.setPreset(id);
+      settings.remember(preset: id);
+    },
+    itemBuilder: (context) => [
+      for (final p in presets) PopupMenuItem(value: p.id, child: Text(p.name)),
+    ],
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.account_tree_outlined, size: 20),
+          const SizedBox(width: 6),
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.sizeOf(context).width < 600 ? 150 : 260,
+            ),
+            child: Text(
+              playground.preset.name,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const Icon(Icons.arrow_drop_down),
+        ],
+      ),
+    ),
+  );
+}
+
+class _ThemeMenu extends StatelessWidget {
+  const _ThemeMenu({required this.settings});
+
+  final Settings settings;
+
+  static const _icons = {
+    ThemeMode.system: Icons.brightness_auto,
+    ThemeMode.light: Icons.light_mode,
+    ThemeMode.dark: Icons.dark_mode,
+  };
+  static const _names = {
+    ThemeMode.system: 'Follow the system',
+    ThemeMode.light: 'Light',
+    ThemeMode.dark: 'Dark',
+  };
+
+  @override
+  Widget build(BuildContext context) => PopupMenuButton<ThemeMode>(
+    tooltip: 'Theme',
+    icon: Icon(_icons[settings.themeMode]),
+    initialValue: settings.themeMode,
+    onSelected: settings.setThemeMode,
+    itemBuilder: (context) => [
+      for (final m in ThemeMode.values)
+        PopupMenuItem(
+          value: m,
+          child: ListTile(
+            leading: Icon(_icons[m]),
+            title: Text(_names[m]!),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+    ],
+  );
+}
+
+/// The current value of a node, for the graph's captions.
+String? nodeCaption(Playground pg, int node, int? t) {
+  final traj = pg.trajectories;
+  if (traj == null) return null;
+  final end = pg.player?.t ?? traj.nTime;
+  final at = t ?? end - 1;
+  if (at < 0 || at >= end) return null;
+  final v = traj.at(node, NodeField.mean, at);
+  if (!v.isFinite) return null;
+  return 'μ ${v.toStringAsFixed(2)}';
+}

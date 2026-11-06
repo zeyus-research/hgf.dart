@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Read-only graph accessors: `Network.valueParentsOf`, `valueChildrenOf`,
+  `volatilityParentsOf`, `volatilityChildrenOf`, their coupling strengths
+  (`valueParentStrengthsOf`, `volatilityParentStrengthsOf`) and
+  `couplingOf`, for drawing and inspecting a network.
 - Dirichlet process nodes (`NodeKind.dpState`, `Network.addDpState`, and
   `Network.addEfState(valueChildren: [...])` for their clusters): each
   observation goes to the most likely open cluster or opens a new one, with

@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-06, after W4 and the vector node kinds)
+## Where things stand (2026-11-06, after the vector node kinds and the first playground)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -21,7 +21,7 @@ supersedes its phase list.
     data, bit-identical to `Network` (W4);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
-- 461 tests pass. Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+- 462 engine tests pass (plus 13 widget and 9 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
   `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
@@ -471,15 +471,57 @@ layer widths. They're a useful idiom reference for typed-data/SIMD code
 
 ### Phase 5: Flutter playground (teaching / real time)
 
-- [ ] `packages/hgf_widgets`: trajectory plot (μ ± 1/√π bands, prediction
-      errors) and a network graph view. Chart library vs CustomPainter:
-      decide on performance for 10k points.
-- [ ] `apps/hgf_playground`: sliders for ω/κ/μ₀/π₀ with a live re-run (the
-      engine re-runs 600 trials in under 1.5 ms on Wasm), trial-by-trial
-      stepping via `predict`/`step`, and loading CSV data. **Build with
-      `flutter build web --wasm`** as the primary target; desktop and mobile
-      too.
-- [ ] Measure frame time with the engine running each frame.
+First version done 2026-11-06.
+
+- [x] `packages/hgf_widgets`:
+  - `TrajectoryPlot`: a `CustomPainter` (as in liblsl.dart's
+    `signal_viewer`), no chart library. Each layer (line, points, band
+    `μ ± scale/√π`, reference line) is reduced to at most two points per
+    pixel column (`SeriesReducer`, min/max in order, so spikes survive),
+    then drawn with `drawRawPoints` / triangle-strip `Vertices`. Linked
+    hover cursor with a readout; `limit` for playback; `revision` for data
+    overwritten in place.
+  - `HgfTrajectoryView`: one panel per node, top level first, plus the
+    total surprise (pyhgf's `plot_trajectories`). Colours by role (belief,
+    observation, surprise), CVD-checked, stepped for light and dark.
+  - `NetworkGraph` + `NetworkLayout`: inputs at the bottom, value edges
+    solid, volatility dashed, shapes by kind, tap to select, captions.
+  - Needed `Network.valueParentsOf` & co. (read-only edges, strengths,
+    `couplingOf`) in `packages/hgf`.
+- [x] `apps/hgf_playground`: presets (binary 3-level, continuous 2- and
+      3-level) on simulated data (reversal learning; a random walk with
+      calm/volatile phases) with the hidden truth overlaid; CSV loading
+      (NaN = missing); sliders for ω, μ₀, π₀, ρ, λ, π_u and the coupling
+      strengths; the volatility update scheme; trial-by-trial playback with
+      `predict`/`step` (tested to record exactly what `inputData` does);
+      runaway/NaN warnings; light and dark themes following the system by
+      default, overridable and saved (`easy_shared_preferences`); wide and
+      phone layouts. Re-filters into the same buffers (`inputData(into:)`),
+      records only the 3 plotted fields, and coalesces slider events to one
+      re-filter per frame.
+- [x] Frame time with the engine running each frame:
+      `melos run bench:playground` (`?bench=N`, or
+      `--dart-define=HGF_BENCH=N` on desktop: ω₂ dragged for 300 frames).
+      Wasm release, headless Chromium (software raster), binary 3-level:
+
+      | trials | filter (median) | frame interval (median / p95) |
+      |---|---|---|
+      | 300 | 0.38 ms | 16.7 / 19.8 ms (60 fps) |
+      | 1 000 | 1.22 ms | 16.6 / 20.8 ms (60 fps) |
+      | 10 000 | 11.3 ms | 23.9 / 29.9 ms (~42 fps) |
+
+      Recording 3 fields instead of 7 took the 10k filter from 13.7 to
+      11.3 ms. On the web, `FrameTiming` reports only ~20 of 300 frames
+      with implausible durations, so the app shows the frame interval there.
+- [ ] Next: categorical / ef-state / dp-state views (vector fields: one
+      line per category, cluster means); zoom and pan on the time axis;
+      editable structure (add/remove nodes); export (CSV of trajectories,
+      PNG); a guided "lessons" mode for teaching; measure desktop (GPU)
+      frame times (`flutter run --profile --dart-define=HGF_BENCH=10000`);
+      if 10k-trial drags must hold 60 fps on Wasm, filter in a web worker
+      or the engine needs to get faster there.
+- Found with it: [P17](upstream/README.md#p17), the default unbounded
+  update runs away on binary 3-level HGFs (pyhgf too).
 
 ### Phase 6: fitting probe (`packages/hgf_fit`)
 
@@ -554,6 +596,9 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
         float32 values. Proposals are redrawn every trial from the same key.
   - [ ] [P16](upstream/README.md#p16) dp-state `batch_size` ≠ number of
         clusters fails inside the scan (also with the default 10).
+  - [ ] [P17](upstream/README.md#p17) the unbounded volatility update (the
+        default) runs away on 3-level binary HGFs: μ₂ only ratchets up until
+        μ₁ explodes (JAX and rshgf; found with the playground, 2026-11-06).
 - **rshgf**
   - [ ] [R1](upstream/README.md#r1) ef-state ignores `observed`; univariate
         fixed rate only.
@@ -598,14 +643,17 @@ Phase W is done apart from the optional SIMD variant and W5 (both AOT
 only). Phase 4's node kinds are all done: ef-state (2026-11-05),
 categorical-state and dp-state (2026-11-06). Left in Phase 4: per-child
 coupling functions (only if needed), and batched kernels / `sample` for the
-vector kinds (`BatchNetwork` rejects them). Next: **Phase 5, the Flutter
-playground**, which the user treats Phase 4 as groundwork for.
+vector kinds (`BatchNetwork` rejects them). Phase 5's first version is
+done (2026-11-06): `packages/hgf_widgets` and `apps/hgf_playground`; see
+its open items. Then Phase 6 (fitting).
 
 ```sh
 cd hgf.dart
 melos bootstrap
 melos run test && melos run test:parity           # should be all green
 melos run test:wasm-release                       # parity at dart2wasm -O4
+melos run bench:playground                        # playground frame times (Wasm)
+(cd apps/hgf_playground && flutter run -d chrome --wasm)   # try it
 dart compile exe packages/hgf/benchmark/bin/profile_modes.dart -o /tmp/pm && \
   (cd packages/hgf && /tmp/pm)                    # ns/trial baseline per mode
 ```

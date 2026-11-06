@@ -34,6 +34,7 @@ Checked against pyhgf `6be12eb4` (0.3.2) and Dart 3.13.7.
 | [P14](#p14) | pyhgf JAX | dp-state ignores `observed`: missing samples are clustered (NaN opens a NaN cluster) | medium | [ ] |
 | [P15](#p15) | pyhgf JAX | dp-state results depend on JAX's PRNG mode and precision; the tests pin the legacy mode | low | [ ] |
 | [P16](#p16) | pyhgf JAX | dp-state `batch_size` ≠ number of clusters fails inside the scan | low | [ ] |
+| [P17](#p17) | pyhgf JAX + rshgf | unbounded volatility update (the default) runs away on 3-level binary HGFs | **high**: runaway beliefs | [ ] |
 | [R1](#r1) | rshgf | ef-state ignores `observed`; univariate fixed rate only | medium | [ ] |
 | [R2](#r2) | rshgf | hot-path costs (string compares, allocations, clones) | perf | [ ] |
 | [D1](#d1) | dart2wasm | a typed-data view anywhere slows reads of non-view lists | perf, ~10% | [ ] |
@@ -343,6 +344,36 @@ batch_size=None, 3 clusters: TypeError mul got incompatible shapes for broadcast
 replaces `expected_means` with one entry per ef-state parent. **Fix:** check
 the parent count when the network is built, or derive `batch_size` from it.
 **hgf.dart:** `build()` throws a `StateError` naming both counts.
+
+### P17
+
+**The unbounded volatility update, pyhgf's default, runs away on 3-level
+binary HGFs** (JAX and rshgf, identically). Found through the playground's
+binary preset (ω₂ = −3, ω₃ = −4, μ₃ = 1, reversal learning).
+Repro: [`pyhgf/binary_unbounded_divergence.py`](pyhgf/binary_unbounded_divergence.py):
+
+```
+reversal, 2000 trials (2000 trials)
+  w2=-3.0  w3=-4.0  standard   JAX: bounded            max mu2     1.0, min mu2     0.3   rshgf: bounded
+  w2=-3.0  w3=-4.0  eHGF       JAX: bounded            max mu2     1.0, min mu2   -18.2   rshgf: bounded
+  w2=-3.0  w3=-4.0  unbounded  JAX: |mu1|>50 at 361    max mu2    30.3, min mu2     1.0   rshgf: |mu1|>50 at 361
+  w2=-3.0  w3=-6.0  unbounded  JAX: bounded            max mu2     2.2, min mu2     1.0   rshgf: bounded
+pyhgf binary data x6 (1920 trials)
+  w2=-3.0  w3=-4.0  unbounded  JAX: |mu1|>50 at 368    max mu2    30.3, min mu2     1.0   rshgf: |mu1|>50 at 368
+```
+
+Under the unbounded update the volatility parent's mean never falls below
+its initial value (min μ₂ = 1.0 in every run): it only ratchets up, until
+x₁'s predicted precision collapses and μ₁ jumps to ~1e5 and oscillates in
+sign. A lower ω₃ only delays it: hgf.dart (bit-for-bit the same) runs away
+at trials 2840–3052 with ω₃ = −6 and 4347–4413 with (−4, −6) on 10 000
+reversal trials, seeds 1–3. Under the standard update μ₂ instead never
+rises above its initial value; eHGF drifts down without bound on long
+series (μ₂ ≈ −100 after 10 000 trials). Not diagnosed further: the
+asymmetry suggests the unbounded update's mean step for a volatility
+parent of a binary-input node's value parent keeps one sign.
+**hgf.dart:** matches pyhgf. The playground's binary preset uses ω₂ = −4,
+ω₃ = −6 and flags runaway beliefs.
 
 ## rshgf
 

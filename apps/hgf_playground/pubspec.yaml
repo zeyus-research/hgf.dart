@@ -1,0 +1,27 @@
+name: hgf_playground
+description: >-
+  An interactive playground for Hierarchical Gaussian Filters: build a network,
+  move its parameters and watch the beliefs re-filter live.
+publish_to: 'none'
+version: 0.1.0+1
+
+resolution: workspace
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  easy_shared_preferences: ^1.1.2
+  file_picker: ^13.3.2
+  flutter:
+    sdk: flutter
+  hgf: ^0.1.0-dev.1
+  hgf_widgets: ^0.1.0-dev.1
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
