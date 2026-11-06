@@ -2,8 +2,8 @@
 
 Parameter estimation for [`hgf`](../hgf) networks: priors, response models,
 batched objectives with finite-difference gradients, MAP optimisers that
-fit many subjects in one batched pass, and the Laplace approximation for
-uncertainty and model evidence.
+fit many subjects in one batched pass, the Laplace approximation for
+uncertainty and model evidence, and full posteriors by NUTS.
 
 ```dart
 import 'package:hgf/hgf.dart';
@@ -31,6 +31,10 @@ for (final r in fit.results) print(r.parameters);  // {omega2: …, inverseTempe
 final lap = laplace(model, fit);                   // one more pass
 for (final r in lap.results) print(r.interval());  // 95% intervals
 print(lap.logEvidence);                            // for model comparison
+
+final post = sampleNuts(model, subjects, chains: 4);  // full posteriors
+print(post.results.first);                         // mean, sd, ESS, R̂
+File('draws.json').writeAsStringSync(post.toJson());  // for ArviZ
 ```
 
 - **Model.** `HgfModel` = a `Network` (the perceptual model), a
@@ -67,6 +71,22 @@ print(lap.logEvidence);                            // for model comparison
   it isn't), the standard errors within 2% (13%), and 95% intervals cover
   the true values 92–98% of the time.
 
+- **NUTS.** `sampleNuts(model, subjects)` draws from each subject's
+  posterior with the No-U-Turn Sampler as Stan implements it (multinomial
+  trajectories, the generalised no-U-turn criterion, dual-averaging step
+  size, windowed adaptation of a diagonal or dense metric). Every chain of
+  every subject is a generator, like the optimisers, so each batched pass
+  is one leapfrog step of all of them. Gradients are forward differences
+  (`k + 1` filters per step): the leapfrog integrator is reversible and
+  volume preserving for any deterministic force, and the trajectory weights
+  use the exact density, so the chain targets the exact posterior whatever
+  the gradient error. `PosteriorDraws` gives summaries, rank-normalised
+  split R̂, bulk and tail ESS, MCSE and E-BFMI (ArviZ's estimators, checked
+  against arviz-stats to 1e-9), Stan-style CSV, and JSON that ArviZ's
+  `from_dict` reads (`example/posterior_sampling.dart`). Posterior moments
+  match grid quadrature within Monte Carlo error. `sampleFunction` runs the
+  sampler on any log density.
+
 ## Performance
 
 pyhgf's parameter-recovery notebook (binary 2-level HGF, ω₂ and β per agent,
@@ -86,8 +106,27 @@ agent. Fitting each agent separately takes as many passes as the slowest
 agent needs; the joint 2N-dimensional L-BFGS-B needs more iterations as N
 grows.
 
+NUTS on the same 20 agents, 4 chains × (1000 warmup + 1000 draws), one
+core (`fit_benchmark --nuts`; `tool/parity/fit_nuts_jax.py` for PyMC, the
+notebook's route via `wrap_jax`, and NumPyro, the whole sampler jitted; both
+sample all agents as one 40-dimensional model, with the same priors):
+
+| | wall time | leapfrog steps / draw | bulk ESS min / median | ESS/s min / median |
+|---|---|---|---|---|
+| hgf_fit (per agent, forward differences) | 64 s | 4.5 per agent | 830 / 1922 | 12.9 / 30.0 |
+| NumPyro (joint, exact gradients) | 147 s (+7.5 s compile) | 15 | 2718 / 5806 | 18.5 / 39.5 |
+| PyMC (joint, JAX op) | 214 s | 14.5 | 2798 / 5515 | 13.1 / 25.8 |
+
+The posterior means agree (rms z of the 40 differences, in combined Monte
+Carlo errors: 0.94 vs NumPyro, 1.10 vs PyMC; sds within 7%). hgf_fit is
+the fastest per draw, but the joint samplers get 3× the ESS per draw: their
+long 40-dimensional trajectories make draws antithetic (ESS above the number
+of draws), so per effective sample NumPyro is ~1.3× ahead and PyMC about
+level. Exact gradients (`k + 1` → about 2 filter-equivalents per step) or
+isolate-parallel passes would close that gap.
+
 ## Status
 
-Phase 6 of the [roadmap](../../docs/ROADMAP.md): MAP estimation and the
-Laplace approximation work. Planned: HMC/NUTS, hierarchical priors,
-isolate-parallel passes, and draw export for ArviZ.
+Phase 6 of the [roadmap](../../docs/ROADMAP.md): MAP estimation, the
+Laplace approximation and NUTS work. Planned: hierarchical priors,
+isolate-parallel passes, and exact gradients.

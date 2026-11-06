@@ -261,6 +261,23 @@ void main() {
         final rich = (4 * d(1e-3) - d(2e-3)) / 3;
         expect(grads[0]![i], closeTo(rich, 1e-5 * (1 + rich.abs())));
       }
+
+      // Forward differences: k + 1 elements, O(h) error.
+      final fwd = BatchedObjective(
+        model,
+        subjects,
+        differences: Differences.forward,
+      );
+      final (v, g) = fwd.evaluate([0, 0], [p, p], [true, false]);
+      expect(fwd.elements, 4);
+      expect(g[1], isNull);
+      expect(v[0], f(p));
+      for (var i = 0; i < 2; i++) {
+        expect(
+          g[0]![i],
+          closeTo(grads[0]![i], 1e-3 * (1 + grads[0]![i].abs())),
+        );
+      }
     });
   });
 

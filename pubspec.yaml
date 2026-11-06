@@ -116,6 +116,19 @@ melos:
         MAP fitting of pyhgf's parameter-recovery problem: hgf_fit (AOT) against
         pyhgf + JAX gradients + SciPy L-BFGS-B. Pass agents with
         `--agents N` by running the steps by hand.
+    bench:nuts:
+      run: >-
+        cd packages/hgf_fit &&
+        dart compile exe benchmark/bin/fit_benchmark.dart -o .dart_tool/fit_benchmark &&
+        taskset -c 0 .dart_tool/fit_benchmark --repeat 1 --nuts --out .dart_tool/nuts_problem.json &&
+        cd ../../tool/parity &&
+        taskset -c 0 uv run --with numpyro python fit_nuts_jax.py ../../packages/hgf_fit/.dart_tool/nuts_problem.json --backend numpyro &&
+        taskset -c 0 uv run python fit_nuts_jax.py ../../packages/hgf_fit/.dart_tool/nuts_problem.json --backend pymc
+      description: >-
+        NUTS on pyhgf's parameter-recovery problem (20 agents, 4 chains,
+        1000 + 1000), one core: hgf_fit's sampleNuts against PyMC (the
+        notebook's wrap_jax route) and NumPyro, with ESS/s and agreement of
+        the posterior means. Takes about 8 minutes; Linux (taskset).
     bench:
       run: dart run tool/bench_compare.dart --rust
       description: >-

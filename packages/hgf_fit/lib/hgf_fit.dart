@@ -38,5 +38,9 @@ export 'src/optim/optimizer.dart'
 export 'src/parameter.dart';
 export 'src/prior.dart';
 export 'src/response_model.dart';
+export 'src/sample/diagnostics.dart'
+    show essBulk, essMean, essTail, mcseMean, quantileOf, rhat;
+export 'src/sample/nuts.dart';
+export 'src/sample/sample.dart';
 export 'src/special.dart' show erf, erfc, logNormalCdf, normalQuantile;
 export 'src/transform.dart';

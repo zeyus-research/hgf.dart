@@ -5,20 +5,37 @@ import 'model.dart';
 import 'optim/lbfgs.dart';
 import 'optim/optimizer.dart';
 
+/// How [BatchedObjective] differentiates.
+enum Differences {
+  /// `(f(y + hᵢ) − f(y − hᵢ)) / 2hᵢ`: `2k + 1` elements per gradient,
+  /// error `O(h²)`. Where one side isn't finite, the one-sided difference
+  /// is used.
+  central,
+
+  /// `(f(y + hᵢ) − f(y)) / hᵢ`: `k + 1` elements per gradient, error
+  /// `O(h)`. Enough for HMC, whose exactness doesn't depend on the gradient
+  /// (see `Nuts`). NaN where `f(y + hᵢ)` isn't finite.
+  forward,
+}
+
 /// Evaluates [model]'s objective (negative log posterior, on the
 /// unconstrained scale) for many (subject, point) pairs in one batched pass,
-/// with gradients by central finite differences in the same pass.
+/// with gradients by finite differences in the same pass.
 ///
-/// A point with a gradient costs `2k + 1` batch elements (`k` parameters).
-/// The step along `yᵢ` is `fdStep · max(1, |yᵢ|)`; where one side of the
-/// stencil isn't finite, the one-sided difference is used.
+/// A point with a gradient costs `2k + 1` batch elements with [central]
+/// differences, `k + 1` with forward ones (`k` parameters). The step along
+/// `yᵢ` is `fdStep · max(1, |yᵢ|)`.
 final class BatchedObjective {
   BatchedObjective(
     this.model,
     this.subjects, {
     this.fdStep = 1e-5,
     this.jacobian = false,
+    this.differences = Differences.central,
   });
+
+  /// The finite-difference scheme for gradients.
+  final Differences differences;
 
   final HgfModel model;
   final List<Subject> subjects;
@@ -45,9 +62,11 @@ final class BatchedObjective {
     List<bool> gradient,
   ) {
     final k = model.dimension, nP = points.length;
+    final central = differences == Differences.central;
+    final sides = central ? const [1.0, -1.0] : const [1.0];
     var nE = 0;
     for (var j = 0; j < nP; j++) {
-      nE += gradient[j] ? 2 * k + 1 : 1;
+      nE += gradient[j] ? sides.length * k + 1 : 1;
     }
     final subj = Int32List(nE);
     final y = Float64List(nE * k);
@@ -62,7 +81,7 @@ final class BatchedObjective {
       if (!gradient[j]) continue;
       for (var i = 0; i < k; i++) {
         final h = fdStep * math.max(1.0, p[i].abs());
-        for (final sign in const [1.0, -1.0]) {
+        for (final sign in sides) {
           subj[e] = subjectOf[j];
           y.setRange(e * k, (e + 1) * k, p);
           final v = p[i] + sign * h;
@@ -86,6 +105,12 @@ final class BatchedObjective {
       if (!gradient[j]) continue;
       final g = Float64List(k);
       for (var i = 0; i < k; i++) {
+        if (!central) {
+          final fp = out[e], hp = steps[e];
+          e++;
+          g[i] = fp.isFinite ? (fp - f0) / hp : double.nan;
+          continue;
+        }
         final fp = out[e], hp = steps[e];
         final fm = out[e + 1], hm = steps[e + 1];
         e += 2;

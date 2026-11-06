@@ -4,9 +4,11 @@
 //   dart compile exe benchmark/bin/fit_benchmark.dart -o /tmp/fb && /tmp/fb
 //   /tmp/fb --agents 200 --out problem.json   # also write the problem and
 //                                             # estimates for the JAX script
+//   /tmp/fb --nuts --chains 4 --out problem.json   # also NUTS (sampleNuts)
 //
 // tool/parity/fit_map_jax.py fits the same problem with JAX gradients and
-// SciPy's L-BFGS-B for comparison.
+// SciPy's L-BFGS-B for comparison; tool/parity/fit_nuts_jax.py samples it
+// with PyMC or NumPyro.
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -16,7 +18,8 @@ import 'package:hgf/hgf.dart';
 import 'package:hgf_fit/hgf_fit.dart';
 
 void main(List<String> args) {
-  var agents = 20, repeat = 7;
+  var agents = 20, repeat = 7, chains = 4;
+  var nuts = false;
   String? out;
   for (var i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -26,6 +29,10 @@ void main(List<String> args) {
         repeat = int.parse(args[++i]);
       case '--out':
         out = args[++i];
+      case '--nuts':
+        nuts = true;
+      case '--chains':
+        chains = int.parse(args[++i]);
     }
   }
   final u = Float64List.fromList([
@@ -97,6 +104,51 @@ void main(List<String> args) {
       'converged': converged,
       'estimates': [for (final r in fit.results) r.x.toList()],
       'neg_log_posterior': [for (final r in fit.results) r.negLogPosterior],
+    };
+  }
+  if (nuts) {
+    final sw = Stopwatch()..start();
+    final fit = sampleNuts(model, subjects, chains: chains);
+    final ms = sw.elapsedMicroseconds / 1000;
+    final summaries = [for (final r in fit.results) r.summary()];
+    final ess = [
+      for (final s in summaries)
+        for (final p in s) p.essBulk,
+    ];
+    final rhats = [
+      for (final s in summaries)
+        for (final p in s) p.rhat,
+    ];
+    final minEss = ess.reduce(math.min);
+    final medianEss = (ess.toList()..sort())[ess.length ~/ 2];
+    final leapfrog = fit.results.fold(0, (s, r) => s + r.leapfrogSteps);
+    print(
+      'nuts         $n agents x $chains chains x (1000 + 1000): '
+      '${(ms / 1000).toStringAsFixed(1)} s, ${fit.passes} passes, '
+      '${fit.elements} filters, $leapfrog leapfrog steps after warmup, '
+      '${fit.divergences} divergences, bulk ESS min '
+      '${minEss.toStringAsFixed(0)} '
+      '(${(minEss / ms * 1000).toStringAsFixed(1)}/s), median '
+      '${medianEss.toStringAsFixed(0)} '
+      '(${(medianEss / ms * 1000).toStringAsFixed(1)}/s), '
+      'max R̂ ${rhats.reduce(math.max).toStringAsFixed(3)}',
+    );
+    report['nuts'] = {
+      'ms': ms,
+      'passes': fit.passes,
+      'filters': fit.elements,
+      'divergences': fit.divergences,
+      'min_ess_bulk': minEss,
+      'median_ess_bulk': medianEss,
+      'mean': [
+        for (final s in summaries) [for (final p in s) p.mean],
+      ],
+      'sd': [
+        for (final s in summaries) [for (final p in s) p.sd],
+      ],
+      'mcse_mean': [
+        for (final s in summaries) [for (final p in s) p.mcseMean],
+      ],
     };
   }
   if (out != null) {

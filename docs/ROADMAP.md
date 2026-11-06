@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-06, after MAP + Laplace fitting)
+## Where things stand (2026-11-06, after MAP, Laplace and NUTS)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -21,7 +21,7 @@ supersedes its phase list.
     data, bit-identical to `Network` (W4);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
-- 463 engine tests pass (plus 54 fitting, 17 widget and 15 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+- 463 engine tests pass (plus 69 fitting, 17 widget and 15 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
   `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
@@ -41,7 +41,10 @@ supersedes its phase list.
   is 3.2× (20 agents) to 5.4× (200 agents) faster than pyhgf + JAX
   gradients + SciPy L-BFGS-B, single-threaded, and evaluates the same
   objective to 3e-13. `laplace` adds standard errors, intervals and the log
-  evidence (within 0.01 nats of quadrature) in one more pass.
+  evidence (within 0.01 nats of quadrature) in one more pass. `sampleNuts`
+  draws full posteriors (Stan's NUTS, all chains of all subjects in lock
+  step); on the notebook's 20 agents it is 2.3× faster than NumPyro in
+  wall time on one core, 0.75× in ESS/s.
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -649,18 +652,59 @@ First part done 2026-11-06: MAP estimation.
     at the truth beats fitting it by ~2.4 nats per subject (Occam), and a
     wrong fixed ω loses by ~80 nats per subject.
   - Cost: ~0.4 ms per subject for the Hessian pass at k = 2.
+- [x] NUTS (2026-11-06): `sampleNuts(model, subjects)`.
+  - Stan's algorithm, ported from `base_nuts.hpp`: multinomial sampling
+    (biased progressive at the top level), the generalised no-U-turn
+    criterion with the extra checks across merged subtrees, divergence at
+    an energy error > 1000, dual averaging (δ = 0.8, γ = 0.05, t₀ = 10,
+    κ = 0.75), the step-size doubling/halving heuristic after each metric
+    update, and the 75 / 25·2ⁿ / 50 warmup windows with Stan's shrinkage.
+    Unit, diagonal (default) or dense metric.
+  - Each chain is a `sync*` generator yielding one leapfrog step (point +
+    gradient) at a time, the recursive tree builder via `yield*`; the
+    driver answers every running chain of every subject with one
+    `BatchNetwork` pass. Draws of a subject are bit-identical whether it is
+    sampled alone or with others (tested).
+  - Forward differences by default (`Differences.forward`, `k + 1`
+    filters per step instead of `2k + 1`): leapfrog with any deterministic
+    force is reversible and volume preserving, and the multinomial weights
+    use the exact density, so the chain stays exact; only efficiency could
+    suffer, and it doesn't measurably (same leapfrog steps per draw as
+    central differences, 1.6× less time).
+  - Diagnostics are ArviZ's estimators (rank-normalised split R̂, bulk and
+    tail ESS, MCSE, plus E-BFMI), checked against arviz-stats 1.3 to 1e-9,
+    with ties and odd chain lengths. Export: `NutsFit.toJson()` for ArviZ
+    `from_dict` (a `subject` dimension), `PosteriorDraws.toCsv()` in Stan's
+    column layout.
+  - Checked: posterior means within 4 MCSE of grid quadrature and sds
+    within a few %, second moments of Gaussians unbiased over long runs
+    (z-scores ~ N(0, 1) for all three metrics), and the 20-agent posterior
+    agrees with PyMC's and NumPyro's (rms z of the 40 means ≈ 1.1).
+  - Found with it: on this input sequence the binary 2-level HGF's
+    likelihood jumps by ~500 nats between ω₂ = 0.35 and 0.36 (a
+    bifurcation of the μ₂ trajectory, not a NaN). With the notebook's prior
+    (upper bound 2), weakly identified agents' trajectories reach it and
+    NUTS reports divergences there; they carry no posterior mass, but a
+    tighter upper bound avoids them.
+  - Performance (`melos run bench:nuts`, one core, 20
+    agents × 4 chains × (1000 + 1000)): hgf_fit 64 s; NumPyro (joint
+    40-d model, exact gradients, jitted) 147 s + 7.5 s compile; PyMC (the
+    notebook's `wrap_jax` route) 214 s. But per draw the joint samplers
+    get 3× the bulk ESS (median 5806 / 5515 vs 1922: long joint
+    trajectories, 15 leapfrog steps per draw vs 4.5 per agent, make draws
+    antithetic), so in ESS/s (median) NumPyro 39.5 > hgf_fit 30.0 > PyMC
+    25.8. Posterior means agree with both (rms z 0.94 / 1.10).
+    Central differences took 101 s for the same draws per step count.
 - [ ] Next:
-  - HMC/NUTS on `BatchedObjective(jacobian: true)`; many chains or
-    subjects in one pass, the same lock-step trick;
   - hierarchical (group-level) priors: the objective is then not separable
     per subject;
   - isolate-parallel passes (split a pass's elements across isolates; web
     workers on the web);
-  - exact gradients, if NUTS needs them: hand-written forward-mode tangents
+  - exact gradients (now the main NUTS cost: `k + 1` filters per leapfrog
+    step; would beat NumPyro in ESS/s on one core): hand-written forward-mode tangents
     of each update step, or a dual-number engine variant (a generic numeric
     type would cost the f64 fast path, so a separate, perhaps generated,
     code path);
-  - export draws for ArviZ (CSV/JSON first; netCDF is heavy);
   - a fitting view in the playground (fit the loaded CSV's responses).
 
 ### Phase 7: GPU probe (go/no-go)
@@ -773,9 +817,9 @@ done (2026-11-06): `packages/hgf_widgets` and `apps/hgf_playground`, with
 views and presets for every node kind; see its open items. CI runs on
 every push, and the playground deploys to
 https://zeyus-research.github.io/hgf.dart/ from `main`. Phase 6 has
-started: `packages/hgf_fit` does MAP estimation and the Laplace
-approximation (2026-11-06); see its open items (HMC/NUTS, hierarchical
-priors).
+started: `packages/hgf_fit` does MAP estimation, the Laplace
+approximation and NUTS (2026-11-06); see its open items (hierarchical
+priors, exact gradients, isolate-parallel passes).
 
 ```sh
 cd hgf.dart
@@ -784,6 +828,7 @@ melos run test && melos run test:parity           # should be all green
 melos run test:wasm-release                       # parity at dart2wasm -O4
 melos run bench:playground                        # playground frame times (Wasm)
 melos run bench:fit                               # MAP fitting vs pyhgf + JAX
+melos run bench:nuts                              # NUTS vs PyMC and NumPyro (~8 min)
 (cd apps/hgf_playground && flutter run -d chrome --wasm)   # try it
 dart compile exe packages/hgf/benchmark/bin/profile_modes.dart -o /tmp/pm && \
   (cd packages/hgf && /tmp/pm)                    # ns/trial baseline per mode
