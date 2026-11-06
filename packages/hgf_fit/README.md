@@ -194,8 +194,8 @@ real gain there is exactness.
 
 ## Parallel fitting
 
-Every fitting function also runs on a pool of worker isolates, with the
-same results bit for bit:
+Every fitting function also runs on a pool of workers (isolates on the
+Dart VM, Web Workers on the web), with the same results bit for bit:
 
 ```dart
 final workers = await FitWorkers.spawn();          // one per processor
@@ -208,13 +208,61 @@ await workers.close();
 Each batched pass is split into slices across the workers, and drivers
 with independent tasks (each subject's optimiser and chains) run them as
 concurrent streams, so one slow chain doesn't hold the others at every
-pass. Spawn one pool and reuse it. On the web the pool has no workers and
-runs on the calling isolate, so the same code works there.
+pass. Spawn one pool and reuse it.
 
 On 4 cores (`melos run bench:parallel`, i7-7700): MAP on 200 agents
 115 → 32 ms (3.6×), the Laplace pass 3.8×, NUTS on 200 agents 3.5×; NUTS on
 the 20 agents above 42.0 → 13.8 s (3.0×), hierarchical NUTS 57.7 → 21.8 s
 (2.6×). Small problems gain less (1.5–2× for MAP on 20 agents).
+
+### On the web
+
+Web Workers can't run the page's own code, so the workers are a small
+program of their own, compiled next to the page:
+
+```dart
+// web/fit_worker.dart
+import 'package:hgf_fit/fit_worker.dart';
+
+void main() => runFitWorker();
+```
+
+```sh
+dart compile wasm -O4 web/fit_worker.dart -o web/fit_worker.wasm   # or:
+dart compile js -O2 web/fit_worker.dart -o web/fit_worker.js
+```
+
+```dart
+final workers = await FitWorkers.spawn(
+  script: const FitWorkerScript.wasm('fit_worker.wasm'), // or .js(...)
+);
+```
+
+Models reach the workers as JSON (`FitCodec`; the network as
+`Network.toJson`'s exact copy), so everything but `ResponseModel.fn`
+crosses: custom priors, transforms and response models override `toJson()`
+and get a decoder in the worker (`runFitWorker(codec: FitCodec(priors:
+{'Laplace': Laplace.fromJson}))`), custom couplings and response functions
+are looked up by name. Results equal the main thread's bit for bit when the
+worker is compiled like the page. Without a script (or in Node) the pool has
+no workers and runs on the calling isolate, so the same code works
+everywhere.
+
+In headless Chromium on the same 4 cores (`melos run bench:web-parallel`,
+page and worker compiled alike):
+
+| job | Wasm main thread | 4 Wasm workers | JS main thread | 4 JS workers |
+|---|---|---|---|---|
+| MAP, 200 agents | 210 ms | 4.0× | 251 ms | 2.8× |
+| Laplace, 200 agents | 303 ms | 4.2× | 359 ms | 3.0× |
+| NUTS, 20 agents (150 + 150) | 12.9 s | 3.5× | 16.7 s | 2.4× |
+| hierarchical NUTS, 10 agents | 77.2 s | 3.3× | 95.9 s | 2.1× |
+| MAP, 20 agents | 23 ms | 2.3× | 31 ms | 0.85× |
+
+A Wasm worker filters faster than the page's main thread (one worker:
+1.15×, messaging included), so the Wasm build gains up to the core count
+and a little beyond; a JS worker's messages cost more (one worker: 0.97×).
+Prefer the Wasm worker.
 
 Custom drivers can use the pool too: write a `Program` (a `sync*`
 generator yielding `Pass`es, or `Concurrent` streams of them) and run it
@@ -224,4 +272,4 @@ with `workers.run(program)` or `runInline(program)`.
 
 Phase 6 of the [roadmap](../../docs/ROADMAP.md): MAP estimation, the
 Laplace approximation, NUTS, exact gradients, hierarchical models and
-isolate-parallel fitting work. Planned: web workers for the pool.
+parallel fitting (isolates, Web Workers) work.

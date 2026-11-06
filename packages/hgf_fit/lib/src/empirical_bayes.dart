@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'codec.dart' show jsonDouble;
 import 'fit.dart';
 import 'hierarchical.dart';
 import 'linalg.dart';
@@ -49,7 +50,20 @@ final class _PopulationPrior extends Prior {
 
   @override
   String toString() => 'N($mu, $sd) on the ${transform.runtimeType} scale';
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'Population',
+    'transform': transform.toJson(),
+    'mu': jsonDouble(mu),
+    'sd': jsonDouble(sd),
+  };
 }
+
+/// `N(mu, sd²)` on [transform]'s unconstrained scale as a prior (what
+/// `fitEmpiricalBayes` refits with). Package-internal, for `FitCodec`.
+Prior populationPrior(Transform transform, double mu, double sd) =>
+    _PopulationPrior(transform, mu, sd);
 
 /// One subject's estimate in an [EmpiricalBayesFit]: the mode of its
 /// posterior on the unconstrained scale under the fitted population, with

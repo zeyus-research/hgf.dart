@@ -41,7 +41,8 @@ It is tested against pyhgf reference trajectories (float64 JAX and rshgf) to
 - Generative mode (`sample`): input nodes observe draws from their own
   predictive distribution; `saveState`/`restoreState` to draw several futures
   from the same beliefs.
-- `NetworkSpec`: JSON network descriptions.
+- `NetworkSpec`: JSON network descriptions (pyhgf-style);
+  `Network.toJson`/`fromJson`: exact copies, parameters included.
 - `BatchNetwork`: many parameter sets (and series) filtered in lock step,
   bit-identical to `Network`, for fitting and simulation. With
   `tangents: k` it also carries forward-mode derivatives with respect to

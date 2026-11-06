@@ -1,5 +1,19 @@
 ## Unreleased
 
+- `FitWorkers` on the web: Web Workers running a separately compiled worker
+  (`package:hgf_fit/fit_worker.dart`, `runFitWorker()`), compiled with
+  `dart compile js` or `wasm`; `FitWorkers.spawn(script:
+  FitWorkerScript.wasm('fit_worker.wasm'))`. Results are bit-identical to
+  the main thread when the worker is compiled like the page. The pool,
+  its slicing and streams are shared with the isolate version (now one
+  `FitWorkers` class over a transport).
+- `FitCodec`: models as JSON (`encodeModel`/`decodeModel`, parameters,
+  priors, transforms, response models), with decoders for custom types.
+  The built-in priors, transforms and response models have `toJson()`;
+  custom ones override it. A decoded model evaluates bit for bit like the
+  original.
+- Errors raised in a worker now arrive as an error carrying the worker's
+  message and stack trace (no longer `RemoteError`, which the web lacks).
 - Isolate-parallel fitting: `FitWorkers` is a pool of worker isolates
   (`FitWorkers.spawn()`, one per processor by default), and
   `workers.fitMap`, `.laplace`, `.sampleNuts`, `.sampleHierarchical`,

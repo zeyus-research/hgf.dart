@@ -68,6 +68,21 @@ melos:
       description: >-
         Run the parity suites on the web compilers: dart2js (Node, Chrome) and
         dart2wasm (Chrome). See also test:wasm-release (-O4).
+    test:web-workers:
+      # Compiles the test worker with both web compilers, then runs FitWorkers
+      # on Web Workers from a dart2js and a dart2wasm page (Chrome).
+      exec:
+        command: >-
+          dart compile js -O2 test/web/fit_worker.dart -o test/web/fit_worker.js &&
+          dart compile wasm -O2 test/web/fit_worker.dart -o test/web/fit_worker.wasm &&
+          dart test -p chrome --tags web-workers 2>&1 &&
+          dart test -p chrome -c dart2wasm --tags web-workers 2>&1
+        concurrency: 1
+      packageFilters:
+        fileExists: test/web/fit_worker.dart
+      description: >-
+        FitWorkers on Web Workers (JS and Wasm workers, dart2js and dart2wasm
+        pages): results bit-identical to the main thread.
     test:wasm-release:
       # `dart test -c dart2wasm` can't pass -O4, so the parity suite is also
       # compiled as a standalone app with the release flags and run under Node.
@@ -152,6 +167,21 @@ melos:
         functions: MAP, Laplace, NUTS, hierarchical NUTS and empirical Bayes
         on pyhgf's parameter-recovery problem; checks the results are
         bit-identical. Takes about 15 minutes.
+    bench:web-parallel:
+      run: >-
+        cd packages/hgf_fit &&
+        mkdir -p .dart_tool/web_bench &&
+        command cp -f benchmark/web/index.html data/binary_input.txt .dart_tool/web_bench/ &&
+        dart compile wasm -O4 benchmark/web/web_parallel_benchmark.dart -o .dart_tool/web_bench/bench.wasm &&
+        dart compile wasm -O4 benchmark/web/fit_worker.dart -o .dart_tool/web_bench/fit_worker.wasm &&
+        dart compile js -O2 benchmark/web/web_parallel_benchmark.dart -o .dart_tool/web_bench/bench.js &&
+        dart compile js -O2 benchmark/web/fit_worker.dart -o .dart_tool/web_bench/fit_worker.js &&
+        cd ../.. &&
+        uv run --with playwright python -I tool/web/fit_workers_bench.py packages/hgf_fit/.dart_tool/web_bench
+      description: >-
+        FitWorkers on Web Workers against the page's main thread in headless
+        Chromium (dart2wasm -O4 and dart2js -O2): bench:parallel's jobs.
+        Takes about 10 minutes.
     bench:
       run: dart run tool/bench_compare.dart --rust
       description: >-

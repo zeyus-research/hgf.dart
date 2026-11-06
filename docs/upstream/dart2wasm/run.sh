@@ -42,3 +42,8 @@ echo "-- tableLookup: $(body "$out/codegen.wat" tableLookup | wc -l) lines for" 
   "one table read: a null check on the global, the initialiser inlined:"
 body "$out/codegen.wat" tableLookup |
   grep -E 'br_on_non_null|global.get \$table|array.new_fixed' | sed 's/^ */   /'
+
+echo
+echo "== Expando<int> as the only Expando (dart compile wasm -O2)"
+dart compile wasm -O2 "$here/expando_int.dart" -o "$out/expando_int.wasm" >/dev/null
+node "$repo/tool/web/run_wasm.mjs" "$out/expando_int.wasm"

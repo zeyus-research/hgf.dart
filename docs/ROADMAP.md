@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-06, after MAP, Laplace, NUTS, exact gradients, hierarchical models and isolate pools)
+## Where things stand (2026-11-06, after MAP, Laplace, NUTS, exact gradients, hierarchical models and worker pools)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -21,7 +21,7 @@ supersedes its phase list.
     data, bit-identical to `Network` (W4);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
-- 506 engine tests pass (plus 84 fitting, 17 widget and 15 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+- 632 engine tests pass (plus 110 fitting, 17 widget and 15 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
   `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
@@ -54,7 +54,9 @@ supersedes its phase list.
   `FitWorkers` runs all of these on a pool of isolates with bit-identical
   results: 3.5–3.8× on 4 cores for large problems (MAP and NUTS on 200
   agents), 3× for NUTS on 20 agents (42 s → 13.8 s), 2.6× for
-  hierarchical NUTS.
+  hierarchical NUTS. On the web the same pool runs on Web Workers (a
+  separately compiled worker, models as JSON): 3.3–4.2× on 4 cores with
+  Wasm workers, 2.1–3× with JS ones.
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -861,14 +863,55 @@ First part done 2026-11-06: MAP estimation.
     comparisons ran NumPyro and PyMC on one core; NumPyro can run chains
     in parallel too, `chain_method="parallel"` with several host devices,
     not measured.)
-  - The web gets a pool without workers (`workers_stub.dart`, chosen by
-    `dart.library.io`; dart2wasm defines `dart.library.isolate` but throws
-    at run time), so the same code runs everywhere.
+- [x] Web Workers (2026-11-06): `FitWorkers` on the web.
+  - One `FitWorkers` class over a `WorkerTransport` (`workers.dart`):
+    isolates where `dart.library.io` exists, Web Workers where
+    `dart.library.js_interop` does, none otherwise; the worker side is one
+    `WorkerHost` for both. Without a script (or in Node) the pool runs
+    inline, as before.
+  - Workers can't run the page's code, so the worker is a program of its
+    own: `package:hgf_fit/fit_worker.dart`, `runFitWorker()`, compiled with
+    `dart compile js` or `wasm`; `FitWorkers.spawn(script:
+    FitWorkerScript.wasm('fit_worker.wasm'))`. A Wasm worker starts from a
+    blob-URL module that imports the `.mjs` loader, so nothing else ships.
+  - Models cross as JSON: `Network.toJson`/`fromJson` in `package:hgf` (an
+    exact copy: nodes after expansion, edges with both sides' strengths,
+    settings, every field's initial value; bit-identical filtering on all
+    61 fixtures, also with parameters changed after build) and `FitCodec`
+    in `hgf_fit` (`toJson()` on the built-in priors, transforms and
+    response models, decoders for custom ones; custom couplings and
+    response functions by name; `ResponseModel.fn` can't cross). Subjects
+    and slices go as typed arrays, each distinct series once.
+  - Checked (`melos run test:web-workers`, in CI): every driver from a
+    dart2js and a dart2wasm page with JS and Wasm workers, bit-identical
+    when the worker is compiled like the page (MAP within 1e-5 across
+    compilers); missing scripts, unserialisable models, undecodable custom
+    types and errors thrown in a worker all reach the caller.
+  - Found: dart2wasm loses `Expando<int>` values when that is the program's
+    only Expando ([D7](upstream/README.md#d7)); the pool's ids are boxed.
+  - `melos run bench:web-parallel` (headless Chromium, i7-7700, page and
+    worker compiled alike, 150 + 150 draws):
+
+    | job | Wasm main thread | 2 | 4 | 8 Wasm workers | JS main thread | 2 | 4 | 8 JS workers |
+    |---|---|---|---|---|---|---|---|---|
+    | MAP, 20 agents | 22.9 ms | 1.37× | 2.33× | 2.14× | 30.6 ms | 1.29× | 0.85× | 0.69× |
+    | Laplace, 20 agents | 31.7 ms | 1.82× | 2.75× | 2.43× | 42.0 ms | 1.56× | 1.45× | 0.90× |
+    | MAP, 200 agents | 209.5 ms | 2.28× | 4.04× | 4.42× | 251.4 ms | 1.85× | 2.83× | 2.77× |
+    | Laplace, 200 agents | 302.6 ms | 2.33× | 4.17× | 4.84× | 358.6 ms | 1.92× | 3.02× | 3.40× |
+    | NUTS, 20 agents | 12.90 s | 2.20× | 3.54× | 3.67× | 16.70 s | 1.70× | 2.37× | 2.30× |
+    | hierarchical NUTS, 10 agents | 77.21 s | 2.13× | 3.29× | 3.28× | 95.90 s | 1.69× | 2.13× | 2.18× |
+    | empirical Bayes, 10 agents | 89.8 ms | 1.76× | 2.47× | 2.03× | 125.2 ms | 1.41× | 1.88× | 1.30× |
+
+    One Wasm worker is 1.15× the Wasm main thread (messaging included; why
+    the main thread filters slower wasn't investigated), one JS worker
+    0.97× its main thread: hence Wasm's gains at or above the core count,
+    and the JS build's weaker scaling (a message costs more than between
+    isolates). The Wasm main thread is 1.3× the JS one. `dart test`
+    compiles its pages without the release flags, so speed-ups measured
+    there are inflated; use the standalone page.
 - [ ] Next:
-  - web workers for `FitWorkers` on the web: needs a serialisable model
-    description (network spec, response model, priors), since workers only
-    take structured-clone data; closures (`ResponseModel.fn`, custom
-    couplings) can't cross;
+  - use the pool in the playground (a fitting view, below) with the Wasm
+    worker shipped in `web/`;
   - tangents for the vector node kinds, once they have batched kernels;
   - a fitting view in the playground (fit the loaded CSV's responses).
 
@@ -947,6 +990,8 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
   - [ ] [D4](upstream/README.md#d4) SIMD types emulated (10–15× slower).
   - [ ] [D5](upstream/README.md#d5) exp/log are JS imports.
   - [ ] [D6](upstream/README.md#d6) no way to drop `array.get` bounds checks.
+  - [ ] [D7](upstream/README.md#d7) `Expando<int>` loses its values when it
+        is the program's only Expando.
 
 ## Questions answered by the user
 
@@ -984,8 +1029,9 @@ every push, and the playground deploys to
 https://zeyus-research.github.io/hgf.dart/ from `main`. Phase 6 has
 started: `packages/hgf_fit` does MAP estimation, the Laplace
 approximation, NUTS, exact gradients and hierarchical models
-(2026-11-06), and runs them on isolate pools (`FitWorkers`, 2026-11-06);
-see its open items (web workers next).
+(2026-11-06), and runs them on worker pools (`FitWorkers`: isolates, and
+Web Workers on the web, 2026-11-06); see its open items (a fitting view in
+the playground next).
 
 ```sh
 cd hgf.dart
@@ -997,6 +1043,8 @@ melos run bench:fit                               # MAP fitting vs pyhgf + JAX
 melos run bench:nuts                              # NUTS vs PyMC and NumPyro (~8 min)
 melos run bench:hier                              # hierarchical NUTS vs NumPyro, PyMC (~4 min)
 melos run bench:parallel                          # FitWorkers speed-ups (~15 min)
+melos run test:web-workers                        # FitWorkers on Web Workers (Chrome)
+melos run bench:web-parallel                      # ... and their speed-ups (~10 min)
 (cd apps/hgf_playground && flutter run -d chrome --wasm)   # try it
 dart compile exe packages/hgf/benchmark/bin/profile_modes.dart -o /tmp/pm && \
   (cd packages/hgf && /tmp/pm)                    # ns/trial baseline per mode

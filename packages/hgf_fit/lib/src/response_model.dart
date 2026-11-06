@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:hgf/hgf.dart';
 
+import 'codec.dart' show jsonDouble;
 import 'special.dart';
 
 /// How a subject's responses arise from the network's beliefs, with named
@@ -108,6 +109,15 @@ abstract class ResponseModel {
     int offset,
     math.Random rng,
   ) => throw UnsupportedError('$runtimeType cannot simulate responses');
+
+  /// This response model as JSON, with a `"type"` key, for `FitCodec` (e.g. to
+  /// send a model to a Web Worker). The built-in ones are covered; a custom
+  /// one overrides this and gives the `FitCodec` a decoder for its type.
+  /// `ResponseModel.fn` can't be serialised (closures are code).
+  Map<String, Object?> toJson() => throw UnsupportedError(
+    '$runtimeType can\'t be serialised: override toJson() and give '
+    'FitCodec a decoder for it',
+  );
 }
 
 final class _FnResponseModel extends ResponseModel {
@@ -239,6 +249,14 @@ final class GaussianReadout extends ResponseModel {
   Map<String, double> get parameters => {'precision': precision};
 
   @override
+  Map<String, Object?> toJson() => {
+    'type': 'GaussianReadout',
+    'node': node,
+    'field': field.pyhgfName,
+    'precision': jsonDouble(precision),
+  };
+
+  @override
   void prepare(Network network) => _checkNode(network, node);
 
   @override
@@ -317,6 +335,13 @@ final class BinarySoftmaxReadout extends ResponseModel {
   };
 
   @override
+  Map<String, Object?> toJson() => {
+    'type': 'BinarySoftmaxReadout',
+    'node': node,
+    'inverseTemperature': jsonDouble(inverseTemperature),
+  };
+
+  @override
   void prepare(Network network) => _checkNode(network, node);
 
   @override
@@ -390,6 +415,22 @@ final class ObservationSurprise extends ResponseModel {
 
   @override
   bool get usesResponses => false;
+
+  /// The built-in parameter-free functions are written by name; others
+  /// need a name in `FitCodec.responseFunctions`.
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'ObservationSurprise',
+    'function': switch (function) {
+      FirstLevelGaussianSurprise() => 'FirstLevelGaussianSurprise',
+      TotalGaussianSurprise() => 'TotalGaussianSurprise',
+      FirstLevelBinarySurprise() => 'FirstLevelBinarySurprise',
+      _ => throw UnsupportedError(
+        'Cannot serialise ${function.runtimeType}: name it in '
+        'FitCodec.responseFunctions',
+      ),
+    },
+  };
 
   @override
   void prepare(Network network) => function.prepare(network, 0);

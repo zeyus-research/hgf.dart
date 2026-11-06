@@ -480,3 +480,16 @@ implementations in the SDK would help every numeric app.
 bounds-checked, and dart2wasm has no counterpart of
 `vm:unsafe:no-bounds-checks` (35–45% on the VM's standard/eHGF updates).
 Partly inherent to Wasm GC; a feature request at most.
+
+### D7
+
+**`Expando<int>` loses its values when it is the program's only `Expando`
+instantiation:** reading back a stored int throws "The Wasm reference is
+not a Dart object" (dart2wasm 3.13.7, every `-O` level, Chrome and Node).
+Repro: [`dart2wasm/expando_int.dart`](dart2wasm/expando_int.dart), via
+`run.sh`. dart2js and the VM are fine, and so is dart2wasm once some other
+`Expando<T>` is instantiated anywhere (which is why `dart test`'s pages,
+which use Expandos of their own, didn't show it). Found 2026-11-06 with
+`FitWorkers`, whose id tables were `Expando<int>`s: they now hold a small
+wrapper class.
+

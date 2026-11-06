@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>FitWorkers web benchmark</title>
+<script type="module">
+  // ?target=wasm (dart2wasm -O4) or js (dart2js -O2); other parameters are
+  // read by the Dart program.
+  const target = new URLSearchParams(location.search).get('target') ?? 'wasm';
+  if (target === 'wasm') {
+    const loader = await import('./bench.mjs');
+    const app = await (await loader.compileStreaming(fetch('bench.wasm'))).instantiate({});
+    app.invokeMain();
+  } else {
+    const s = document.createElement('script');
+    s.src = 'bench.js';
+    document.body.append(s);
+  }
+</script>

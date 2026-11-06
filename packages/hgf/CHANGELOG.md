@@ -1,5 +1,11 @@
 ## Unreleased
 
+- `Network.toJson()` / `Network.fromJson()`: an exact copy of a network as
+  JSON (nodes and edges as declared, settings, and every field's initial
+  value, including those changed with `setInitial`/`setInitialVector`), for
+  sending a network to a Web Worker or saving it. A rebuilt network filters
+  bit for bit like the original (checked on all 61 fixtures, also with
+  parameters changed after build). Custom couplings are written by name.
 - Exact gradients: `BatchNetwork(tangents: k)` carries `k` forward-mode
   tangents per element through every batched update (predictions,
   prediction errors, standard / eHGF / unbounded posteriors, relaxed or

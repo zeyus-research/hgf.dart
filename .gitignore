@@ -8,9 +8,13 @@ doc/api/
 *.dart.js
 *.js.deps
 *.js.map
+*.wasm.map
 *.wasm
 *.mjs
 !tool/web/*.mjs
+# Compiled Web Worker of hgf_fit's browser tests.
+packages/hgf_fit/test/web/fit_worker.js
+*.support.js
 
 # FVM version cache
 .fvm/

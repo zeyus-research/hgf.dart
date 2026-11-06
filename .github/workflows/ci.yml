@@ -43,7 +43,7 @@ jobs:
       - run: melos run test --no-select
 
   web:
-    name: Parity on dart2js and dart2wasm
+    name: Parity and Web Workers on dart2js and dart2wasm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -69,3 +69,6 @@ jobs:
         env:
           CHROME_EXECUTABLE: "${{ github.workspace }}/chrome_ci_wrapper.sh"
       - run: melos run test:wasm-release --no-select
+      - run: melos run test:web-workers --no-select
+        env:
+          CHROME_EXECUTABLE: "${{ github.workspace }}/chrome_ci_wrapper.sh"

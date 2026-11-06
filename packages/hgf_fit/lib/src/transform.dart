@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'codec.dart' show jsonDouble;
 import 'special.dart';
 
 /// A bijection between a parameter's constrained scale `x` and an
@@ -40,6 +41,14 @@ abstract class Transform {
     final h = 1e-6 * (y.abs() > 1 ? y.abs() : 1.0);
     return (logAbsJacobian(y + h) - logAbsJacobian(y - h)) / (2 * h);
   }
+
+  /// This transform as JSON, with a `"type"` key, for `FitCodec` (e.g. to
+  /// send a model to a Web Worker). The built-in ones are covered; a custom
+  /// one overrides this and gives the `FitCodec` a decoder for its type.
+  Map<String, Object?> toJson() => throw UnsupportedError(
+    '$runtimeType can\'t be serialised: override toJson() and give '
+    'FitCodec a decoder for it',
+  );
 }
 
 /// `y = x`.
@@ -60,6 +69,9 @@ final class IdentityTransform extends Transform {
 
   @override
   double dLogAbsJacobian(double y) => 0.0;
+
+  @override
+  Map<String, Object?> toJson() => {'type': 'Identity'};
 }
 
 /// `y = log(x − lower)`.
@@ -67,6 +79,12 @@ final class LowerBoundTransform extends Transform {
   const LowerBoundTransform(this.lower);
 
   final double lower;
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'LowerBound',
+    'lower': jsonDouble(lower),
+  };
 
   @override
   double toUnconstrained(double x) => math.log(x - lower);
@@ -91,6 +109,12 @@ final class UpperBoundTransform extends Transform {
   final double upper;
 
   @override
+  Map<String, Object?> toJson() => {
+    'type': 'UpperBound',
+    'upper': jsonDouble(upper),
+  };
+
+  @override
   double toUnconstrained(double x) => math.log(upper - x);
 
   @override
@@ -112,6 +136,13 @@ final class IntervalTransform extends Transform {
 
   final double lower;
   final double upper;
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'Interval',
+    'lower': jsonDouble(lower),
+    'upper': jsonDouble(upper),
+  };
 
   @override
   double toUnconstrained(double x) {

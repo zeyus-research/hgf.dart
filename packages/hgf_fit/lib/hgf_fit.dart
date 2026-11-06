@@ -35,7 +35,8 @@
 /// ```
 library;
 
-export 'src/empirical_bayes.dart';
+export 'src/codec.dart' show FitCodec, JsonDecoder;
+export 'src/empirical_bayes.dart' hide populationPrior;
 export 'src/fit.dart';
 export 'src/hierarchical.dart';
 export 'src/laplace.dart';

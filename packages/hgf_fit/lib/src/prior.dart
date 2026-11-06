@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:hgf/hgf.dart' show logGamma;
 
+import 'codec.dart' show jsonDouble;
 import 'special.dart';
 import 'transform.dart';
 
@@ -44,6 +45,14 @@ abstract class Prior {
 
   /// Whether [x] lies inside the support.
   bool contains(double x) => x >= lower && x <= upper;
+
+  /// This prior as JSON, with a `"type"` key, for `FitCodec` (e.g. to
+  /// send a model to a Web Worker). The built-in ones are covered; a custom
+  /// one overrides this and gives the `FitCodec` a decoder for its type.
+  Map<String, Object?> toJson() => throw UnsupportedError(
+    '$runtimeType can\'t be serialised: override toJson() and give '
+    'FitCodec a decoder for it',
+  );
 }
 
 /// Normal prior `N(mean, sd²)`.
@@ -70,6 +79,13 @@ final class Normal extends Prior {
 
   @override
   String toString() => 'Normal($mean, $sd)';
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'Normal',
+    'mean': jsonDouble(mean),
+    'sd': jsonDouble(sd),
+  };
 }
 
 /// Normal prior `N(mean, sd²)` truncated to `[lower, upper]` (either may be
@@ -133,6 +149,15 @@ final class TruncatedNormal extends Prior {
 
   @override
   String toString() => 'TruncatedNormal($mean, $sd, [$lower, $upper])';
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'TruncatedNormal',
+    'mean': jsonDouble(mean),
+    'sd': jsonDouble(sd),
+    'lower': jsonDouble(lower),
+    'upper': jsonDouble(upper),
+  };
 }
 
 /// Uniform prior on `[lower, upper]`.
@@ -160,6 +185,13 @@ final class Uniform extends Prior {
 
   @override
   String toString() => 'Uniform($lower, $upper)';
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'Uniform',
+    'lower': jsonDouble(lower),
+    'upper': jsonDouble(upper),
+  };
 }
 
 /// Half-normal prior on `[0, ∞)` with scale [sd].
@@ -189,6 +221,9 @@ final class HalfNormal extends Prior {
 
   @override
   String toString() => 'HalfNormal($sd)';
+
+  @override
+  Map<String, Object?> toJson() => {'type': 'HalfNormal', 'sd': jsonDouble(sd)};
 }
 
 /// Log-normal prior: `log x ~ N(mu, sigma²)`.
@@ -221,6 +256,13 @@ final class LogNormal extends Prior {
 
   @override
   String toString() => 'LogNormal($mu, $sigma)';
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'LogNormal',
+    'mu': jsonDouble(mu),
+    'sigma': jsonDouble(sigma),
+  };
 }
 
 /// Gamma prior with [shape] `α` and [rate] `β` (mean `α/β`).
@@ -273,6 +315,13 @@ final class GammaPrior extends Prior {
 
   @override
   String toString() => 'Gamma($shape, $rate)';
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'Gamma',
+    'shape': jsonDouble(shape),
+    'rate': jsonDouble(rate),
+  };
 }
 
 /// An improper flat prior on `[lower, upper]` (density 1, log density 0):
@@ -316,4 +365,12 @@ final class Flat extends Prior {
 
   @override
   String toString() => 'Flat([$lower, $upper])';
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'Flat',
+    'lower': jsonDouble(lower),
+    'upper': jsonDouble(upper),
+    if (_typical case final t?) 'typical': jsonDouble(t),
+  };
 }

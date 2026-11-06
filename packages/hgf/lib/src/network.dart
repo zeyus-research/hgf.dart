@@ -11,6 +11,7 @@ import 'types.dart';
 part 'batch/batch_network.dart';
 part 'batch/batch_tangents.dart';
 part 'batch/batch_updates.dart';
+part 'network_json.dart';
 part 'update_sequence.dart';
 part 'updates/categorical.dart';
 part 'updates/dirichlet.dart';
@@ -116,6 +117,27 @@ class Network {
     this.maxPosteriorPrecision = 1e10,
     this.precisionClippingValue = 1e-6,
   });
+
+  /// Rebuilds a network from [toJson]'s output. Custom couplings are looked
+  /// up by name in [couplings].
+  factory Network.fromJson(
+    Map<String, Object?> json, {
+    Map<String, Coupling> couplings = const {},
+  }) => _networkFromJson(json, couplings);
+
+  /// An exact copy of this network as JSON: its nodes and edges as declared
+  /// (with the current coupling strengths), its settings, and the initial
+  /// value of every field, including those changed with [setInitial] and
+  /// [setInitialVector]. [Network.fromJson] rebuilds a network that filters
+  /// bit for bit like this one. Current beliefs are not included (see
+  /// [saveState]).
+  ///
+  /// This is not the pyhgf-style [NetworkSpec] format: nodes are listed
+  /// after expansion (a categorical node's binary and continuous parents
+  /// are nodes of their own). Custom couplings are written by name only.
+  /// Non-finite numbers are written as the strings `"NaN"`, `"Infinity"`
+  /// and `"-Infinity"`, so `jsonEncode` accepts the result.
+  Map<String, Object?> toJson() => _networkToJson(this);
 
   /// The posterior update for nodes with volatility children.
   final VolatilityUpdates volatilityUpdates;

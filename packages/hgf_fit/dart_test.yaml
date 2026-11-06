@@ -4,3 +4,6 @@ tags:
     timeout: 4x
   benchmark:
     timeout: 4x
+  # FitWorkers on Web Workers (test/web): needs the compiled workers, see
+  # `melos run test:web-workers`.
+  web-workers:
