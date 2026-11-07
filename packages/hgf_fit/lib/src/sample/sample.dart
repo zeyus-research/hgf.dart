@@ -6,7 +6,6 @@ import '../fit.dart';
 import '../model.dart';
 import '../optim/optimizer.dart';
 import '../pass.dart';
-import '../workers.dart';
 import 'diagnostics.dart';
 import 'nuts.dart';
 
@@ -423,7 +422,7 @@ NutsFit sampleNuts(
 );
 
 /// [sampleNuts] with each leapfrog pass split across the pool's isolates.
-extension SampleNutsOnWorkers on FitWorkers {
+extension SampleNutsOnWorkers on PassRunner {
   /// [sampleNuts] on this pool; the same draws, bit for bit.
   Future<NutsFit> sampleNuts(
     HgfModel model,

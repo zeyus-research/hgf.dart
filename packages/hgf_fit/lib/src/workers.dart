@@ -50,7 +50,7 @@ export 'worker_transport.dart' show FitWorkerScript;
 /// coupling functions are, unless they capture something that isn't, like
 /// a port). Web Workers take models that `FitCodec` can serialise: no
 /// `ResponseModel.fn`, and custom types need decoders in the worker.
-final class FitWorkers {
+final class FitWorkers implements PassRunner {
   FitWorkers._(this._transport, this.minSliceTrials)
     : count = _transport.count,
       _busy = List.filled(_transport.count, false) {
@@ -91,6 +91,7 @@ final class FitWorkers {
 
   /// How many streams a driver should split independent tasks into: one
   /// per worker.
+  @override
   int get streams => count == 0 ? 1 : count;
 
   bool _closed = false;
@@ -139,7 +140,11 @@ final class FitWorkers {
   /// the workers, and their results are dropped). The pool stays usable.
   void cancel() => _generation++;
 
+  /// Answers one [pass] on this pool (split across the workers).
+  Future<void> evaluatePass(Pass pass) => _submit(pass);
+
   /// Runs [program], answering each pass on this pool.
+  @override
   Future<T> run<T>(Program<T> program) async {
     if (_closed) throw StateError('FitWorkers closed');
     final result = Out<T>();

@@ -47,6 +47,10 @@ abstract interface class GpuBackend {
     int? length,
   });
 
+  /// Queues a write of [data] (bit patterns, e.g. indices, or floats
+  /// through a `Float32List` view) to [buffer] at [offset] bytes.
+  void writeUints(GpuBuffer buffer, Uint32List data, {int offset = 0});
+
   /// Queues a buffer-to-buffer copy.
   void copy(
     GpuBuffer source,
@@ -136,8 +140,8 @@ final class GpuBatch {
   final GpuBuffer _initialBuffer, _stateBuffer, _paramsBuffer;
   final _dirty = <int>{};
 
-  GpuBuffer? _dataBuffer, _maskBuffer, _stepsBuffer;
-  Object? _lastData, _lastMask, _lastSteps;
+  GpuBuffer? _dataBuffer, _maskBuffer, _stepsBuffer, _respBuffer;
+  Object? _lastData, _lastMask, _lastSteps, _lastResp;
 
   /// Timings of the last [surprise] call.
   GpuTimings? lastTimings;
@@ -163,6 +167,11 @@ final class GpuBatch {
   void setVolatilityCoupling(int parent, int child, List<double> values) =>
       _setSlot(kernel.volatilityCouplingSlot(parent, child), values);
 
+  /// The response's parameter [j] ([GpuResponse.defaults] order), per
+  /// element.
+  void setResponseParameter(int j, List<double> values) =>
+      _setSlot(kernel.responseParameterSlot(j), values);
+
   /// Filters [data] (one row of [HgfKernel.nInputs] values per trial,
   /// shared by every element, or `[trial][input][element]` with
   /// [HgfKernel.perElementData]) from the initial state and returns each
@@ -171,7 +180,10 @@ final class GpuBatch {
   ///
   /// [observed] (0/1, the layout of [data]) is required by kernels compiled
   /// with [HgfKernel.observedMask]; [timeSteps] (one per trial) by those
-  /// compiled with [HgfKernel.timeSteps], which ignore [timeStep].
+  /// compiled with [HgfKernel.timeSteps], which ignore [timeStep];
+  /// [responses] (one per trial, or `[trial][element]` with
+  /// [HgfKernel.perElementData]; NaN for a missed response) by those whose
+  /// response scores responses.
   ///
   /// The lists are uploaded again only if they are not those of the
   /// previous call (don't modify them in place between calls).
@@ -182,9 +194,17 @@ final class GpuBatch {
     List<double> data, {
     List<double>? observed,
     List<double>? timeSteps,
+    List<double>? responses,
     double timeStep = 1.0,
     int trialsPerDispatch = 0,
   }) async {
+    if (kernel.response.usesResponses != (responses != null)) {
+      throw ArgumentError(
+        kernel.response.usesResponses
+            ? 'This kernel needs responses'
+            : 'This kernel scores no responses',
+      );
+    }
     if (kernel.observedMask != (observed != null)) {
       throw ArgumentError(
         kernel.observedMask
@@ -213,6 +233,10 @@ final class GpuBatch {
     if (timeSteps != null && timeSteps.length != nTime) {
       throw ArgumentError('timeSteps needs one entry per trial ($nTime)');
     }
+    final respWidth = kernel.perElementData ? b : 1;
+    if (responses != null && responses.length < nTime * respWidth) {
+      throw ArgumentError('responses needs ${nTime * respWidth} entries');
+    }
     if (!identical(data, _lastData)) {
       _dataBuffer = _upload(_dataBuffer, data);
       _lastData = data;
@@ -224,6 +248,10 @@ final class GpuBatch {
     if (timeSteps != null && !identical(timeSteps, _lastSteps)) {
       _stepsBuffer = _upload(_stepsBuffer, timeSteps);
       _lastSteps = timeSteps;
+    }
+    if (responses != null && !identical(responses, _lastResp)) {
+      _respBuffer = _upload(_respBuffer, responses);
+      _lastResp = responses;
     }
     for (final s in _dirty) {
       backend.write(
@@ -258,6 +286,7 @@ final class GpuBatch {
           _paramsBuffer,
           ?_maskBuffer,
           ?_stepsBuffer,
+          ?_respBuffer,
         ], groups);
       dispatches++;
     }
@@ -317,7 +346,7 @@ final class GpuBatch {
       ..release(_initialBuffer)
       ..release(_stateBuffer)
       ..release(_paramsBuffer);
-    for (final b in [_dataBuffer, _maskBuffer, _stepsBuffer]) {
+    for (final b in [_dataBuffer, _maskBuffer, _stepsBuffer, _respBuffer]) {
       if (b != null) backend.release(b);
     }
   }

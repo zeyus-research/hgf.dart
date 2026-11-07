@@ -29,18 +29,16 @@ const tolerance = 1e-5;
 /// either (`tool/parity/gpu_f32_reference.py --fixtures ...`):
 /// * out of f32's range: f64 reaches variances of 1e250 / 1e-307; JAX f32
 ///   returns an infinite total, the GPU infinite or far off;
-/// * sensitive: chaotic (`continuous_2level_eHGF` after ~150 trials) or
-///   near a runaway; JAX f32 is 5e-4 to 9e-3 off, the GPU about as much.
+/// * sensitive: chaotic (`continuous_2level_eHGF` after ~150 trials).
+///
+/// The binary fixtures near a runaway, where JAX f32 is 5e-4 to 9e-3 off,
+/// match to ~3e-6: the kernel carries `1 − μ̂` of binary nodes as `π̂ / μ̂`
+/// instead of subtracting, which cancels catastrophically near 1.
 const outOfRange = {
   'constant_bias_eHGF',
   'continuous_2level_unbounded_overflow',
 };
-const sensitive = {
-  'continuous_2level_eHGF': 0.1,
-  'binary_3level_missing': 0.05,
-  'binary_3level_unbounded': 0.05,
-  'binary_bias': 0.05,
-};
+const sensitive = {'continuous_2level_eHGF': 0.1};
 
 /// Element [e]'s value of [field] of continuous node [i] (as the engine's
 /// batch check perturbs them).

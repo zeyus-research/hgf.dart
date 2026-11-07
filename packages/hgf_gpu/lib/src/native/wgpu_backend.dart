@@ -287,6 +287,24 @@ final class WgpuBackend implements GpuBackend {
     );
   }
 
+  @override
+  void writeUints(GpuBuffer buffer, Uint32List data, {int offset = 0}) {
+    final n = data.length;
+    if (n > _scratchLength) {
+      if (_scratch != nullptr) calloc.free(_scratch);
+      _scratch = calloc<Float>(n);
+      _scratchLength = n;
+    }
+    _scratch.cast<Uint32>().asTypedList(n).setRange(0, n, data);
+    _w.wgpuQueueWriteBuffer(
+      _queue,
+      (buffer as _NativeBuffer).handle,
+      offset,
+      _scratch.cast(),
+      n * 4,
+    );
+  }
+
   void _submit(WGPUCommandEncoder encoder) {
     final commands = _w.wgpuCommandEncoderFinish(encoder, nullptr);
     using((arena) {

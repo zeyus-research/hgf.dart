@@ -5,7 +5,6 @@ import 'model.dart';
 import 'optim/lbfgs.dart';
 import 'optim/optimizer.dart';
 import 'pass.dart';
-import 'workers.dart';
 
 /// How [BatchedObjective] computes gradients.
 enum Gradients {
@@ -133,6 +132,7 @@ final class BatchedObjective {
       y,
       jacobian: jacobian,
       includePrior: includePrior,
+      precise: nE > nP,
     );
     yield pass;
     final out = pass.out;
@@ -290,6 +290,7 @@ final class BatchedObjective {
       y,
       jacobian: jacobian,
       includePrior: includePrior,
+      precise: true,
     );
     yield pass;
     final out = pass.out;
@@ -422,7 +423,7 @@ MapFit fitMap(
 );
 
 /// [fitMap] with each batched pass split across the pool's isolates.
-extension FitMapOnWorkers on FitWorkers {
+extension FitMapOnWorkers on PassRunner {
   /// [fitMap] on this pool; the same result, bit for bit.
   Future<MapFit> fitMap(
     HgfModel model,
@@ -525,6 +526,7 @@ Iterable<Step> _fitMap(
     Int32List.fromList([for (var s = 0; s < n; s++) s]),
     y,
     negLogLikelihood: true,
+    precise: true,
   );
   yield pass;
   final post = pass.out, nll = pass.negLogLikelihood!;

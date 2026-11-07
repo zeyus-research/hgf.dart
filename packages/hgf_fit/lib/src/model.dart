@@ -297,26 +297,106 @@ final class HgfModel {
         final e = g.elements[j];
         final nll = totals[j];
         negLogLikelihood?[e] = nll;
-        var v = nll;
-        for (var i = 0; i < k; i++) {
-          if (includePrior != null && !includePrior[i]) continue;
-          final p = parameters[i];
-          v -= p.prior.logDensity(x[e * k + i]);
-          if (jacobian) v -= p.transform.logAbsJacobian(y[e * k + i]);
-        }
-        final value = v.isNaN ? double.infinity : v;
-        out[e] = value;
-        if (!exact) continue;
-        for (var i = 0; i < k; i++) {
-          final p = parameters[i], ei = e * k + i;
-          var gi = grad![j * k + i];
-          if (includePrior == null || includePrior[i]) {
-            gi -= p.prior.dLogDensity(x[ei]) * dxdy![ei];
-            if (jacobian) gi -= p.transform.dLogAbsJacobian(y[ei]);
-          }
-          gradient[ei] = value.isFinite ? gi : double.nan;
-        }
+        _complete(
+          e,
+          nll,
+          x,
+          y,
+          dxdy,
+          out,
+          grad,
+          j,
+          gradient,
+          jacobian,
+          includePrior,
+        );
       }
+    }
+  }
+
+  /// Element [e]'s posterior from its likelihood [nll]: the prior and
+  /// Jacobian terms, and with [gradient] their derivatives added to the
+  /// likelihood's (`likelihoodGradient[j * k + i]`, with respect to y).
+  @pragma('vm:prefer-inline')
+  void _complete(
+    int e,
+    double nll,
+    Float64List x,
+    Float64List y,
+    Float64List? dxdy,
+    Float64List out,
+    Float64List? likelihoodGradient,
+    int j,
+    Float64List? gradient,
+    bool jacobian,
+    List<bool>? includePrior,
+  ) {
+    final k = dimension;
+    var v = nll;
+    for (var i = 0; i < k; i++) {
+      if (includePrior != null && !includePrior[i]) continue;
+      final p = parameters[i];
+      v -= p.prior.logDensity(x[e * k + i]);
+      if (jacobian) v -= p.transform.logAbsJacobian(y[e * k + i]);
+    }
+    final value = v.isNaN ? double.infinity : v;
+    out[e] = value;
+    if (gradient == null) return;
+    for (var i = 0; i < k; i++) {
+      final p = parameters[i], ei = e * k + i;
+      var gi = likelihoodGradient![j * k + i];
+      if (includePrior == null || includePrior[i]) {
+        gi -= p.prior.dLogDensity(x[ei]) * dxdy![ei];
+        if (jacobian) gi -= p.transform.dLogAbsJacobian(y[ei]);
+      }
+      gradient[ei] = value.isFinite ? gi : double.nan;
+    }
+  }
+
+  /// [negLogPosterior] from likelihoods computed elsewhere (e.g. on a GPU):
+  /// [negLogLikelihood] holds each element's `−log p(responses | x)` and,
+  /// with [gradient], [likelihoodGradient] its derivatives with respect to
+  /// `y` (`[e * dimension + i]`). Adds the prior and Jacobian terms the way
+  /// [negLogPosterior] does.
+  void completeNegLogPosterior(
+    Float64List y,
+    Float64List negLogLikelihood,
+    Float64List out, {
+    bool jacobian = false,
+    Float64List? likelihoodGradient,
+    Float64List? gradient,
+    List<bool>? includePrior,
+  }) {
+    final k = dimension, nE = negLogLikelihood.length;
+    if (y.length != nE * k || out.length != nE) {
+      throw ArgumentError('y, out and negLogLikelihood disagree in size');
+    }
+    if ((gradient == null) != (likelihoodGradient == null)) {
+      throw ArgumentError('gradient needs likelihoodGradient');
+    }
+    final x = Float64List(nE * k);
+    final dxdy = gradient != null ? Float64List(nE * k) : null;
+    for (var e = 0; e < nE; e++) {
+      for (var i = 0; i < k; i++) {
+        final t = parameters[i].transform, yi = y[e * k + i];
+        x[e * k + i] = t.toConstrained(yi);
+        dxdy?[e * k + i] = t.dToConstrained(yi);
+      }
+    }
+    for (var e = 0; e < nE; e++) {
+      _complete(
+        e,
+        negLogLikelihood[e],
+        x,
+        y,
+        dxdy,
+        out,
+        likelihoodGradient,
+        e,
+        gradient,
+        jacobian,
+        includePrior,
+      );
     }
   }
 

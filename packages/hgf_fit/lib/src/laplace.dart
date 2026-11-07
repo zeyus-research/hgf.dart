@@ -6,7 +6,6 @@ import 'linalg.dart';
 import 'model.dart';
 import 'pass.dart';
 import 'special.dart';
-import 'workers.dart';
 
 /// The Laplace approximation around one subject's MAP estimate: a Gaussian
 /// with the inverse Hessian of the negative log posterior as covariance,
@@ -171,7 +170,7 @@ LaplaceFit laplace(HgfModel model, MapFit fit, {double step = 1e-4}) =>
     runInline((o) => _laplace(model, fit, step, o));
 
 /// [laplace] with the Hessian pass split across the pool's isolates.
-extension LaplaceOnWorkers on FitWorkers {
+extension LaplaceOnWorkers on PassRunner {
   /// [laplace] on this pool; the same result, bit for bit.
   Future<LaplaceFit> laplace(
     HgfModel model,

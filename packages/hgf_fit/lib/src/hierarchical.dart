@@ -10,7 +10,6 @@ import 'prior.dart';
 import 'sample/nuts.dart';
 import 'sample/sample.dart';
 import 'transform.dart';
-import 'workers.dart';
 
 const double _logSqrt2Pi = 0.9189385332046727;
 
@@ -609,7 +608,7 @@ HierarchicalFit sampleHierarchical(
 
 /// [sampleHierarchical] with each leapfrog pass split across the pool's
 /// isolates.
-extension SampleHierarchicalOnWorkers on FitWorkers {
+extension SampleHierarchicalOnWorkers on PassRunner {
   /// [sampleHierarchical] on this pool; the same draws, bit for bit.
   Future<HierarchicalFit> sampleHierarchical(
     HierarchicalModel model,

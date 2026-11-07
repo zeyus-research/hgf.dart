@@ -39,6 +39,7 @@ final class Pass extends Step {
     this.y, {
     this.jacobian = false,
     this.includePrior,
+    this.precise = false,
     bool negLogLikelihood = false,
     bool gradient = false,
   }) : out = Float64List(subjectOf.length),
@@ -53,6 +54,12 @@ final class Pass extends Step {
   final Float64List y;
   final bool jacobian;
   final List<bool>? includePrior;
+
+  /// Whether the caller needs the full `f64` accuracy of the CPU engine:
+  /// the pass's values are differenced (finite-difference gradients and
+  /// Hessians) or reported. A runner that evaluates in lower precision (a
+  /// GPU in `f32`) answers these passes on the CPU.
+  final bool precise;
 
   /// Filled by the runner.
   final Float64List out;
@@ -85,6 +92,7 @@ final class Pass extends Step {
       Float64List.sublistView(y, start * k, end * k),
       jacobian: jacobian,
       includePrior: includePrior,
+      precise: precise,
       negLogLikelihood: negLogLikelihood != null,
       gradient: gradient != null,
     );
@@ -136,6 +144,19 @@ final class Pass extends Step {
     bounds.add(n);
     return bounds;
   }
+}
+
+/// Answers the passes of [Program]s: `FitWorkers` (isolates, Web Workers
+/// or the calling isolate), or another evaluator of [HgfModel]s, like a GPU.
+/// The fitting functions run on any runner as extension methods
+/// (`runner.fitMap(...)`, `runner.sampleNuts(...)`, ...).
+abstract interface class PassRunner {
+  /// Runs [program], answering each of its passes.
+  Future<T> run<T>(Program<T> program);
+
+  /// How many [Concurrent] streams a driver should split independent tasks
+  /// into (1: every task in each pass, in lock step).
+  int get streams;
 }
 
 /// Holds a program's result.

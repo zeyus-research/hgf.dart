@@ -12,7 +12,6 @@ import 'pass.dart';
 import 'prior.dart';
 import 'special.dart';
 import 'transform.dart';
-import 'workers.dart';
 
 const double _logSqrt2Pi = 0.9189385332046727;
 
@@ -221,7 +220,7 @@ EmpiricalBayesFit fitEmpiricalBayes(
 
 /// [fitEmpiricalBayes] with each batched pass split across the pool's
 /// isolates.
-extension EmpiricalBayesOnWorkers on FitWorkers {
+extension EmpiricalBayesOnWorkers on PassRunner {
   /// [fitEmpiricalBayes] on this pool; the same result, bit for bit.
   Future<EmpiricalBayesFit> fitEmpiricalBayes(
     HierarchicalModel model,

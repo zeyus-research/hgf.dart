@@ -235,6 +235,17 @@ final class WebGpuBackend implements GpuBackend {
   }
 
   @override
+  void writeUints(GpuBuffer buffer, Uint32List data, {int offset = 0}) {
+    _device.queue.writeBuffer(
+      (buffer as _WebBuffer).buffer,
+      offset,
+      data.toJS,
+      0,
+      data.length,
+    );
+  }
+
+  @override
   void copy(
     GpuBuffer source,
     int sourceOffset,
