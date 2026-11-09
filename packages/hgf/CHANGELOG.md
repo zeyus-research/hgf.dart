@@ -1,5 +1,10 @@
 ## Unreleased
 
+- `erfc` (exported), to ~1e-14 relative: a positive-term series below 1.5
+  and a continued fraction above. The GELU coupling (`CouplingFn.gelu`) uses
+  it; it used Abramowitz–Stegun 7.1.26 (rshgf's, up to 5e-5 relative in the
+  tail, [R3](../../docs/upstream/README.md#r3)), so GELU now matches JAX's
+  exact GELU instead of rshgf's.
 - `Network.toJson()` / `Network.fromJson()`: an exact copy of a network as
   JSON (nodes and edges as declared, settings, and every field's initial
   value, including those changed with `setInitial`/`setInitialVector`), for

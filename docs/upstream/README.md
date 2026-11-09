@@ -35,8 +35,12 @@ Checked against pyhgf `6be12eb4` (0.3.2) and Dart 3.13.7.
 | [P15](#p15) | pyhgf JAX | dp-state results depend on JAX's PRNG mode and precision; the tests pin the legacy mode | low | [ ] |
 | [P16](#p16) | pyhgf JAX | dp-state `batch_size` ≠ number of clusters fails inside the scan | low | [ ] |
 | [P17](#p17) | pyhgf JAX + rshgf | unbounded volatility update (the default) runs away on 3-level binary HGFs | **high**: runaway beliefs | [ ] |
+| [P18](#p18) | pyhgf JAX + rshgf | `DeepNetwork`'s volatility levels run away (all three updates), then NaN | **high**: NaN | [ ] |
 | [R1](#r1) | rshgf | ef-state ignores `observed`; univariate fixed rate only | medium | [ ] |
 | [R2](#r2) | rshgf | hot-path costs (string compares, allocations, clones) | perf | [ ] |
+| [R3](#r3) | rshgf | GELU coupling uses a 1.5e-7 `erfc` approximation (called exact) | low | [ ] |
+| [R4](#r4) | rshgf | `DeepNetwork.batch_update` kernel: stale g″ weighting (#456), ignores `predict_precision` | **high**: wrong values | [ ] |
+| [R5](#r5) | rshgf | `DeepNetwork(predict_precision=False)` panics with volatility parents | medium: crash | [ ] |
 | [D1](#d1) | dart2wasm | a typed-data view anywhere slows reads of non-view lists | perf, ~10% | [ ] |
 | [D2](#d2) | dart2wasm | `1 / 6` (int literals) isn't constant-folded | perf | [ ] |
 | [D3](#d3) | dart2wasm | top-level `final` tables: null check + initialiser at each use | perf, ~1.5% | [ ] |
@@ -385,6 +389,44 @@ code). With the shared parent at ω = −6 it runs away at trials 2377–2564
 (seeds 1–6); at −8 it stays bounded for 10 000 trials. Standard and eHGF
 stay bounded at all three. The playground's categorical preset uses −8.
 
+### P18
+
+**`DeepNetwork`'s implied volatility levels run away, under all three
+volatility updates, even with the weights frozen** (JAX, and rshgf up to the
+first NaN). Found while porting the vectorised backend (hgf_deep, which
+reproduces it bit for bit).
+Repro: [`pyhgf/deep_volatility_runaway.py`](pyhgf/deep_volatility_runaway.py)
+(a 2-4-3 tanh network, pyhgf's defaults otherwise, fixed N(0, 0.5²) weights,
+N(0, 1) predictors and targets, `weight_update=False`):
+
+```
+unbounded hidden mean_vol max at t=0,10,20,30: 0.0466, 12, 60.7, 115   first NaN at sample: 38
+eHGF      hidden mean_vol max at t=0,10,20,30: 0.00739, 6.01, 2.77, nan   first NaN at sample: 10
+standard  hidden mean_vol max at t=0,10,20,30: 0.00615, 7.43, 11.3, 12   first NaN at sample: 16
+```
+
+The hidden layer's `mean_vol` ratchets up in steps (in one run 17 → 56 →
+106 → 204 within 27 samples), its predicted precision collapses
+(π̂ ≈ e^−μ_vol, down to 1e−185), one posterior mean step `msg·g′/π` then
+moves the node by orders of magnitude (to −4e183), and the volatility
+posterior goes NaN. Weight learning is not the driver: frozen weights run
+away sooner. Not diagnosed further.
+
+Ruled out: the reconstruction `previous_variance = max(1/π̄ − Ω, 1e-128)`
+in the eHGF and unbounded posteriors cancels catastrophically once Ω ≫
+1/π (it returns 32 instead of 3.33 at μ̂_vol = 40, and the 1e-128 floor from
+55), but there the weight σ(γ − log prev) is ≈ 1 either way and the posterior
+barely moves (checked in isolation). Storing the prior variance at prediction
+time would still be the cleaner computation.
+
+**rshgf diverges from JAX silently after the first NaN:** Rust's
+`f64::max`/`min` return the other operand when one is NaN, where
+`jnp.maximum`/`clip` propagate it, so rshgf keeps finite beliefs that JAX
+has already lost. Every per-sample `fit` gap between rshgf f64 and JAX on
+the hgf_deep fixtures traces back to such a NaN.
+**hgf.dart:** matches JAX, NaN included (`hgf_deep`'s fixtures
+`deep4_tanh_*`, `fit_eHGF_tanh`, `fit_adam_continued` contain it).
+
 ## rshgf
 
 P1 and P2 apply to rshgf too.
@@ -419,6 +461,68 @@ JAX.
 hgf.dart avoids all three (int kind codes, preallocated scratch, a staged
 recorder) and runs single series ~1.9× faster than rshgf on AOT
 (`docs/benchmark_results.md`); not all of that gap comes from these three.
+
+### R3
+
+**The GELU coupling is approximate** (`src/math.rs:313`): `erfc` is
+Abramowitz–Stegun 7.1.26 (|error| ≤ 1.5e-7, 5e-5 relative in the tail),
+though the doc comment calls it the exact erf-based GELU. JAX's
+`jax.nn.gelu(approximate=False)` uses XLA's full-precision `erfc`.
+Repro: [`pyhgf/rshgf_gelu_erfc.py`](pyhgf/rshgf_gelu_erfc.py): a value
+parent with GELU coupling on the USD/CHF series, float64:
+
+```
+max |rshgf - JAX| expected_mean (float64): 8.737146961479425e-08
+```
+
+Fix: a full-precision `erfc` (`libm::erfc`, or the positive-term series
+below 1.5 and the continued fraction above that hgf.dart now uses, 9e-15
+relative). **hgf.dart:** had copied the approximation; fixed 2026-11-09
+(`erfc` in `math.dart`). The f32 GPU kernel keeps it: 1.5e-7 is f32 rounding
+level.
+
+### R4
+
+**rshgf's batched `DeepNetwork` step disagrees with JAX** (and with its own
+per-sample path) from the first call, on any network with an interior layer
+under a curved coupling (`src/vectorised/batched.rs`):
+
+1. `batched_posterior_update` weights the g″ term of the posterior precision
+   by the effective precision, `Wᵀ(eff∘δ)`. Since #456 the per-sample kernel
+   and JAX weight it by the relaxed gain, `Wᵀ(gain∘δ)`. The two coincide on
+   leaf children (gain = eff there), which is all
+   `test_batch_update_matches_per_sample_reference` exercises (3 layers).
+2. `batched_volatile_prediction` ignores `predict_precision`.
+
+Repro: [`pyhgf/rshgf_deep_batched_kernel.py`](pyhgf/rshgf_deep_batched_kernel.py)
+(2-5-4-3 tanh network, one `batch_update` of 32 samples):
+
+```
+predict_precision=True   max |rshgf - JAX| input errors: 2.61e-01  (rshgf float32)
+predict_precision=False  max |rshgf - JAX| input errors: 5.15e-01  (rshgf float32)
+```
+
+Fix: [`pyhgf/rshgf_deep_batched_kernel.patch`](pyhgf/rshgf_deep_batched_kernel.patch)
+(applies to `6be12eb4`; also fixes R5). Built with `--features f64`, rshgf
+then matches JAX to ~1e-15 on every hgf_deep fixture (input errors 4.4e-16 /
+6.7e-16 in the repro), except GELU networks (R3). Without the `f64` feature
+the remaining gap is f32 rounding (JAX in float32 lands as far off).
+**hgf.dart:** follows JAX.
+
+### R5
+
+**`DeepNetwork(predict_precision=False)` panics** as soon as a volatile layer
+has a volatility parent (the default): `layer_prediction` sets
+`expected_*_vol` to `None` and the prediction error unwraps them. JAX passes
+the frozen volatility level through. Repro:
+[`pyhgf/rshgf_deep_predict_precision_panic.py`](pyhgf/rshgf_deep_predict_precision_panic.py):
+
+```
+JAX: ok, predictions finite: True
+rshgf: PanicException: called `Option::unwrap()` on a `None` value
+```
+
+Fix: in the patch of R4. **hgf.dart:** follows JAX.
 
 ## dart2wasm (Dart SDK)
 

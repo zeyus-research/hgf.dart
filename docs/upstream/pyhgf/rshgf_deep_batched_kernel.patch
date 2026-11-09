@@ -1,0 +1,68 @@
+--- a/src/vectorised/batched.rs
++++ b/src/vectorised/batched.rs
+@@ -187,6 +187,7 @@
+     parent_layer: &Layer,
+     time_step: Float,
+     feedforward_uncertainty: bool,
++    predict_precision: bool,
+ ) {
+     let params = &child_layer.params;
+     let (n, n_samples) = child.mean.dim();
+@@ -195,7 +196,11 @@
+ 
+     // 1. Volatility level (internal): the same elementwise formulas as the
+     // per-sample kernel, over every column at once.
+-    if child_layer.has_volatility_parent {
++    if child_layer.has_volatility_parent && !predict_precision {
++        // Frozen volatility level: passes through (JAX `vectorised_layer_prediction`).
++        child.expected_mean_vol = child.mean_vol.clone();
++        child.expected_precision_vol = child.precision_vol.clone();
++    } else if child_layer.has_volatility_parent {
+         let mean_vol = child.mean_vol.as_ref().expect("volatility mean");
+         let precision_vol = child.precision_vol.as_ref().expect("volatility precision");
+ 
+@@ -267,7 +272,7 @@
+             *e = 1.0 / (1.0 / *c + v);
+             *ef = pv * *e;
+         };
+-    if child_layer.is_input_layer {
++    if child_layer.is_input_layer || !predict_precision {
+         // Input/leaf override: no random walk between observations.
+         child
+             .conditional_expected_precision
+@@ -586,8 +591,8 @@
+             });
+     });
+ 
+-    let ed = &eff * &child.value_prediction_error;
+-    let sum_pi_vpe = w.t().dot(&ed);
++    // The g'' term is weighted by the relaxed gain, like the mean shift.
++    let sum_pi_vpe = msg.clone();
+ 
+     // Precision: clip(π̂_b + pc1·g'² − g''·(Wᵀ@(eff∘δ))).
+     Zip::from(&mut parent.precision)
+@@ -647,6 +652,7 @@
+                 parent_layer,
+                 time_step,
+                 net.feedforward_uncertainty,
++                net.predict_precision,
+             ),
+             LayerKind::Binary => batched_binary_prediction(
+                 child,
+--- a/src/updates/vectorised/volatile/prediction.rs
++++ b/src/updates/vectorised/volatile/prediction.rs
+@@ -57,6 +57,14 @@
+                     *ev = pvv * epval;
+                 });
+             (Some(expected_mean_vol), Some(epv), Some(effv))
++        } else if has_volatility_parent {
++            // Frozen volatility level (predict_precision off): passes through,
++            // as in JAX, instead of leaving None for the PE kernel to unwrap.
++            (
++                child.mean_vol.clone(),
++                child.precision_vol.clone(),
++                child.effective_precision_vol.clone(),
++            )
+         } else {
+             (None, None, None)
+         };

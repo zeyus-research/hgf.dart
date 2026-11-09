@@ -76,6 +76,11 @@ supersedes its phase list.
   89 ms (8 isolates: 332 ms), and NUTS on 200 agents 5.0–5.4 s (34 s),
   on 2000 agents 30 s (319 s).
 
+- `packages/hgf_deep` (2026-11-09): pyhgf's vectorised `DeepNetwork` (HGF
+  neural networks) in f64, matching JAX to 1e-9 on 26 fixtures. Sequential
+  `fit` is ahead of pyhgf on small networks and ~2× behind JAX on wider ones;
+  batched work waits for the GPU port. See Phase 7's follow-ups.
+
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
   parity build. `pages.yml` deploys the playground (Wasm `-O4`, JS
@@ -1254,8 +1259,10 @@ rest is the sampler's own host work per chain and leapfrog step.
   (`src/vectorised/`, about 3.4k lines, f32 by default). It is per-layer
   matrix–vector products (GEMM over samples), elementwise volatile-node
   updates and rank-1 weight updates, which is GPU-shaped by construction.
-  First a `Float32List` CPU baseline in Dart, then WGSL (tiled GEMM plus
-  elementwise kernels).
+  - [x] CPU baseline (2026-11-09): `packages/hgf_deep`, see "HGF neural
+    networks (hgf_deep)" below.
+  - [ ] WGSL (tiled GEMM plus elementwise kernels), f32, checked against
+    the f64 CPU engine like hgf_gpu.
 - [x] Tangents in the codegen (exact gradients on the GPU), then a GPU
   `Pass` transport in hgf_fit (MAP, NUTS with many chains, hierarchical):
   Phase 7b.
@@ -1282,6 +1289,56 @@ rest is the sampler's own host work per chain and leapfrog step.
   registers only, without a store between dispatches.
 - [x] The GPU and the newer fitting features in the playground
   (2026-11-09): see Phase 8.
+
+#### HGF neural networks (hgf_deep, 2026-11-09): CPU baseline done
+
+`packages/hgf_deep` ports pyhgf's vectorised `DeepNetwork`: layers of
+volatile, binary and categorical nodes, dense or one-to-one weights, every
+volatility update, relaxed or mean-field, feedforward uncertainty, carried
+or reset precisions, tonic volatility; `fit` (sequential), `batchUpdate`
+(returns the input-layer errors), `predict`; SGD and Adam with optax's
+arithmetic; four weight initialisers. Not ported: continuous layers
+(`input_data`), `synaptic_uncertainty` learning, `update_input_layer`,
+`LayerStack`, the two-phase batch step, sample weights.
+
+- **Reference:** pyhgf's JAX backend in float64, not rshgf. It is a
+  superset of rshgf's features, and rshgf's batched kernel is wrong (R4).
+  **f64 on the CPU** (the roadmap said `Float32List`): Dart has no scalar
+  f32 arithmetic, f64 keeps the 1e-9 parity standard, and f32 is the GPU's
+  job, as in hgf_gpu.
+- **Parity:** 26 fixtures (`gen_deep_fixtures.py`, `melos run
+  fixtures:deep`) match to 1e-9 on predictions, recorded trajectories,
+  input errors, weights and every belief field after every operation, NaN
+  onsets included. 23 behavioural tests besides.
+- **One kernel set** over `[node][sample]` buffers serves `fit` (width 1)
+  and `batchUpdate` (width B), mirroring JAX's `vmap` of the per-sample
+  sweeps.
+- **Performance** (`melos run bench:deep`, one core): sequential `fit` beats
+  JAX f64 and rshgf on a 2-8-8-4 network (18.8 vs 29.6 / 22.4 ms per 2000
+  samples) and is ~2× behind JAX f64 on 10-64-64-16 and 16-256-256-32 (still
+  ahead of rshgf on the former). `batchUpdate` and `predict` trail JAX's
+  BLAS by 4–8×. The wins that mattered: a register-tiled GEMM (2 rows × 4
+  samples), width-1 kernels written as dot products or AXPYs, a fused
+  posterior contraction, and hoisting Adam's fields into locals (Adam was
+  27 ns per weight because of field loads in the loop; 5 ns after).
+- **Found upstream** (with repros and, where it is a code bug, a verified
+  fix in `docs/upstream/`):
+  - P18: `DeepNetwork`'s volatility levels run away under all three
+    updates, frozen weights included, then NaN (JAX and rshgf).
+  - R3: rshgf's GELU uses Abramowitz–Stegun `erfc` (1.5e-7). hgf had copied
+    it; hgf now has a full-precision `erfc`.
+  - R4: rshgf's batched kernel weights the g″ term by `eff` instead of the
+    relaxed gain (stale since #456) and ignores `predict_precision`; 0.26
+    off JAX on the first batch. Patched and rebuilt with `--features f64`,
+    rshgf matches JAX to 1e-15.
+  - R5: rshgf panics with `predict_precision=False`.
+  - Also: rshgf's `f64::max/min` drop NaN, so rshgf keeps going silently
+    where JAX has already gone NaN. That explained all the remaining
+    per-sample `fit` gaps.
+- **Method that worked:** build rshgf with `--features f64` (maturin
+  directly; `uv sync` reuses the cached f32 wheel and ignores
+  `MATURIN_PEP517_ARGS`) and compare per op. f32 noise hid which gaps were
+  bugs. JAX in float32 also helps as a noise yardstick.
 
 ### Phase 8: App -> HGF GUI modelling
 
@@ -1401,11 +1458,18 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
   - [ ] [P17](upstream/README.md#p17) the unbounded volatility update (the
         default) runs away on 3-level binary HGFs: μ₂ only ratchets up until
         μ₁ explodes (JAX and rshgf; found with the playground, 2026-11-06).
+  - [ ] [P18](upstream/README.md#p18) `DeepNetwork`'s volatility levels run
+        away (all three updates, frozen weights too), then NaN (2026-11-09).
 - **rshgf**
   - [ ] [R1](upstream/README.md#r1) ef-state ignores `observed`; univariate
         fixed rate only.
   - [ ] [R2](upstream/README.md#r2) hot-path costs (string compares,
         per-call `Vec`s, clones when recording).
+  - [ ] [R3](upstream/README.md#r3) GELU uses a 1.5e-7 `erfc` approximation.
+  - [ ] [R4](upstream/README.md#r4) `DeepNetwork.batch_update` kernel: stale
+        g″ weighting, ignores `predict_precision` (fix verified).
+  - [ ] [R5](upstream/README.md#r5) `DeepNetwork(predict_precision=False)`
+        panics.
 - **dart2wasm**
   - [ ] [D1](upstream/README.md#d1) a typed-data view anywhere slows reads
         of non-view lists held in fields (~10%).
@@ -1460,6 +1524,8 @@ those workers (2026-11-07). See Phase 6's open items: next are batched
 kernels and tangents for the vector node kinds. Phase 7's GPU probe is
 done and a go (2026-11-07, `packages/hgf_gpu`); its follow-ups (HGF neural
 networks, GPU tangents and a GPU transport for hgf_fit) are listed there.
+The HGF neural networks have a CPU baseline (`packages/hgf_deep`,
+2026-11-09, parity with JAX f64); next is their WGSL port.
 
 ```sh
 cd hgf.dart
@@ -1474,6 +1540,7 @@ melos run bench:parallel                          # FitWorkers speed-ups (~15 mi
 melos run test:web-workers                        # FitWorkers on Web Workers (Chrome)
 melos run bench:web-parallel                      # ... and their speed-ups (~10 min)
 melos run bench:playground-fit                    # the playground's fits (~3 min)
+melos run fixtures:deep && melos run bench:deep   # hgf_deep: fixtures, speed vs pyhgf
 (cd apps/hgf_playground && flutter run -d chrome --wasm)   # try it
 dart compile exe packages/hgf/benchmark/bin/profile_modes.dart -o /tmp/pm && \
   (cd packages/hgf && /tmp/pm)                    # ns/trial baseline per mode

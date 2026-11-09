@@ -147,7 +147,7 @@ enum CouplingFn implements Coupling {
     sigmoid => _sigmoid(x),
     tanh => _tanh(x),
     leakyRelu => x >= 0.0 ? x : 0.01 * x,
-    gelu => x * 0.5 * _erfc(-x / math.sqrt2),
+    gelu => x * 0.5 * erfc(-x / math.sqrt2),
   };
 
   @override
@@ -166,7 +166,7 @@ enum CouplingFn implements Coupling {
       case leakyRelu:
         return x >= 0.0 ? 1.0 : 0.01;
       case gelu:
-        final phi = 0.5 * _erfc(-x / math.sqrt2);
+        final phi = 0.5 * erfc(-x / math.sqrt2);
         final pdf = math.exp(-(x * x) / 2.0) / math.sqrt(2.0 * math.pi);
         return phi + x * pdf;
     }
@@ -234,17 +234,4 @@ double _expm1(double x) {
   final um1 = u - 1.0;
   if (um1 == -1.0) return -1.0;
   return um1 * x / math.log(u);
-}
-
-/// Abramowitz-Stegun 7.1.26 erfc, identical to rshgf's (`src/math.rs`).
-double _erfc(double x) {
-  final t = 1.0 / (1.0 + 0.3275911 * x.abs());
-  final poly =
-      t *
-      (0.254829592 +
-          t *
-              (-0.284496736 +
-                  t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-  final approx = poly * math.exp(-(x * x));
-  return x >= 0.0 ? approx : 2.0 - approx;
 }

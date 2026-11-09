@@ -12,6 +12,7 @@ export 'src/math.dart'
         binarySurpriseDerivative,
         digamma,
         dirichletKullbackLeibler,
+        erfc,
         gammaSign,
         gaussianDensity,
         gaussianSurprise,

@@ -97,6 +97,50 @@ double logAddExp(double a, double b) {
   return m + math.log(fastExp(a - m) + fastExp(b - m));
 }
 
+/// The complementary error function, to about 1e-15 relative.
+///
+/// Below |x| = 1.5 it is `1 − erf(x)` with erf from its positive-term series
+/// `erf(x) = 2/√π · e^(−x²) · Σ 2ⁿ x^(2n+1) / (1·3·…·(2n+1))` (no
+/// cancellation); above, the continued fraction
+/// `erfc(x) = e^(−x²)/√π · 1/(x + ½/(x + 1/(x + 3/2/(x + …))))`, evaluated
+/// with Lentz's method. Negative arguments use `erfc(−x) = 2 − erfc(x)`.
+double erfc(double x) {
+  if (x.isNaN) return x;
+  if (x < 0) return 2.0 - erfc(-x);
+  if (x < 1.5) {
+    final x2 = x * x;
+    var term = x;
+    var sum = x;
+    for (var n = 1; n < 100; n++) {
+      term *= 2.0 * x2 / (2 * n + 1);
+      sum += term;
+      if (term < sum * 1e-17) break;
+    }
+    return 1.0 - _twoOverSqrtPi * math.exp(-x2) * sum;
+  }
+  if (x > 27.3) return 0.0; // e^(−x²) underflows
+  // Modified Lentz for b0 + a1/(b1 + a2/(b2 + …)) with b_n = x, a_n = n/2.
+  const tiny = 1e-300;
+  var f = x;
+  var c = x;
+  var d = 0.0;
+  for (var n = 1; n < 500; n++) {
+    final a = n * 0.5;
+    d = x + a * d;
+    if (d.abs() < tiny) d = tiny;
+    c = x + a / c;
+    if (c.abs() < tiny) c = tiny;
+    d = 1.0 / d;
+    final delta = c * d;
+    f *= delta;
+    if ((delta - 1.0).abs() < 1e-16) break;
+  }
+  return math.exp(-x * x) / (f * _sqrtPi);
+}
+
+const double _sqrtPi = 1.7724538509055159;
+const double _twoOverSqrtPi = 1.1283791670955126;
+
 /// Principal branch of the Lambert W function for `z >= 0`.
 ///
 /// Halley iterations from `ln(z + 1)`, the scheme of `pyhgf.math.lambert_w0`
