@@ -70,4 +70,3 @@ Fixtures and benchmarks expect a pyhgf checkout next to this repository
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
