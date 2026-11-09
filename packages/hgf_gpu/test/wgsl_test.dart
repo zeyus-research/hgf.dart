@@ -8,7 +8,10 @@ import 'dart:io';
 
 import 'package:hgf/hgf.dart';
 import 'package:hgf_gpu/hgf_gpu.dart';
+import 'package:hgf_fit/hgf_fit.dart';
 import 'package:test/test.dart';
+
+import 'src/fit_check.dart';
 
 Network _hgf(VolatilityUpdates mode, {bool meanField = false}) =>
     Network(volatilityUpdates: mode, meanFieldUpdates: meanField)
@@ -72,4 +75,40 @@ void main() {
       }
     }
   }, skip: naga ? false : 'naga not installed');
+
+  test('fit kernels: every update mode, response and tangent width', () {
+    final dir = Directory.systemTemp.createTempSync('hgf_fit_wgsl');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    var k = 0;
+    for (final c in fitCases()) {
+      for (final gradients in [false, true]) {
+        final kernel = FitKernel(c.model, gradients: gradients);
+        expect(kernel.directions, gradients ? c.model.dimension : 0);
+        expect(kernel.nSlots, kernel.resultSlot + 1 + kernel.directions);
+        if (!naga) continue;
+        final f = File('${dir.path}/f${k++}.wgsl')
+          ..writeAsStringSync(kernel.source);
+        final r = Process.runSync('naga', [f.path]);
+        expect(r.exitCode, 0, reason: '${c.name} $gradients\n${r.stderr}');
+      }
+    }
+  });
+
+  test('fit kernels reject what they can\'t compile', () {
+    final model = HgfModel(
+      network: Network()
+        ..addNodes(kind: NodeKind.binaryState)
+        ..addNodes(valueChildren: [0]),
+      response: ResponseModel.fn(surprise: (_, _, _, _, _, _) => 0),
+      parameters: [
+        Parameter.node(
+          'omega2',
+          1,
+          NodeField.tonicVolatility,
+          prior: const Normal(-3, 2),
+        ),
+      ],
+    );
+    expect(() => FitKernel(model), throwsUnsupportedError);
+  });
 }

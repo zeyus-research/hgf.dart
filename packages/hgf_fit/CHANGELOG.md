@@ -1,5 +1,17 @@
 ## Unreleased
 
+- `PassRunner`: the fitting functions' extension methods (`fitMap`,
+  `laplace`, `sampleNuts`, `sampleHierarchical`, `fitEmpiricalBayes`) are
+  now on this interface, which `FitWorkers` implements, so other
+  evaluators (`hgf_gpu`'s `GpuFitter`) run them too.
+  `FitWorkers.evaluatePass` answers a single pass.
+- `Pass.precise` marks passes that need f64 (finite-difference gradients,
+  Hessians, `fitMap`'s reported values); lower-precision runners answer
+  them on the CPU.
+- `HgfModel.completeNegLogPosterior`: the prior and Jacobian terms (and
+  their gradient) from likelihoods computed elsewhere.
+- `benchmark/bin/nuts_overhead.dart`: the NUTS driver's own cost per chain
+  and step.
 - For apps: `FitWorkers.cancel()` (running jobs fail with `FitCancelled`
   before their next pass), `FitWorkers.yieldInterval` (a pool without
   workers gives way to the event loop that often, so a UI keeps drawing),

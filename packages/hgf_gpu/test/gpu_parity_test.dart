@@ -18,6 +18,7 @@ import 'package:hgf_gpu/hgf_gpu.dart';
 import 'package:hgf_gpu/web.dart';
 import 'package:test/test.dart';
 
+import 'src/fit_check.dart';
 import 'src/gpu_check.dart';
 
 const _reader = '''
@@ -58,5 +59,16 @@ void main() {
     }
     final failures = await checkAll(backend!, fixtures);
     expect(failures, isEmpty, reason: failures.join('\n'));
+  });
+
+  test('fit passes: f32 GPU values and gradients match f64 CPU', () async {
+    if (backend == null) {
+      markTestSkipped('No WebGPU adapter in this browser');
+      return;
+    }
+    final fitter = GpuFitter(backend!);
+    final failures = await checkFitCases(fitter, log: print);
+    expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
+    expect(failures, isEmpty, reason: failures.take(20).join('\n'));
   });
 }

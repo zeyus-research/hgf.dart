@@ -70,6 +70,10 @@ supersedes its phase list.
   and 17× / 9–14× faster than JAX float32 `vmap`. At 10⁶ parameter sets it takes
   40–115 ms. Accuracy is f32: the GPU matches f64 to ~1e-6, which is how
   close pyhgf's own float32 mode gets. See Phase 7.
+  Since 2026-11-09 (Phase 7b) the fitting functions run on it too:
+  `GpuFitter` evaluates hgf_fit's passes with exact gradients from
+  forward-mode tangents compiled into the kernel. MAP on 2000 agents takes
+  89 ms (8 isolates: 332 ms), and NUTS on 200 agents 9.4 s (34.7 s).
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -1080,7 +1084,11 @@ Results by fixture:
     1e250 / 1e-307 in f64, where JAX f32 returns ∞;
   - `continuous_2level_eHGF` is chaotic;
   - three binary fixtures run close to a runaway, and JAX f32 is 5e-4 to
-    9e-3 off on them.
+    9e-3 off on them. **Fixed on the GPU (2026-11-09):** the error came
+    from computing `1 − μ̂` by subtraction, which cancels near 1 in f32.
+    Binary nodes now carry it as `π̂ / μ̂` (`π̂ = μ̂ · σ(−s)`), and the
+    three fixtures match f64 to ~3e-6, better than JAX f32. Only
+    `continuous_2level_eHGF` keeps a looser tolerance.
 
 The argmin over the ω grid is the same, or within 1–4 grid steps where
 the optimum is flat. That is the same behaviour as JAX f32.
@@ -1113,6 +1121,92 @@ the optimum is flat. That is the same behaviour as JAX f32.
   parameter recovery over 10⁵–10⁶ simulated agents now take
   milliseconds.
 
+#### Phase 7b: GPU fitting (2026-11-09): done
+
+`GpuFitter` (hgf_gpu) answers hgf_fit's passes on the GPU, so every
+driver runs there: `gpu.fitMap`, `gpu.sampleNuts`,
+`gpu.sampleHierarchical`, `gpu.laplace`, `gpu.fitEmpiricalBayes`.
+Commands: `melos run test:gpu` (now with `native_fit_test.dart`), `melos
+run bench:gpu-fit`.
+
+**Design:**
+- **An expression IR with forward-mode AD** (`ir.dart`). The codegen
+  builds `Ex` trees, and each `let`/assignment also emits its tangent: a
+  `vecN<f32>` per chunk of up to 4 directions, so k = 5 uses one `vec4`
+  and one `f32`. The derivative rules are those of `batch_tangents.dart`:
+  - an active clamp passes no derivative;
+  - Lambert W contributes `W / (z (1 + W))`;
+  - quotients use `(da − (a/b) db) / b`.
+
+  A fixed point decides which slot variables carry tangents. It starts
+  from the parameter targets and adds every slot an active value is
+  assigned to, then recompiles until nothing changes.
+  - The unbounded update's `if (observed)` blocks became `select`s, so
+    the accumulations are plain sums.
+  - Those selects cost nothing measurable: the probe times match HEAD's
+    to the run-to-run noise (2.2–3.5 ms at B = 1000; 11.4 ms at 64k).
+  - `TrialCompiler` is shared by `HgfKernel` (unchanged API) and
+    `FitKernel`.
+- **`FitKernel(model, gradients:)`** compiles an `HgfModel`'s likelihood.
+  Parameters are set inside the kernel from a per-pass `job` buffer, which
+  holds each element's subject, the initial slots, `x [i][e]` and
+  `dx/dy [i][e]`. Their tangents are seeded with `dx/dy`, so the kernel
+  returns the gradient with respect to the unconstrained parameters
+  directly.
+  - Subjects' series are uploaded once per subject list (`u32` words, a
+    5-entry subject table with absent-array sentinels), and each element
+    loops to its own subject's trial count.
+  - So a pass of mixed lengths, masks, time steps and missed responses
+    (NaN, tested on the bits) is one dispatch.
+- **Responses:**
+  - observation surprises: `TotalGaussianSurprise`,
+    `FirstLevelGaussianSurprise`, `FirstLevelBinarySurprise`;
+  - readouts with per-element parameters in slots: `GaussianReadout`,
+    `BinarySoftmaxReadout`.
+
+  `HgfKernel`/`GpuBatch` take them too (`responses:`,
+  `setResponseParameter`).
+- **f64 where it matters.** `Pass.precise` (new in hgf_fit) marks
+  finite-difference and Hessian passes, and the values `fitMap` reports.
+  `GpuFitter` runs those on the CPU (on `cpu:`, a `FitWorkers`, if given),
+  as well as any model without a kernel. So `laplace` is bit-identical to
+  the CPU's at the GPU's optimum. The priors and Jacobians are added in
+  f64 on the host (`HgfModel.completeNegLogPosterior`).
+- hgf_fit's driver extensions are now on a `PassRunner` interface;
+  `FitWorkers` implements it.
+
+**Accuracy** (`test/src/fit_check.dart`, RX 7600 XT and SwiftShader,
+dart2wasm and dart2js). Six models, each element checked with and without
+gradients and Jacobian:
+- values within 3.6e-7 relative of f64;
+- gradients within 1.1e-5 of the gradient's scale (most 1e-6);
+- `fitMap` estimates within 2e-3 of the CPU's (unconstrained);
+- NUTS posterior means within 0.25 sd.
+
+**Speed** (`bench:gpu-fit`, binary 2-level recovery problem, 320 trials;
+the CPU is the 8-isolate `FitWorkers` pool on the i7-7700):
+
+| job | agents | pool (8 isolates) | GPU |
+|---|--:|--:|--:|
+| MAP | 20 | 7.3 ms | 13.8 ms |
+| MAP | 200 | 34 ms | 25 ms |
+| MAP | 2000 | 332 ms | 89 ms |
+| NUTS 4×(300+300) | 20 | 4.5 s | 2.4 s |
+| NUTS 4×(300+300) | 200 | 34.7 s | 9.4 s |
+| NUTS 4×(300+300) | 2000 | 395 s | 139 s |
+
+**Finding: at thousands of chains, the NUTS driver is the bottleneck.**
+At 2000 agents (8000 chains), the GPU passes take 7 s of a 55 s run. The
+rest is the sampler's own host work per chain and leapfrog step.
+- `benchmark/bin/nuts_overhead.dart` measures it with no filter:
+  1.9 µs per chain-step at 400 chains, 3.1 at 1600, 6.1 at 8000.
+- It is not GC (scavenges are under 1 s, old gen 3.4 MB). It grows with
+  the number of suspended generator stacks (recursive `sync*`
+  `_buildTree`), which looks like cache footprint.
+- A structure-of-arrays NUTS that advances all chains with flat arrays
+  instead of one generator per chain would remove most of it. That is
+  the lever for GPU NUTS at scale: about 7× at 2000 agents.
+
 **Next steps (Phase 7 follow-up):**
 - [ ] HGF neural networks: port rshgf's vectorised backend
   (`src/vectorised/`, about 3.4k lines, f32 by default). It is per-layer
@@ -1120,10 +1214,15 @@ the optimum is flat. That is the same behaviour as JAX f32.
   updates and rank-1 weight updates, which is GPU-shaped by construction.
   First a `Float32List` CPU baseline in Dart, then WGSL (tiled GEMM plus
   elementwise kernels).
-- [ ] Tangents in the codegen (exact gradients on the GPU), then a GPU
-  `Pass` transport in hgf_fit (MAP, NUTS with many chains, hierarchical).
-- [ ] Response models with response data (`BinarySoftmax`,
-  `GaussianResponse`), and per-trial surprise output.
+- [x] Tangents in the codegen (exact gradients on the GPU), then a GPU
+  `Pass` transport in hgf_fit (MAP, NUTS with many chains, hierarchical):
+  Phase 7b.
+- [x] Response models with response data (`BinarySoftmax`,
+  `GaussianResponse`): Phase 7b. Per-trial surprise output is still open.
+- [ ] Structure-of-arrays NUTS across chains (see the Phase 7b finding),
+  so GPU NUTS scales past ~1000 chains.
+- [ ] `GpuFitter` with `ResponseModel.fn`: needs a way to express the
+  response in WGSL (an `Ex` builder callback?).
 - [ ] Vector node kinds on the GPU (ef-state first). dp-state's
   data-dependent branching is the hard one.
 - [ ] Platform coverage still to measure:
@@ -1136,6 +1235,21 @@ the optimum is flat. That is the same behaviour as JAX f32.
 - [ ] Tuning not tried yet: the workgroup size (64 is used), the memory
   layout at very large B, and a kernel variant whose state is in
   registers only, without a store between dispatches.
+- Make sure the GPU and other new features are now available in the
+  playground
+
+### Phase 8: App -> HGF GUI modelling
+
+- [ ] Since the performance is excellent so far, the playground can be
+  extended to be a fully-fledged fitting app, where the user can load
+  and map data, fit a model and view and save the results.
+- [ ] Make sure the app runs with GPU if available, and allow user to
+  toggle GPU, precision, other settings/preferences.
+- [ ] Consider allowing real-time sources and define a model for them
+  (e.g. sensor data, think about including LSL streams with liblsl.dart).
+- [ ] Allow custom agents / models and parameters, to be able to e.g.
+  fit something like the Iowa Gambling Task, or abitrary experimental
+  data.
 
 ## Upstream issues
 

@@ -100,7 +100,7 @@ melos:
       # Web: Chromium's WebGPU, on SwiftShader (dart test passes --disable-gpu).
       exec:
         command: >-
-          dart test --tags gpu test/native_parity_test.dart 2>&1 &&
+          dart test --tags gpu test/native_parity_test.dart test/native_fit_test.dart 2>&1 &&
           dart test -p chrome-gpu -c dart2wasm --tags gpu 2>&1
         concurrency: 1
       packageFilters:
@@ -225,6 +225,18 @@ melos:
       description: >-
         Phase 7 probe on WebGPU (dart2wasm -O4 page): f32 accuracy against
         BatchNetwork, then time against batch size, as JSON lines.
+    bench:gpu-fit:
+      # hgf_fit's MAP and NUTS with their passes on wgpu-native, against a
+      # FitWorkers pool.
+      exec:
+        command: >-
+          dart compile exe benchmark/bin/fit_gpu.dart -o .dart_tool/fit_gpu &&
+          .dart_tool/fit_gpu --agents 20,200,2000 --runners pool,gpu
+        concurrency: 1
+      packageFilters:
+        fileExists: benchmark/bin/fit_gpu.dart
+      description: >-
+        GpuFitter vs FitWorkers on pyhgf's parameter-recovery problem.
     bench:gpu-native:
       exec:
         command: >-

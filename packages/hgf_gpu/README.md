@@ -1,10 +1,10 @@
 # hgf_gpu
 
-Batched HGF filtering on the GPU. `HgfKernel` compiles an `hgf` `Network`
-into a WGSL compute shader. Each GPU thread filters one parameter set,
-with the update schedule unrolled and its state in registers. `GpuBatch`
-runs that shader on WebGPU in the browser, or on wgpu-native on desktop.
-Both use the same host code.
+Batched HGF filtering and fitting on the GPU. `HgfKernel` compiles an `hgf`
+`Network` into a WGSL compute shader. Each GPU thread filters one parameter
+set, with the update schedule unrolled and its state in registers.
+`GpuBatch` runs that shader on WebGPU in the browser, or on wgpu-native on
+desktop. Both use the same host code.
 
 ```dart
 final kernel = HgfKernel(network);                 // TotalGaussianSurprise
@@ -14,11 +14,28 @@ final gpu = await GpuBatch.create(backend!, kernel, omegas.length)
 final nll = await gpu.surprise(series);            // one total per ω
 ```
 
-Status: phase 7 probe (see `docs/ROADMAP.md`).
+For fitting, `GpuFitter` answers `hgf_fit`'s batched passes on the GPU.
+`FitKernel` compiles an `HgfModel`'s likelihood, and with forward-mode
+tangents its exact gradient. Every `hgf_fit` driver runs on it:
+
+```dart
+final gpu = GpuFitter(backend!, cpu: workers);     // workers: optional
+final map = await gpu.fitMap(model, subjects);
+final post = await gpu.sampleNuts(model, subjects);
+final lap = await gpu.laplace(model, map);         // f64, on the CPU
+```
+
+Passes that need f64 (finite differences, Hessians, reported estimates)
+and models without a kernel run on the CPU.
+
+Status: see Phase 7 in `docs/ROADMAP.md`.
 - Supported: continuous, binary and constant nodes; standard, eHGF and
   unbounded updates; named couplings; missing observations; time steps.
-- Precision: f32, as accurate as pyhgf's float32 mode.
-- Not yet: vector node kinds, custom couplings, gradients.
+- Responses: observation surprises (`TotalGaussianSurprise`,
+  `FirstLevelGaussianSurprise`, `FirstLevelBinarySurprise`) and readouts
+  with fitted parameters (`GaussianReadout`, `BinarySoftmaxReadout`).
+- Precision: f32. Totals match f64 to ~1e-6 relative and gradients to ~1e-5.
+- Not yet: vector node kinds, custom couplings or response models.
 
 - Web: `import 'package:hgf_gpu/web.dart'`. On Linux, Chromium needs
   `--enable-unsafe-webgpu` and Vulkan.
@@ -27,4 +44,4 @@ Status: phase 7 probe (see `docs/ROADMAP.md`).
   Regenerate the bindings with
   `dart run ffigen --config ffigen.yaml --compiler-opts -I/usr/lib/clang/<v>/include`.
 - Tests: `melos run test:gpu`. Benchmarks: `melos run bench:gpu-web`,
-  `melos run bench:gpu-native`.
+  `melos run bench:gpu-native`, `melos run bench:gpu-fit`.
