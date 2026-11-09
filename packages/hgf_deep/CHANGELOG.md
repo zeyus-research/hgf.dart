@@ -1,5 +1,12 @@
 ## Unreleased
 
+- Batched products (`batchUpdate`, `predict`) run on `Float64x2` lanes on
+  native targets: ~2.8× faster GEMM kernel, bit-identical to the scalar
+  kernel, which Wasm and JS builds keep (`Float64x2` is emulated there).
+- `batchUpdate`'s weight gradient runs through the same tiled product
+  (bit-identical): with the above, `batchUpdate` 1.3–1.6× faster.
+- Fixed: `weightInitialisation(seed:)` gave different weights in every run
+  (it seeded through `Object.hash`, which is randomised per process).
 - First version: a port of pyhgf's vectorised `DeepNetwork` (2026-11-09).
   - Layers of volatile, binary and categorical (output only) nodes, dense or
     one-to-one weights with an optional bias column, per-layer coupling

@@ -111,7 +111,12 @@ From `benchmark/bin/runtime_probe.dart` (re-run it on new Dart releases):
 - **`Float32x4`/`Float64x2` are emulated in dart2wasm**, 10–15× slower than
   scalar. On AOT, `Float32x4` mul-add is 2.5× faster than scalar and
   `Float64x2` 1.3×. Any SIMD work is AOT-only until dart2wasm lowers these to
-  Wasm SIMD. Re-check each release.
+  Wasm SIMD. Re-check each release. (2026-11-10: re-measured on 3.13.7, a
+  Float64x2 GEMM is still ~10× slower than scalar on Wasm. The SDK's SIMD
+  tracking issue, dart-lang/sdk#64170, lists `v128` backing for
+  `Float32x4`/`Float64x2` and their lists in dart2wasm as landed on main, so
+  a 3.14+ release may change this; `useSimd` in hgf_deep's `kernels.dart` is
+  the switch to flip.)
 - **`-O4` helps Wasm** by about 10% on the engine, and 15–40% on plain
   typed-data loops.
 - The cost is set by transcendental calls. Per 4-node trial on AOT, the
@@ -1313,14 +1318,58 @@ arithmetic; four weight initialisers. Not ported: continuous layers
 - **One kernel set** over `[node][sample]` buffers serves `fit` (width 1)
   and `batchUpdate` (width B), mirroring JAX's `vmap` of the per-sample
   sweeps.
-- **Performance** (`melos run bench:deep`, one core): sequential `fit` beats
-  JAX f64 and rshgf on a 2-8-8-4 network (18.8 vs 29.6 / 22.4 ms per 2000
-  samples) and is ~2× behind JAX f64 on 10-64-64-16 and 16-256-256-32 (still
-  ahead of rshgf on the former). `batchUpdate` and `predict` trail JAX's
-  BLAS by 4–8×. The wins that mattered: a register-tiled GEMM (2 rows × 4
-  samples), width-1 kernels written as dot products or AXPYs, a fused
-  posterior contraction, and hoisting Adam's fields into locals (Adam was
-  27 ns per weight because of field loads in the loop; 5 ns after).
+- **Performance** (`melos run bench:deep`, one core, 2026-11-10): sequential
+  `fit` beats JAX f64 and rshgf on a 2-8-8-4 network (17.1 vs 30.2 / 23.1 ms
+  per 2000 samples) and is ~2× behind JAX f64 on 10-64-64-16 and
+  16-256-256-32 (still ahead of rshgf on the former). `batchUpdate` and
+  `predict` trail JAX f64 by 3–5× (medium 17.0 / 9.3 ms vs 6.0 / 2.6; wide
+  90 / 17 ms vs 24 / 3.4; they were 22.5 / 14.6 and 143 / 29 before the
+  2026-11-10 changes below). The wins that mattered: a register-tiled GEMM,
+  width-1 kernels written as dot products or AXPYs, a fused posterior
+  contraction, and hoisting Adam's fields into locals (Adam was 27 ns per
+  weight because of field loads in the loop; 5 ns after).
+  - **SIMD GEMM (2026-11-10):** on native targets the batched GEMM runs on
+    `Float64x2` lanes over samples, a 4-row × 4-sample tile (8
+    accumulators). Each lane still sums `k` in ascending order, so it is
+    **bit-identical** to the scalar 2×4 tile (`test/matmul_test.dart` checks
+    every remainder shape against a misaligned view, which forces the
+    scalar path). Kernel: 9 GF/s vs 3.2 (2.8×); 4×6, 6×4, 3×8 tiles measured
+    no better. Gated by the const `useSimd` (off on dart2wasm and dart2js,
+    where `Float64x2` is emulated).
+  - **tanh:** hgf's `CouplingFn.tanh` now uses Cephes' scheme (rational
+    below 0.625, `1 − 2/(e^{2|x|}+1)` above): 15 ns vs 28, and 1.3 ulp vs
+    4.5 against mpmath (`hgf/test/coupling_test.dart`).
+  - **Weight gradient:** `_addOuter` (Σ_s u·h / b) was one latency-bound
+    dot product per weight. It now transposes `h` to `[s][j]` (padded to
+    an even width) and runs as a `matMul` with the samples as depth: same
+    summation order, so the same bits (checked by hashing `batchUpdate`
+    outputs before and after), 40 MFLOP per step on the wide net through
+    the tiles instead of one accumulator. Scratch whose size changes per
+    layer uses `Workspace.atLeast` (grow-only): reallocating it per call
+    cost 50% on the small net.
+  - Together: `predict` 1.6–1.75× faster, `batchUpdate` 1.3–1.6×, `fit`
+    ~8%.
+  - **Where the batched time goes now** (`phase_profile 16,256,256,32
+    256`): `updateSweep` 57 of ~80 ms, and in it the unbounded volatility
+    update at ~300 ns per element (exp/log/Lambert W, 19.5 ms per
+    256-node layer). JAX vectorises those transcendentals. On the CPU the
+    fix would be stage-wise kernels as in W4's `BatchNetwork`; the GPU port
+    removes it.
+  - **Bug fixed:** `weightInitialisation(seed:)` seeded each layer with
+    `Object.hash(seed, l)`, which Dart randomises per process, so a seed
+    did not reproduce across runs. Now a fixed arithmetic mix.
+  - **What is left is hardware:** JAX's GEMM reaches ~23 GF/s on one core
+    (AVX2 + FMA); Dart's `Float64x2` is 128-bit SSE without FMA. The
+    batched path's real lever is the GPU port.
+  - **Packages evaluated (2026-11-10):** `ml_linalg` 13.12.9 (maintained,
+    150 points) is slower than hgf_deep's *scalar* kernel even in f32
+    (matrix product = one row `Vector` × matrix per output row, allocating;
+    1.2–1.9 GF/s f64), and 20× slower on Wasm; its API is immutable and
+    allocating, unlike the in-place strided kernels here. `simd` 0.0.1 is
+    an empty placeholder (needs Dart 3.14 beta; it points at the SDK
+    tracking issue above). Neither is worth a dependency; the useful
+    finding was that hand-written `Float64x2` over the sample lanes keeps
+    bit-parity.
 - **Found upstream** (with repros and, where it is a code bug, a verified
   fix in `docs/upstream/`):
   - P18: `DeepNetwork`'s volatility levels run away under all three

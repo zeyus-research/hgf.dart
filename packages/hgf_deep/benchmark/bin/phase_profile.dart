@@ -1,5 +1,6 @@
-/// Per-phase cost of one sequential fit step (width 1) and of a batched
-/// step, on the benchmark's medium network.
+/// Per-phase cost of one sequential fit step (width 1, the default) or of a
+/// batched step (`<sizes> <width>`), on the benchmark's medium network
+/// unless sizes are given: `phase_profile 16,256,256,32 256`.
 library;
 
 import 'dart:io';
@@ -13,6 +14,7 @@ void main(List<String> args) {
   final sizes = args.isEmpty
       ? [10, 64, 64, 16]
       : [for (final s in args.first.split(',')) int.parse(s)];
+  final width = args.length > 1 ? int.parse(args[1]) : 1;
   final rng = math.Random(1);
   final net = DeepNetwork(coupling: CouplingFn.tanh);
   for (final s in sizes) {
@@ -21,21 +23,23 @@ void main(List<String> args) {
   net.weightInitialisation(const XavierInit(), seed: 1);
   final layers = net.debugLayers;
   final x = Matrix(
-    1,
+    width,
     sizes.last,
     Float64List.fromList([
-      for (var i = 0; i < sizes.last; i++) rng.nextDouble(),
+      for (var i = 0; i < width * sizes.last; i++) rng.nextDouble(),
     ]),
   );
   final y = Matrix(
-    1,
+    width,
     sizes.first,
     Float64List.fromList([
-      for (var i = 0; i < sizes.first; i++) rng.nextDouble(),
+      for (var i = 0; i < width * sizes.first; i++) rng.nextDouble(),
     ]),
   );
-  final states = [for (var l = 0; l < sizes.length; l++) net.state(l).copy()];
-  final ws = Workspace(1);
+  final states = [
+    for (var l = 0; l < sizes.length; l++) net.state(l).copy().tile(width),
+  ];
+  final ws = Workspace(width);
   final grads = [
     for (final l in layers)
       l.weights == null ? null : Float64List(l.weights!.data.length),
@@ -43,10 +47,10 @@ void main(List<String> args) {
   final weights = [for (final l in layers) l.weights];
   final adam = Adam(1e-3);
   double time(String name, void Function() f) {
-    for (var i = 0; i < 200; i++) {
+    final n = math.max(20, 2000 ~/ width);
+    for (var i = 0; i < n ~/ 10; i++) {
       f();
     }
-    const n = 2000;
     final sw = Stopwatch()..start();
     for (var i = 0; i < n; i++) {
       f();

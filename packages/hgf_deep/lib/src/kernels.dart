@@ -111,6 +111,14 @@ final class Workspace {
     return _buffers[slot] = Float64List(length);
   }
 
+  /// A buffer of at least [length] values, tagged by [slot]; it only grows,
+  /// for scratch whose size changes from layer to layer.
+  Float64List atLeast(int slot, int length) {
+    final buf = _buffers[slot];
+    if (buf != null && buf.length >= length) return buf;
+    return _buffers[slot] = Float64List(length);
+  }
+
   /// A buffer of `rows * width` values, tagged by [slot] so that
   /// buffers in use at the same time never alias.
   Float64List take(int slot, int rows) {
@@ -131,6 +139,8 @@ const _sGain = 5;
 const _sPc1 = 6;
 const _sMsg = 7;
 const _sSquared = 8;
+const _sHt = 9;
+const _sOuter = 10;
 
 /// `g(μ)` of [parent] rows, with a trailing bias row of ones when
 /// [hasConstant]: `(nParent[+1]) × width`.
@@ -167,7 +177,9 @@ Float64List _coupled(
 /// four partial sums.
 ///
 /// Width 1 is a matrix–vector product (one register accumulator per row);
-/// wider batches go through a 2-row × 4-sample register tile.
+/// wider batches go through a 2-row × 4-sample register tile, or on native
+/// targets ([useSimd]) a 4-row × 4-sample tile of `Float64x2` lanes, which
+/// sums in the same order and so gives the same bits, ~3× faster.
 @pragma('vm:unsafe:no-bounds-checks')
 void matMul(
   Float64List out,
@@ -216,6 +228,10 @@ void matMul(
       }
       out[r] = (s0 + s1) + (s2 + s3);
     }
+    return;
+  }
+  if (useSimd && b.isEven && (out.offsetInBytes | a.offsetInBytes) & 15 == 0) {
+    _matMulSimd(out, w, rs, cs, rows, depth, a, b);
     return;
   }
   final s4 = b - b % 4;
@@ -290,6 +306,105 @@ void matMul(
         c += w[w0 + k * cs] * a[k * b + s];
       }
       out[o0 + s] = c;
+    }
+  }
+}
+
+/// Whether [matMul] uses `Float64x2` lanes: only where they are real SIMD.
+/// dart2wasm (Dart 3.13) and dart2js emulate them about 10× slower than
+/// scalar code (`hgf/benchmark/bin/runtime_probe.dart`); `identical(1, 1.0)`
+/// holds only on dart2js.
+const bool useSimd =
+    !bool.fromEnvironment('dart.tool.dart2wasm') && !identical(1, 1.0);
+
+/// [matMul] for even `b` with 16-byte-aligned [out] and [a], on `Float64x2`
+/// lanes over samples. Lanes are independent and each still adds its terms
+/// in ascending `k` from zero, so the result equals the scalar kernel's bit
+/// for bit. Tile: 4 rows × 2 vectors (8 accumulators), then single rows,
+/// then a single trailing vector when `b / 2` is odd.
+@pragma('vm:unsafe:no-bounds-checks')
+void _matMulSimd(
+  Float64List out,
+  Float64List w,
+  int rs,
+  int cs,
+  int rows,
+  int depth,
+  Float64List a,
+  int b,
+) {
+  final av = Float64x2List.view(a.buffer, a.offsetInBytes, depth * b >> 1);
+  final ov = Float64x2List.view(out.buffer, out.offsetInBytes, rows * b >> 1);
+  final hb = b >> 1;
+  final h2 = hb - hb % 2;
+  var r = 0;
+  for (; r + 3 < rows; r += 4) {
+    final w0 = r * rs, w1 = w0 + rs, w2 = w1 + rs, w3 = w2 + rs;
+    final o0 = r * hb, o1 = o0 + hb, o2 = o1 + hb, o3 = o2 + hb;
+    for (var s = 0; s < hb; s += 2) {
+      final pair = s < h2;
+      var c00 = Float64x2.zero(), c01 = Float64x2.zero();
+      var c10 = Float64x2.zero(), c11 = Float64x2.zero();
+      var c20 = Float64x2.zero(), c21 = Float64x2.zero();
+      var c30 = Float64x2.zero(), c31 = Float64x2.zero();
+      var ak = s;
+      var wk = 0;
+      if (pair) {
+        for (var k = 0; k < depth; k++) {
+          final a0 = av[ak], a1 = av[ak + 1];
+          final x0 = Float64x2.splat(w[w0 + wk]);
+          c00 += x0 * a0;
+          c01 += x0 * a1;
+          final x1 = Float64x2.splat(w[w1 + wk]);
+          c10 += x1 * a0;
+          c11 += x1 * a1;
+          final x2 = Float64x2.splat(w[w2 + wk]);
+          c20 += x2 * a0;
+          c21 += x2 * a1;
+          final x3 = Float64x2.splat(w[w3 + wk]);
+          c30 += x3 * a0;
+          c31 += x3 * a1;
+          ak += hb;
+          wk += cs;
+        }
+        ov[o0 + s + 1] = c01;
+        ov[o1 + s + 1] = c11;
+        ov[o2 + s + 1] = c21;
+        ov[o3 + s + 1] = c31;
+      } else {
+        for (var k = 0; k < depth; k++) {
+          final a0 = av[ak];
+          c00 += Float64x2.splat(w[w0 + wk]) * a0;
+          c10 += Float64x2.splat(w[w1 + wk]) * a0;
+          c20 += Float64x2.splat(w[w2 + wk]) * a0;
+          c30 += Float64x2.splat(w[w3 + wk]) * a0;
+          ak += hb;
+          wk += cs;
+        }
+      }
+      ov[o0 + s] = c00;
+      ov[o1 + s] = c10;
+      ov[o2 + s] = c20;
+      ov[o3 + s] = c30;
+    }
+  }
+  for (; r < rows; r++) {
+    final w0 = r * rs;
+    final o0 = r * hb;
+    for (var s = 0; s < hb; s += 2) {
+      final pair = s < h2;
+      var c0 = Float64x2.zero(), c1 = Float64x2.zero();
+      var ak = s;
+      var wk = w0;
+      for (var k = 0; k < depth; k++) {
+        final x = Float64x2.splat(w[wk]);
+        c0 += x * av[ak];
+        if (pair) c1 += x * av[ak + 1];
+        ak += hb;
+        wk += cs;
+      }
+      ov[o0 + s] = c0;
+      if (pair) ov[o0 + s + 1] = c1;
     }
   }
 }
@@ -980,11 +1095,17 @@ void accumulateGradients(
       pl.hasConstant,
       sanitize: true,
     );
-    _addOuter(grads[l]!, u, h, nc, cols, b);
+    _addOuter(grads[l]!, u, h, nc, cols, b, ws);
   }
 }
 
 /// `g[i][j] += Σ_s u[i][s] · h[j][s] / b` (a batch-mean outer product).
+///
+/// Wider batches transpose `h` to `[s][j]` (padded to an even width) and
+/// run the sum as a [matMul] with the samples as its depth: each sum still
+/// runs over `s` ascending from zero, so the bits are those of the plain
+/// dot-product loop, but through the register (and SIMD) tiles instead of
+/// one latency-bound accumulator.
 @pragma('vm:unsafe:no-bounds-checks')
 void _addOuter(
   Float64List g,
@@ -993,6 +1114,7 @@ void _addOuter(
   int nc,
   int cols,
   int b,
+  Workspace ws,
 ) {
   assert(g.length >= nc * cols && u.length >= nc * b && h.length >= cols * b);
   if (b == 1) {
@@ -1005,15 +1127,26 @@ void _addOuter(
     }
     return;
   }
+  final width = cols + (cols & 1);
+  final ht = ws.atLeast(_sHt, b * width);
+  for (var j = 0; j < cols; j++) {
+    final hj = j * b;
+    for (var s = 0; s < b; s++) {
+      ht[s * width + j] = h[hj + s];
+    }
+  }
+  if (width != cols) {
+    for (var s = 0; s < b; s++) {
+      ht[s * width + cols] = 0.0;
+    }
+  }
+  final sums = ws.atLeast(_sOuter, nc * width);
+  matMul(sums, u, b, 1, nc, b, ht, width);
   for (var i = 0; i < nc; i++) {
-    final ui = i * b;
+    final gi = i * cols;
+    final si = i * width;
     for (var j = 0; j < cols; j++) {
-      final hj = j * b;
-      var sum = 0.0;
-      for (var s = 0; s < b; s++) {
-        sum += u[ui + s] * h[hj + s];
-      }
-      g[i * cols + j] += sum / b;
+      g[gi + j] += sums[si + j] / b;
     }
   }
 }

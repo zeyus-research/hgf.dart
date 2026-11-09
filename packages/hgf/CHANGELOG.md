@@ -1,5 +1,8 @@
 ## Unreleased
 
+- `CouplingFn.tanh` uses Cephes' scheme (a rational approximation below
+  0.625, `1 − 2/(e^{2|x|}+1)` above): within 1.3 ulp of mpmath (was 4.5) and
+  1.8× faster (one exp instead of an exp and a log).
 - `erfc` (exported), to ~1e-14 relative: a positive-term series below 1.5
   and a continued fraction above. The GELU coupling (`CouplingFn.gelu`) uses
   it; it used Abramowitz–Stegun 7.1.26 (rshgf's, up to 5e-5 relative in the

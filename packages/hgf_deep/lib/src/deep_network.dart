@@ -266,13 +266,15 @@ final class DeepNetwork {
   /// Draw every weight matrix from [strategy]. The bias column is set to
   /// zero and left out of the fan-in. Each layer draws from its own stream,
   /// seeded from [seed] and its index, so adding layers above leaves the
-  /// lower layers' draws unchanged.
+  /// lower layers' draws unchanged. The same [seed] gives the same weights
+  /// in every run.
   DeepNetwork weightInitialisation(WeightInit strategy, {int seed = 0}) {
     for (var l = 1; l < _layers.length; l++) {
       final layer = _layers[l];
       final w = layer.weights!;
       final nParents = w.cols - (layer.hasConstant ? 1 : 0);
-      final rng = math.Random(Object.hash(seed, l) & 0x7fffffff);
+      // Not Object.hash: its seed is randomised per process.
+      final rng = math.Random(((seed & 0x7fffffff) * 31 + l) & 0x7fffffff);
       final flat = strategy.draw(nParents, w.rows, rng);
       final next = Matrix(w.rows, w.cols);
       for (var i = 0; i < w.rows; i++) {
