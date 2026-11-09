@@ -6,6 +6,7 @@ import 'package:hgf/hgf.dart';
 import 'package:hgf_fit/hgf_fit.dart';
 import 'package:hgf_playground/src/app.dart';
 import 'package:hgf_playground/src/model/data.dart';
+import 'package:hgf_playground/src/model/fit_config.dart';
 import 'package:hgf_playground/src/model/fitting.dart';
 import 'package:hgf_playground/src/model/playground.dart';
 import 'package:hgf_playground/src/model/presets.dart';
@@ -13,6 +14,7 @@ import 'package:hgf_playground/src/settings.dart';
 import 'package:hgf_widgets/hgf_widgets.dart';
 
 void main() {
+  _settingsTests();
   group('Playground', () {
     for (final p in presets) {
       test('${p.id}: playback (predict/step) records what inputData does', () {
@@ -207,9 +209,67 @@ void main() {
   });
 }
 
+void _settingsTests() {
+  test('reset goes back to the preset\'s defaults', () {
+    final pg = Playground(presetId: 'continuous3', nTrials: 300);
+    final fresh = Playground(presetId: 'continuous3');
+    final omega = pg.param(1, NodeField.tonicVolatility);
+    pg
+      ..setParam(1, NodeField.tonicVolatility, omega + 2)
+      ..setCoupling(pg.layout.edges.first, 0.3)
+      ..setVolatilityUpdates(VolatilityUpdates.standard)
+      ..updateData((d) => d.noise = 0.7)
+      ..reseed();
+    pg.resetToPreset();
+    expect(pg.param(1, NodeField.tonicVolatility), omega);
+    expect(pg.layout.edges.first.strength, fresh.layout.edges.first.strength);
+    expect(pg.volatilityUpdates, fresh.volatilityUpdates);
+    expect(pg.data.nTrials, pg.preset.defaultTrials);
+    expect(pg.data.noise, DataSettings().noise);
+    expect(pg.observations, fresh.observations);
+    expect(pg.totalSurprise, fresh.totalSurprise);
+  });
+
+  testWidgets('the settings drawer edits and keeps the fit config', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final settings = Settings();
+    final pg = Playground(presetId: 'binary3', nTrials: 100);
+    final fitting = Fitting(
+      pg,
+      spawnWorkers: _inline,
+      openGpu: () async => (device: null, reason: 'none in tests'),
+    );
+    await tester.pumpWidget(
+      PlaygroundApp(settings: settings, playground: pg, fitting: fitting),
+    );
+    await tester.tap(find.byTooltip('Settings').first);
+    await tester.pumpAndSettle();
+    expect(find.text('Chains'), findsOneWidget);
+    expect(find.textContaining('No GPU: none in tests'), findsOneWidget);
+    // Chains: 4 -> 16.
+    await tester.tap(find.text('4').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('16').last);
+    await tester.pumpAndSettle();
+    expect(settings.fit.chains, 16);
+    expect(fitting.config.chains, 16);
+    await tester.tap(find.text('GPU (f32)'));
+    await tester.pumpAndSettle();
+    expect(fitting.config.device, FitDevice.gpu);
+    await tester.tap(find.text('Reset fitting defaults'));
+    await tester.pumpAndSettle();
+    expect(fitting.config, const FitConfig());
+    expect(tester.takeException(), isNull);
+  });
+}
+
 /// Fits on the calling isolate: no isolates under the widget tester's fake
 /// clock.
-Future<FitWorkers> _inline() => FitWorkers.spawn(count: 0);
+Future<FitWorkers> _inline([int? _]) => FitWorkers.spawn(count: 0);
 
 Widget _app(Settings settings, Playground pg) => PlaygroundApp(
   settings: settings,

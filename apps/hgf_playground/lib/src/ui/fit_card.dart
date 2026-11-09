@@ -12,9 +12,12 @@ import 'panels.dart';
 /// Parameter estimation: what to fit, which parameters are free, the
 /// method, and the results (estimates, intervals, prior vs posterior).
 class FitCard extends StatelessWidget {
-  const FitCard({super.key, required this.fitting});
+  const FitCard({super.key, required this.fitting, this.onOpenSettings});
 
   final Fitting fitting;
+
+  /// Opens the settings (device, workers, chains, …).
+  final VoidCallback? onOpenSettings;
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
@@ -34,6 +37,7 @@ class FitCard extends StatelessWidget {
       );
     }
     final offered = f.offered;
+    final c = f.config;
     return SectionCard(
       title: 'Fit parameters',
       children: [
@@ -91,7 +95,8 @@ class FitCard extends StatelessWidget {
           message:
               'MAP: the most probable values and a Gaussian around them '
               '(fast). NUTS: draws from the full posterior with Hamiltonian '
-              'Monte Carlo (4 chains × 1000 steps).',
+              'Monte Carlo (${c.chains} chains × '
+              '${c.warmup + c.draws} steps).',
           child: SegmentedButton<FitMethod>(
             showSelectedIcon: false,
             segments: const [
@@ -102,7 +107,7 @@ class FitCard extends StatelessWidget {
             onSelectionChanged: f.running ? null : (s) => f.setMethod(s.single),
           ),
         ),
-        const SizedBox(height: 8),
+        _configRow(context),
         _runRow(context),
         if (f.error != null)
           Padding(
@@ -195,6 +200,36 @@ class FitCard extends StatelessWidget {
     }
   }
 
+  /// What the next fit runs: the method's settings and the device.
+  Widget _configRow(BuildContext context) {
+    final f = fitting;
+    final c = f.config;
+    final theme = Theme.of(context);
+    final muted = theme.textTheme.bodySmall?.copyWith(
+      color: theme.colorScheme.onSurfaceVariant,
+    );
+    final what = f.method == FitMethod.map
+        ? 'L-BFGS from ${c.restarts + 1} '
+              '${c.restarts == 0 ? 'start' : 'starts'}'
+        : '${c.chains} ${c.chains == 1 ? 'chain' : 'chains'} × '
+              '(${c.warmup} + ${c.draws})';
+    final where = !f.wantsGpu
+        ? 'CPU'
+        : f.gpu != null && f.gpu!.device == null
+        ? 'CPU (no GPU)'
+        : 'GPU';
+    return Row(
+      children: [
+        Expanded(child: Text('$what · $where', style: muted)),
+        TextButton.icon(
+          onPressed: onOpenSettings,
+          icon: const Icon(Icons.tune, size: 16),
+          label: const Text('Settings'),
+        ),
+      ],
+    );
+  }
+
   Widget _runRow(BuildContext context) {
     final f = fitting;
     final theme = Theme.of(context);
@@ -249,6 +284,7 @@ class FitCard extends StatelessWidget {
     final stats = [
       if (r.method == FitMethod.map && r.logEvidence != null)
         'log evidence ${r.logEvidence!.isFinite ? r.logEvidence!.toStringAsFixed(1) : '—'}',
+      if (r.chains != null) '${r.chains} chains',
       if (r.divergences != null) '${r.divergences} divergences',
       '${r.millis} ms on ${r.where}',
     ];
@@ -272,6 +308,11 @@ class FitCard extends StatelessWidget {
           ),
         ],
       ),
+      if (r.deviceNote != null)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Text(r.deviceNote!, style: muted),
+        ),
       if (r.note != null)
         Padding(
           padding: const EdgeInsets.only(bottom: 4),

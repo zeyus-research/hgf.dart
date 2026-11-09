@@ -5,6 +5,9 @@
 //
 //   dart compile exe benchmark/bin/fit_gpu.dart -o .dart_tool/fit_gpu
 //   .dart_tool/fit_gpu --agents 20,200,2000 --workers 8 --draws 300
+//
+// `--runners cpu1,pool,gpu,gpuiso` picks the runners; gpuiso is
+// WgpuIsolateFitter (the GPU from a background isolate).
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -85,6 +88,11 @@ Future<void> main(List<String> args) async {
 
   final pool = await FitWorkers.spawn(count: workers);
   final gpu = GpuFitter(backend, cpu: pool);
+  // The same on a background isolate (what a UI uses).
+  final iso = runners.contains('gpuiso')
+      ? (await WgpuIsolateFitter.spawn()
+          ..cpu = pool)
+      : null;
   // Compile the kernels and warm up the JIT-free paths once.
   await gpu.fitMap(model, subjectsFor(4));
 
@@ -124,6 +132,9 @@ Future<void> main(List<String> args) async {
       if (runners.contains('gpu')) {
         await time('map ', n, 'gpu', () => gpu.fitMap(model, subjects));
       }
+      if (iso != null) {
+        await time('map ', n, 'gpuiso', () => iso.fitMap(model, subjects));
+      }
     }
     if (want('nuts')) {
       Future<NutsFit> on(PassRunner? r) async => r == null
@@ -150,8 +161,12 @@ Future<void> main(List<String> args) async {
       if (runners.contains('gpu')) {
         await time('nuts', n, 'gpu', () => on(gpu));
       }
+      if (iso != null) {
+        await time('nuts', n, 'gpuiso', () => on(iso));
+      }
     }
   }
+  await iso?.close();
   await pool.close();
   gpu.dispose();
 }

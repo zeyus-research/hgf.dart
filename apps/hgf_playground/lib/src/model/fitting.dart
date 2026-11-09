@@ -6,6 +6,8 @@ import 'package:hgf/hgf.dart';
 import 'package:hgf_fit/hgf_fit.dart';
 import 'package:hgf_widgets/hgf_widgets.dart';
 
+import 'fit_config.dart';
+import 'gpu/open_gpu.dart';
 import 'playground.dart';
 import 'presets.dart';
 
@@ -25,7 +27,8 @@ enum FitMethod {
   /// around it.
   map,
 
-  /// Draws from the full posterior (NUTS, 4 chains), started at the mode.
+  /// Draws from the full posterior (NUTS, [FitConfig.chains] chains),
+  /// started at the mode.
   nuts,
 }
 
@@ -104,7 +107,9 @@ class FitOutcome {
     this.logEvidence,
     this.converged = true,
     this.divergences,
+    this.chains,
     this.note,
+    this.deviceNote,
   });
 
   final FitMethod method;
@@ -118,24 +123,47 @@ class FitOutcome {
   final bool converged;
   final int? divergences;
 
+  /// NUTS chains that ran.
+  final int? chains;
+
   /// A warning to show with the results.
   final String? note;
+
+  /// Why the fit didn't run where [FitConfig.device] asked.
+  final String? deviceNote;
 }
 
 /// Parameter estimation for the playground: which parameters are free, the
 /// responses (simulated from an agent, or loaded), and the running or last
 /// fit. Fits run on a [FitWorkers] pool spawned on first use (isolates on
 /// desktop, Web Workers on the web), or, if none can be spawned, on the
-/// calling thread in slices between frames.
+/// calling thread in slices between frames; or on the GPU ([config]).
 class Fitting extends ChangeNotifier {
-  Fitting(this.pg, {Future<FitWorkers> Function()? spawnWorkers})
-    : _spawnWorkers = spawnWorkers ?? spawnPlaygroundWorkers {
+  Fitting(
+    this.pg, {
+    Future<FitWorkers> Function(int? count)? spawnWorkers,
+    Future<GpuOpened> Function()? openGpu,
+    FitConfig config = const FitConfig(),
+  }) : _spawnWorkers = spawnWorkers ?? spawnPlaygroundWorkers,
+       _openGpu = openGpu ?? _openPlatformGpu,
+       _config = config {
     _sync();
     pg.addListener(_onPlayground);
   }
 
   final Playground pg;
-  final Future<FitWorkers> Function() _spawnWorkers;
+  final Future<FitWorkers> Function(int? count) _spawnWorkers;
+  final Future<GpuOpened> Function() _openGpu;
+
+  /// The device, pool and sampler settings the next fit uses.
+  FitConfig get config => _config;
+  FitConfig _config;
+
+  void configure(FitConfig c) {
+    if (c == _config) return;
+    _config = c;
+    notifyListeners();
+  }
 
   // ---------------------------------------------------------------------------
   // Configuration
@@ -152,9 +180,6 @@ class Fitting extends ChangeNotifier {
 
   /// Why this network can't be fitted (null if it can).
   String? unsupported;
-
-  /// NUTS iterations per chain (4 chains).
-  int nutsWarmup = 500, nutsDraws = 500;
 
   /// The simulated agent's response parameter: the inverse temperature β
   /// (binary) or the response noise sd (continuous).
@@ -308,8 +333,31 @@ class Fitting extends ChangeNotifier {
 
   Object? _job;
   FitWorkers? _workers;
-  Future<FitWorkers>? _spawning;
+  int? _workersAsked;
   String _where = '';
+
+  // The GPU, opened on first use (or by [probeGpu]).
+  Future<GpuOpened>? _gpuOpening;
+  GpuRunner? _gpuRunner;
+
+  /// The GPU, once probed: the device (null if there is none) and why not.
+  GpuOpened? gpu;
+
+  /// Whether the next [method] fit runs on the GPU (if there is one).
+  bool get wantsGpu => switch (_config.device) {
+    FitDevice.cpu => false,
+    FitDevice.gpu => true,
+    FitDevice.auto =>
+      method == FitMethod.nuts && _config.chains >= FitConfig.autoGpuChains,
+  };
+
+  /// Opens the GPU if that hasn't been tried yet; [gpu] holds the outcome.
+  Future<GpuOpened> probeGpu() => _gpuOpening ??= () async {
+    final g = await _openGpu();
+    gpu = g;
+    notifyListeners();
+    return g;
+  }();
 
   bool get canFit =>
       unsupported == null &&
@@ -327,9 +375,42 @@ class Fitting extends ChangeNotifier {
     stage = 'Starting workers…';
     notifyListeners();
     final sw = Stopwatch()..start();
+    final config = _config;
     try {
-      final workers = await _pool();
+      final pool = await _pool();
       if (_job != job) return;
+      String? deviceNote;
+      PassRunner workers = pool;
+      var where = _where;
+      GpuRunner? gpuFitter;
+      if (wantsGpu) {
+        stage = 'Opening the GPU…';
+        notifyListeners();
+        final g = await probeGpu();
+        if (_job != job) return;
+        final device = g.device;
+        if (device == null) {
+          if (config.device == FitDevice.gpu) {
+            deviceNote = 'No GPU (${g.reason}): ran on the CPU.';
+          }
+        } else {
+          gpuFitter = _gpuRunner = device.runner(pool);
+          workers = gpuFitter;
+          where = 'the GPU';
+        }
+      }
+      final gpuPasses0 = gpuFitter?.gpuPasses ?? 0;
+      String whereNow() {
+        final f = gpuFitter;
+        if (f == null || f.gpuPasses > gpuPasses0) return where;
+        // Every pass fell back: the kernel doesn't cover this model.
+        deviceNote ??= f.fallbackReason == null
+            ? null
+            : 'No GPU kernel for this model (${f.fallbackReason}): ran on '
+                  'the CPU.';
+        return _where;
+      }
+
       final params = [
         for (final c in offered)
           if (free.contains(c.id)) c,
@@ -341,7 +422,7 @@ class Fitting extends ChangeNotifier {
       final map = await workers.fitMap(
         model,
         [subject],
-        restarts: 3,
+        restarts: config.restarts,
         random: math.Random(1),
       );
       if (_job != job) return;
@@ -357,9 +438,10 @@ class Fitting extends ChangeNotifier {
           method: FitMethod.map,
           target: target,
           millis: sw.elapsedMilliseconds,
-          where: _where,
+          where: whereNow(),
           logEvidence: lap.logEvidence,
           converged: best.converged,
+          deviceNote: deviceNote,
           note: !best.negLogPosterior.isFinite
               ? 'No finite fit: the beliefs diverge everywhere tried.'
               : !lap.positiveDefinite
@@ -389,7 +471,10 @@ class Fitting extends ChangeNotifier {
         );
       } else {
         final p = progress = SamplingProgress();
-        stage = 'Sampling (NUTS, 4 chains)…';
+        stage =
+            'Sampling (NUTS, ${config.chains} '
+            '${config.chains == 1 ? 'chain' : 'chains'}'
+            '${gpuFitter != null ? ' on the GPU' : ''})…';
         notifyListeners();
         final timer = Timer.periodic(
           const Duration(milliseconds: 100),
@@ -400,8 +485,13 @@ class Fitting extends ChangeNotifier {
           nuts = await workers.sampleNuts(
             model,
             [subject],
-            warmup: nutsWarmup,
-            draws: nutsDraws,
+            sampler: Nuts(
+              targetAccept: config.targetAccept,
+              maxTreeDepth: config.maxTreeDepth,
+            ),
+            chains: config.chains,
+            warmup: config.warmup,
+            draws: config.draws,
             start: [
               if (best.negLogPosterior.isFinite) best.x else model.start(),
             ],
@@ -423,9 +513,17 @@ class Fitting extends ChangeNotifier {
           method: FitMethod.nuts,
           target: target,
           millis: sw.elapsedMilliseconds,
-          where: _where,
+          where: whereNow(),
+          chains: draws.nChains,
+          deviceNote: deviceNote,
           divergences: draws.divergences,
-          converged: draws.converged(),
+          // draws.converged() would compute the summary again (~0.2 s
+          // at 64 chains × 500 draws).
+          converged:
+              draws.divergences == 0 &&
+              summary.every(
+                (s) => s.rhat <= 1.01 && s.essBulk >= 400 && s.essTail >= 400,
+              ),
           note: draws.nChains == 0
               ? 'No chain found a finite starting point.'
               : draws.divergences > 0
@@ -484,6 +582,7 @@ class Fitting extends ChangeNotifier {
     stage = null;
     progress = null;
     _workers?.cancel();
+    _gpuRunner?.cancel();
   }
 
   /// Set the playground's sliders to the estimates.
@@ -504,11 +603,20 @@ class Fitting extends ChangeNotifier {
     }
   }
 
+  /// The worker pool, (re)spawned when [FitConfig.workers] changed. Only
+  /// called between jobs.
   Future<FitWorkers> _pool() async {
+    final asked = _config.workers == 0 ? null : _config.workers;
     final w = _workers;
-    if (w != null) return w;
-    final pool = await (_spawning ??= _spawnWorkers());
+    if (w != null && asked == _workersAsked) return w;
+    if (w != null) {
+      _workers = null;
+      _gpuRunner = null;
+      await w.close();
+    }
+    final pool = await _spawnWorkers(asked);
     _workers = pool;
+    _workersAsked = asked;
     _where = pool.count == 0
         ? 'the main thread'
         : '${pool.count} ${kIsWeb ? (kIsWasm ? 'Wasm workers' : 'JS workers') : 'isolates'}';
@@ -519,6 +627,7 @@ class Fitting extends ChangeNotifier {
   void dispose() {
     pg.removeListener(_onPlayground);
     _cancel();
+    gpu?.device?.close();
     _workers?.close();
     super.dispose();
   }
@@ -774,14 +883,17 @@ String _n(double v) => v.abs() >= 1e4 || (v != 0 && v.abs() < 1e-2)
     ? v.toStringAsFixed(0)
     : v.toStringAsFixed(2);
 
-/// The pool the playground fits on: Web Workers running the compiled
+Future<GpuOpened> _openPlatformGpu() => openGpu();
+
+/// The pool the playground fits on (default: one worker per logical
+/// processor): Web Workers running the compiled
 /// `fit_worker` next to the page (Wasm or JS, like the page), isolates on
 /// desktop. If the workers can't start (e.g. the worker wasn't built), the
 /// fits run on the main thread, a slice per frame.
-Future<FitWorkers> spawnPlaygroundWorkers() async {
+Future<FitWorkers> spawnPlaygroundWorkers(int? count) async {
   try {
     return await FitWorkers.spawn(
-      count: 4,
+      count: count,
       // A single subject's passes are small: split none of them.
       minSliceTrials: 1 << 30,
       script: kIsWasm

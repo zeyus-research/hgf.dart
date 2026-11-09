@@ -15,3 +15,9 @@
 - Binary nodes carry `1 − μ̂` as `π̂ / μ̂` instead of subtracting: binary
   fixtures that drifted 5e-4 to 1e-2 in f32 now match f64 to ~3e-6.
 - `GpuBackend.writeUints`.
+- `GpuFitter.cancel()` (jobs fail with `FitCancelled`) and
+  `GpuFitter.yieldInterval`.
+- `WgpuIsolateFitter` (`native.dart`): a `GpuFitter` on wgpu-native in a
+  background isolate, for UIs (wgpu-native's calls block). The drivers stay
+  on the calling isolate; the model and subjects cross once, then each
+  pass's points and results. Same results as `GpuFitter`, ~3% slower.

@@ -5,6 +5,8 @@ import '../linalg.dart';
 import '../optim/optimizer.dart';
 import '../special.dart';
 
+part 'nuts_ensemble.dart';
+
 /// The inverse metric (the posterior covariance estimate) HMC moves with.
 enum MetricKind {
   /// The identity: no adaptation.
@@ -22,10 +24,11 @@ enum MetricKind {
 /// extra checks across subtrees) stops them, a dual-averaging step size and
 /// a windowed metric adaptation in warmup (75 / 25·2ⁿ / 50 iterations).
 ///
-/// Like the optimisers, a chain is a generator that yields evaluation
-/// requests, one point with its gradient per leapfrog step, so a driver
-/// (`sampleNuts`) advances many chains (and subjects) in lock step, one
-/// batched pass per step.
+/// The drivers (`sampleNuts`, `sampleHierarchical`, `sampleFunction`) run
+/// chains in a [NutsEnsemble]: all chains of all subjects in lock step, one
+/// batched pass per leapfrog step, with the chains' states in flat buffers.
+/// [chain] is the same sampler written as a generator, one chain at a time;
+/// the ensemble reproduces its draws bit for bit.
 ///
 /// The gradients may also be finite differences: the leapfrog integrator is
 /// volume preserving and reversible for any deterministic force field, and
@@ -59,7 +62,8 @@ final class Nuts {
   /// finite density and gradient.
   final int maxInitAttempts;
 
-  /// One chain: [warmup] adaptation iterations, then [draws] kept ones,
+  /// One chain as a generator (the readable reference for [NutsEnsemble]):
+  /// [warmup] adaptation iterations, then [draws] kept ones,
   /// from the first finite point [init] returns (unconstrained scale).
   /// Requests ask for the objective `U` (the negative log density) and its
   /// gradient at one point. The draws and statistics go to [out].

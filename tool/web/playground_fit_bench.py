@@ -8,6 +8,10 @@ simulated agent's truth.
 
     melos run build:playground
     uv run --with playwright python -I tool/web/playground_fit_bench.py
+
+With GPU=1, Chromium gets WebGPU on the machine's GPU (Vulkan), for
+queries like `fitbench&device=gpu&chains=64`; without it, WebGPU falls back
+to SwiftShader.
 """
 
 import json
@@ -35,7 +39,15 @@ def main(queries: list[str]) -> None:
     with sync_playwright() as p:
         browser = p.chromium.launch(
             executable_path=os.environ.get("CHROMIUM", "/usr/bin/chromium"),
-            args=["--enable-unsafe-swiftshader"],
+            args=[
+                "--enable-unsafe-webgpu",
+                "--enable-features=Vulkan,WebGPUService",
+                "--use-angle=vulkan",
+                "--ignore-gpu-blocklist",
+                "--enable-gpu",
+            ]
+            if os.environ.get("GPU")
+            else ["--enable-unsafe-swiftshader"],
         )
         for q in queries:
             page = browser.new_page(viewport={"width": 1440, "height": 900})

@@ -11,6 +11,9 @@ import 'web_interop.dart';
 import 'worker_transport.dart';
 import 'worker_transport_stub.dart';
 
+/// Logical processors (`navigator.hardwareConcurrency`, else 4).
+int get processorCount => globalScope.navigator?.hardwareConcurrency ?? 4;
+
 /// [count] Web Workers running [script] (default: one per logical
 /// processor). Without a script, or where there are no Web Workers
 /// (Node), there are no workers.
@@ -20,7 +23,7 @@ Future<WorkerTransport> spawnTransport(
 ) async {
   final global = globalScope;
   if (script == null || global.workerConstructor == null) return NoWorkers();
-  final n = count ?? global.navigator?.hardwareConcurrency ?? 4;
+  final n = count ?? processorCount;
   if (n == 0) return NoWorkers();
   final base = global.document?.baseURI ?? global.location?.href;
   final url = base == null ? script.url : URL(script.url, base).href;

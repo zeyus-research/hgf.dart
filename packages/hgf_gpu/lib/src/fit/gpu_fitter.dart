@@ -61,24 +61,54 @@ final class GpuFitter implements PassRunner {
   @override
   int get streams => 1;
 
+  /// A long job gives way to the event loop (a timer event, so frames and
+  /// input get their turn) whenever it has run this long. Matters where the
+  /// backend completes synchronously (wgpu-native): there a job would
+  /// otherwise hold the isolate until it ends (a UI should rather use
+  /// `WgpuIsolateFitter`). Results don't change.
+  Duration? yieldInterval;
+  final _sinceYield = Stopwatch();
+
+  // Bumped by [cancel]; each run stops once it differs from its own.
+  int _generation = 0;
+
+  /// Stops every running job: each one's future fails with [FitCancelled]
+  /// before its next pass. The fitter stays usable.
+  void cancel() {
+    _generation++;
+    cpu?.cancel();
+  }
+
   @override
   Future<T> run<T>(Program<T> program) async {
     final result = Out<T>();
-    await _drive(program(result));
+    await _drive(program(result), _generation);
     return result.value;
   }
 
-  Future<void> _drive(Iterable<Step> steps) async {
+  Future<void> _drive(Iterable<Step> steps, int generation) async {
     for (final step in steps) {
+      if (generation != _generation) throw const FitCancelled();
       switch (step) {
         case Pass():
+          await _maybeYield();
+          if (generation != _generation) throw const FitCancelled();
           await evaluatePass(step);
         case Concurrent(:final streams):
           for (final s in streams) {
-            await _drive(s);
+            await _drive(s, generation);
           }
       }
     }
+  }
+
+  Future<void> _maybeYield() async {
+    final interval = yieldInterval;
+    if (interval == null) return;
+    if (!_sinceYield.isRunning) _sinceYield.start();
+    if (_sinceYield.elapsed < interval) return;
+    await Future<void>.delayed(Duration.zero);
+    _sinceYield.reset();
   }
 
   Future<void> _cpu(Pass pass) async {

@@ -4,12 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hgf/hgf.dart';
 import 'package:hgf_fit/hgf_fit.dart';
+import 'package:hgf_playground/src/model/fit_config.dart';
 import 'package:hgf_playground/src/model/fitting.dart';
 import 'package:hgf_playground/src/model/playground.dart';
 import 'package:hgf_playground/src/model/presets.dart';
 import 'package:hgf_playground/src/ui/fit_card.dart';
 
-Future<FitWorkers> _inline() => FitWorkers.spawn(count: 0);
+Future<FitWorkers> _inline([int? _]) => FitWorkers.spawn(count: 0);
 
 void main() {
   test('candidates per preset; vector node kinds are not fitted', () {
@@ -66,11 +67,14 @@ void main() {
 
   test('fit to the observations, binary, with NUTS', () async {
     final pg = Playground(presetId: 'binary3', nTrials: 200);
-    final f = Fitting(pg, spawnWorkers: _inline)
-      ..nutsWarmup = 60
-      ..nutsDraws = 40
-      ..toggle('omega_2', false)
-      ..setMethod(FitMethod.nuts);
+    final f =
+        Fitting(
+            pg,
+            spawnWorkers: _inline,
+            config: const FitConfig(warmup: 60, draws: 40),
+          )
+          ..toggle('omega_2', false)
+          ..setMethod(FitMethod.nuts);
     expect(f.free, {'omega_1'});
     await f.fit();
     expect(f.error, isNull);
@@ -87,7 +91,7 @@ void main() {
     final pg = Playground(presetId: 'binary3', nTrials: 300);
     final pool = await FitWorkers.spawn(count: 0)
       ..yieldInterval = Duration.zero;
-    final f = Fitting(pg, spawnWorkers: () async => pool)
+    final f = Fitting(pg, spawnWorkers: (_) async => pool)
       ..setMethod(FitMethod.nuts);
     final job = f.fit();
     while (f.progress == null || f.progress!.completed < 5) {
@@ -106,6 +110,67 @@ void main() {
     await again;
     expect(f.running, isFalse);
     expect(f.result, isNull);
+  });
+
+  test('NUTS follows the config; no GPU falls back to the CPU', () async {
+    final pg = Playground(presetId: 'continuous2', nTrials: 120);
+    var probes = 0;
+    final f =
+        Fitting(
+            pg,
+            spawnWorkers: _inline,
+            openGpu: () async {
+              probes++;
+              return (device: null, reason: 'none in tests');
+            },
+            config: const FitConfig(
+              device: FitDevice.gpu,
+              chains: 2,
+              warmup: 30,
+              draws: 25,
+              maxTreeDepth: 6,
+            ),
+          )
+          ..setMethod(FitMethod.nuts)
+          ..simulateAgent(seed: 2);
+    expect(f.wantsGpu, isTrue);
+    await f.fit();
+    expect(f.error, isNull);
+    final r = f.result!;
+    expect(r.chains, 2);
+    expect(r.where, 'the main thread');
+    expect(r.deviceNote, contains('none in tests'));
+    for (final e in r.estimates) {
+      expect(e.draws, hasLength(2 * 25));
+    }
+    // The probe ran once and is remembered.
+    await f.fit();
+    expect(probes, 1);
+    expect(f.gpu!.device, isNull);
+    // Auto stays on the CPU for MAP and few chains.
+    f.configure(const FitConfig());
+    expect(f.wantsGpu, isFalse);
+    f.setMethod(FitMethod.map);
+    expect(f.wantsGpu, isFalse);
+  });
+
+  test('a new worker count respawns the pool', () async {
+    final asked = <int?>[];
+    final pg = Playground(presetId: 'continuous2', nTrials: 60);
+    final f = Fitting(
+      pg,
+      spawnWorkers: (n) {
+        asked.add(n);
+        return FitWorkers.spawn(count: 0);
+      },
+    );
+    await f.fit();
+    await f.fit();
+    expect(asked, [null]); // auto: one per processor
+    f.configure(const FitConfig(workers: 2, restarts: 0));
+    await f.fit();
+    expect(asked, [null, 2]);
+    expect(f.result, isNotNull);
   });
 
   test('loaded responses must match the trials and the input kind', () {
@@ -155,9 +220,11 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     final pg = Playground(presetId: 'binary3', nTrials: 150);
-    final f = Fitting(pg, spawnWorkers: _inline)
-      ..nutsWarmup = 40
-      ..nutsDraws = 40;
+    final f = Fitting(
+      pg,
+      spawnWorkers: _inline,
+      config: const FitConfig(warmup: 40, draws: 40),
+    );
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(

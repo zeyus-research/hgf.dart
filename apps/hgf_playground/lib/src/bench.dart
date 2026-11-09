@@ -94,6 +94,12 @@ Future<Map<String, Object>> runBench(
 /// Whether a scripted fitting benchmark was asked for: `?fitbench` on the
 /// web (`&workers=0` fits on the main thread), `--dart-define=HGF_FITBENCH=1`
 /// elsewhere.
+/// `?fitbench&idle` / `HGF_FITBENCH=idle`: don't force a frame every
+/// vsync while fitting (frame stats are then not recorded).
+final bool _idle =
+    const String.fromEnvironment('HGF_FITBENCH') == 'idle' ||
+    (kIsWeb && Uri.base.queryParameters.containsKey('idle'));
+
 bool fitBenchRequested() =>
     const String.fromEnvironment('HGF_FITBENCH').isNotEmpty ||
     (kIsWeb && Uri.base.queryParameters.containsKey('fitbench'));
@@ -121,6 +127,11 @@ Future<void> runFitBench(Playground pg, Fitting fit) async {
       final job = fit.fit();
       var last = 0;
       while (fit.running) {
+        if (_idle) {
+          // Only the frames the app asks for itself (progress updates).
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          continue;
+        }
         binding.scheduleFrame();
         await binding.endOfFrame;
         final now = sw.elapsedMicroseconds;

@@ -13,6 +13,7 @@ import 'fit_card.dart';
 import 'frame_stats.dart';
 import 'panels.dart';
 import 'playback_bar.dart';
+import 'settings_panel.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({
@@ -36,6 +37,23 @@ class _HomePageState extends State<HomePage>
   Duration _last = Duration.zero;
   final ValueNotifier<int?> _hover = ValueNotifier(null);
   final FrameStats _frames = FrameStats();
+  final _scaffold = GlobalKey<ScaffoldState>();
+
+  void _openSettings() => _scaffold.currentState?.openEndDrawer();
+
+  /// Parameters, couplings, update scheme and data back to the preset's.
+  void _reset() {
+    pg.resetToPreset();
+    widget.settings.remember(nTrials: pg.data.nTrials);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text('${pg.preset.name}: back to its defaults'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+  }
 
   Playground get pg => widget.playground;
   Fitting get fit => widget.fitting;
@@ -97,13 +115,30 @@ class _HomePageState extends State<HomePage>
       // The fit card listens on its own; the plots need the responses.
       listenable: Listenable.merge([pg, _responses]),
       builder: (context, _) => Scaffold(
+        key: _scaffold,
+        endDrawer: Drawer(
+          width: 380,
+          child: SafeArea(
+            child: SettingsPanel(settings: widget.settings, fitting: fit),
+          ),
+        ),
         appBar: AppBar(
           title: Text(
             MediaQuery.sizeOf(context).width < 600 ? 'HGF' : 'HGF playground',
           ),
           actions: [
             _PresetMenu(playground: pg, settings: widget.settings),
+            IconButton(
+              tooltip: 'Reset to the preset\'s defaults',
+              onPressed: _reset,
+              icon: const Icon(Icons.restart_alt),
+            ),
             _ThemeMenu(settings: widget.settings),
+            IconButton(
+              tooltip: 'Settings',
+              onPressed: _openSettings,
+              icon: const Icon(Icons.tune),
+            ),
             const SizedBox(width: 8),
           ],
         ),
@@ -220,7 +255,7 @@ class _HomePageState extends State<HomePage>
     const SizedBox(height: 12),
     DataCard(playground: pg, settings: widget.settings),
     const SizedBox(height: 12),
-    FitCard(fitting: fit),
+    FitCard(fitting: fit, onOpenSettings: _openSettings),
     const SizedBox(height: 12),
     const AboutCard(),
   ];

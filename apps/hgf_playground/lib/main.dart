@@ -4,6 +4,7 @@ import 'package:hgf_fit/hgf_fit.dart';
 
 import 'src/app.dart';
 import 'src/bench.dart';
+import 'src/model/fit_config.dart';
 import 'src/model/fitting.dart';
 import 'src/model/playground.dart';
 import 'src/settings.dart';
@@ -22,10 +23,26 @@ Future<void> main() async {
     nTrials: bench ?? int.tryParse(query['trials'] ?? '') ?? settings.nTrials,
     coalesce: true,
   );
+  // Bench overrides: `&workers=0` fits on the main thread (web),
+  // `&device=gpu|cpu|auto` and `&chains=N` (or the dart-defines
+  // HGF_FIT_DEVICE and HGF_FIT_CHAINS on desktop).
+  var fitConfig = settings.fit;
+  if (fitBench) {
+    final device =
+        query['device'] ?? const String.fromEnvironment('HGF_FIT_DEVICE');
+    final chains =
+        query['chains'] ?? const String.fromEnvironment('HGF_FIT_CHAINS');
+    fitConfig = FitConfig(
+      device: FitDevice.values.asNameMap()[device] ?? FitDevice.cpu,
+      workers: 4,
+      chains: int.tryParse(chains) ?? 4,
+    );
+  }
   final fitting = Fitting(
     playground,
+    config: fitConfig,
     spawnWorkers: query['workers'] == '0'
-        ? () async => await FitWorkers.spawn(count: 0)
+        ? (_) async => await FitWorkers.spawn(count: 0)
             ..yieldInterval = const Duration(milliseconds: 12)
         : null,
   );

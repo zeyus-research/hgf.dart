@@ -2,3 +2,4 @@
 library;
 
 export 'src/native/wgpu_backend.dart' show WgpuBackend;
+export 'src/native/wgpu_isolate.dart' show WgpuIsolateFitter;

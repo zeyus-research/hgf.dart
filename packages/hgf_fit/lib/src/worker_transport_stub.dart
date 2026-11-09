@@ -1,5 +1,8 @@
 import 'worker_transport.dart';
 
+/// Logical processors: unknown here, so 1.
+int get processorCount => 1;
+
 /// No workers on this platform.
 Future<WorkerTransport> spawnTransport(
   int? count,

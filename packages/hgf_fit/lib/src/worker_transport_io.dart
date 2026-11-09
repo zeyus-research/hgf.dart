@@ -12,12 +12,15 @@ import 'worker_host.dart';
 import 'worker_transport.dart';
 import 'worker_transport_stub.dart';
 
+/// Logical processors of this machine.
+int get processorCount => Platform.numberOfProcessors;
+
 /// [count] isolates (default: one per processor); [script] is for the web.
 Future<WorkerTransport> spawnTransport(
   int? count,
   FitWorkerScript? script,
 ) async {
-  final n = count ?? Platform.numberOfProcessors;
+  final n = count ?? processorCount;
   if (n == 0) return NoWorkers();
   final replies = RawReceivePort(null, 'FitWorkers replies');
   final exits = RawReceivePort(null, 'FitWorkers exits');

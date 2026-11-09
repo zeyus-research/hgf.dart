@@ -169,6 +169,51 @@ final class BatchedObjective {
     result.value = (values, grads);
   }
 
+  /// [evaluatePasses] for points that all need a gradient, in flat arrays:
+  /// [y] is row-major `n x k`, and so are the result's gradients. With
+  /// exact gradients this is one pass over [y] itself (the NUTS drivers'
+  /// path).
+  Iterable<Step> evaluateGradientPasses(
+    Int32List subjectOf,
+    Float64List y,
+    Out<(Float64List values, Float64List gradients)> result,
+  ) sync* {
+    final k = model.dimension, n = subjectOf.length;
+    if (y.length != n * k) throw ArgumentError('Points must have $k entries');
+    if (gradients != Gradients.exact) {
+      final inner = Out<(Float64List, List<Float64List?>)>();
+      yield* evaluatePasses(
+        subjectOf,
+        [
+          for (var j = 0; j < n; j++)
+            Float64List.sublistView(y, j * k, (j + 1) * k),
+        ],
+        List.filled(n, true),
+        inner,
+      );
+      final (v, g) = inner.value;
+      final flat = Float64List(n * k);
+      for (var j = 0; j < n; j++) {
+        flat.setRange(j * k, (j + 1) * k, g[j]!);
+      }
+      result.value = (v, flat);
+      return;
+    }
+    final pass = Pass(
+      model,
+      subjects,
+      subjectOf,
+      y,
+      jacobian: jacobian,
+      includePrior: includePrior,
+      gradient: true,
+    );
+    yield pass;
+    passes++;
+    elements += n;
+    result.value = (pass.out, pass.gradient!);
+  }
+
   /// [evaluate] with exact gradients: the points that need one in a pass
   /// with tangents, the others (if any) in a plain pass.
   Iterable<Step> _evaluateExact(

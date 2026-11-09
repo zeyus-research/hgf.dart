@@ -6,6 +6,7 @@
 @Tags(['gpu'])
 library;
 
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:hgf/hgf.dart';
@@ -115,7 +116,79 @@ void main() {
         }
       }
     });
+
+    test(
+      'cancel stops a job; yieldInterval lets timers run',
+      skip: skip,
+      () async {
+        final (model, subjects, _) = recovery(2, 3);
+        final gpu = GpuFitter(backend!)
+          ..yieldInterval = const Duration(milliseconds: 5);
+        var ticks = 0;
+        final timer = Timer.periodic(Duration.zero, (_) => ticks++);
+        final job = gpu.sampleNuts(model, subjects, warmup: 2000, draws: 2000);
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        gpu.cancel();
+        await expectLater(job, throwsA(isA<FitCancelled>()));
+        timer.cancel();
+        expect(ticks, greaterThan(3));
+        // Still usable.
+        final map = await gpu.fitMap(model, subjects);
+        expect(map.results, hasLength(2));
+        gpu.dispose();
+      },
+    );
   });
+
+  test(
+    'WgpuIsolateFitter: the same results as a GpuFitter, off-isolate',
+    () async {
+      final WgpuIsolateFitter iso;
+      try {
+        iso = await WgpuIsolateFitter.spawn();
+      } on StateError catch (e) {
+        markTestSkipped(e.message);
+        return;
+      }
+      final local = GpuFitter(WgpuBackend.create()!);
+      final (model, subjects, _) = recovery(6, 5);
+      final a = await iso.fitMap(
+        model,
+        subjects,
+        restarts: 1,
+        random: math.Random(2),
+      );
+      final b = await local.fitMap(
+        model,
+        subjects,
+        restarts: 1,
+        random: math.Random(2),
+      );
+      for (var s = 0; s < subjects.length; s++) {
+        expect(a.results[s].y, b.results[s].y, reason: 'subject $s');
+      }
+      expect(iso.gpuPasses, greaterThan(0));
+      expect(iso.cpuPasses, greaterThan(0)); // the precise report pass
+      final na = await iso.sampleNuts(model, subjects, warmup: 60, draws: 40);
+      final nb = await local.sampleNuts(model, subjects, warmup: 60, draws: 40);
+      expect(na.results[3].parameter(0), nb.results[3].parameter(0));
+      // Cancel, then still usable; a new model replaces the old one.
+      var ticks = 0;
+      final timer = Timer.periodic(Duration.zero, (_) => ticks++);
+      final job = iso.sampleNuts(model, subjects, warmup: 4000, draws: 4000);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      iso.cancel();
+      await expectLater(job, throwsA(isA<FitCancelled>()));
+      timer.cancel();
+      expect(ticks, greaterThan(10), reason: 'the calling isolate stays free');
+      final (model2, subjects2, _) = recovery(3, 9);
+      final c = await iso.fitMap(model2, subjects2);
+      final d = await local.fitMap(model2, subjects2);
+      expect(c.results[2].y, d.results[2].y);
+      await iso.close();
+      local.dispose();
+    },
+  );
 
   test('fit passes: f32 GPU values and gradients match f64 CPU', () async {
     final WgpuBackend? backend;

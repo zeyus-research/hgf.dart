@@ -1,5 +1,7 @@
 // The NUTS driver's own cost per chain and leapfrog step, without a
-// filter: sampleFunction on a 2-d Gaussian with many chains.
+// filter: sampleFunction on a 2-d Gaussian with many chains. On the
+// i7-7700 (AOT), per chain and leapfrog step: 0.73 µs at 400 chains, 0.87
+// at 8000 (NutsEnsemble); the per-chain generators took 1.7 and 5.8.
 //
 //   dart compile exe benchmark/bin/nuts_overhead.dart -o .dart_tool/nuts_oh
 //   .dart_tool/nuts_oh 8000 30

@@ -52,7 +52,8 @@ export 'src/response_model.dart' hide bindResponsePartials;
 export 'src/sample/diagnostics.dart'
     show essBulk, essMean, essTail, mcseMean, quantileOf, rhat;
 export 'src/sample/nuts.dart';
-export 'src/sample/sample.dart' hide chainSeed, driveChainPasses, driveChains;
+export 'src/sample/sample.dart'
+    hide chainSeed, EnsembleEvaluator, NutsEnsembles, nutsEnsembles;
 export 'src/special.dart' show erf, erfc, logNormalCdf, normalQuantile;
 export 'src/transform.dart';
 export 'src/workers.dart';

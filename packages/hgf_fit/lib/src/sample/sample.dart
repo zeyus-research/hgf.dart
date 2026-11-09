@@ -4,7 +4,6 @@ import 'dart:typed_data';
 
 import '../fit.dart';
 import '../model.dart';
-import '../optim/optimizer.dart';
 import '../pass.dart';
 import 'diagnostics.dart';
 import 'nuts.dart';
@@ -488,7 +487,14 @@ Iterable<Step> _sampleNuts(
   );
   final k = model.dimension;
   final outs = <List<ChainOutput>>[];
-  final tasks = <({int subject, Iterator<EvalRequest> it})>[];
+  final ensembles = nutsEnsembles(
+    sampler,
+    k,
+    warmup: warmup,
+    draws: draws,
+    chains: subjects.length * chains,
+    streams: streams,
+  );
   for (var s = 0; s < subjects.length; s++) {
     final x0 = start?[s] ?? model.start();
     if (x0.length != k) {
@@ -500,37 +506,20 @@ Iterable<Step> _sampleNuts(
       final rng = math.Random(chainSeed(seed, s, c));
       final out = ChainOutput();
       row.add(out);
-      final it = sampler
-          .chain(
-            init: (_) => Float64List.fromList([
-              for (final v in y0) v + jitter * (2 * rng.nextDouble() - 1),
-            ]),
-            warmup: warmup,
-            draws: draws,
-            random: rng,
-            out: out,
-          )
-          .iterator;
-      tasks.add((subject: s, it: it));
+      ensembles.add(
+        s * chains + c,
+        init: (_) => Float64List.fromList([
+          for (final v in y0) v + jitter * (2 * rng.nextDouble() - 1),
+        ]),
+        random: rng,
+        out: out,
+        subject: s,
+      );
     }
     outs.add(row);
   }
   progress?._attach([for (final r in outs) ...r], warmup + draws);
-  yield* driveChainPasses(tasks, streams: streams, (
-    subjectOf,
-    points,
-    o,
-  ) sync* {
-    final evaluated = Out<(Float64List, List<Float64List?>)>();
-    yield* objective.evaluatePasses(
-      subjectOf,
-      points,
-      List.filled(points.length, true),
-      evaluated,
-    );
-    final (v, g) = evaluated.value;
-    o.value = (v, [for (final x in g) x!]);
-  });
+  yield* ensembles.drive(objective.evaluateGradientPasses);
   result.value = NutsFit(
     [
       for (var s = 0; s < subjects.length; s++)
@@ -562,36 +551,41 @@ PosteriorDraws sampleFunction(
   List<String>? names,
 }) {
   final outs = <ChainOutput>[];
-  final tasks = <({int subject, Iterator<EvalRequest> it})>[];
+  final ensembles = nutsEnsembles(
+    sampler,
+    y0.length,
+    warmup: warmup,
+    draws: draws,
+    chains: chains,
+    streams: 1,
+  );
   for (var c = 0; c < chains; c++) {
     final rng = math.Random(chainSeed(seed, 0, c));
     final out = ChainOutput();
     outs.add(out);
-    tasks.add((
-      subject: 0,
-      it: sampler
-          .chain(
-            init: (_) => Float64List.fromList([
-              for (final v in y0) v + jitter * (2 * rng.nextDouble() - 1),
-            ]),
-            warmup: warmup,
-            draws: draws,
-            random: rng,
-            out: out,
-          )
-          .iterator,
-    ));
+    ensembles.add(
+      c,
+      init: (_) => Float64List.fromList([
+        for (final v in y0) v + jitter * (2 * rng.nextDouble() - 1),
+      ]),
+      random: rng,
+      out: out,
+    );
   }
-  driveChains(tasks, (_, points) {
-    final v = Float64List(points.length);
-    final g = <Float64List>[];
-    for (var j = 0; j < points.length; j++) {
-      final u = potential(points[j]);
-      v[j] = u.isNaN ? double.infinity : u;
-      g.add(gradient(points[j]));
-    }
-    return (v, g);
-  });
+  final k = y0.length;
+  runStepsInline(
+    ensembles.drive((_, y, o) sync* {
+      final n = y.length ~/ k;
+      final v = Float64List(n), g = Float64List(n * k);
+      for (var j = 0; j < n; j++) {
+        final p = Float64List.sublistView(y, j * k, (j + 1) * k);
+        final u = potential(p);
+        v[j] = u.isNaN ? double.infinity : u;
+        g.setRange(j * k, (j + 1) * k, gradient(p));
+      }
+      o.value = (v, g);
+    }),
+  );
   return PosteriorDraws(
     names: names ?? [for (var i = 0; i < y0.length; i++) 'y$i'],
     chains: outs,
@@ -599,81 +593,87 @@ PosteriorDraws sampleFunction(
   );
 }
 
-/// Advances every task's generator in lock step, answering all pending
-/// requests with one [evaluate] call per round.
-void driveChains(
-  List<({int subject, Iterator<EvalRequest> it})> tasks,
-  (Float64List, List<Float64List>) Function(
-    List<int> subjectOf,
-    List<Float64List> points,
-  )
-  evaluate,
-) {
-  for (final _ in driveChainPasses(tasks, (subjectOf, points, o) sync* {
-    o.value = evaluate(subjectOf, points);
-  })) {}
-}
+/// Evaluates the pending points of an ensemble: [y] is row-major `n x k`,
+/// point `j` belongs to subject `subjectOf[j]`; the result is `U` at each
+/// point and the gradients, row-major.
+typedef EnsembleEvaluator =
+    Iterable<Step> Function(
+      Int32List subjectOf,
+      Float64List y,
+      Out<(Float64List values, Float64List gradients)> result,
+    );
 
-/// [driveChains] as a program: [evaluate] is a program too. With
-/// [streams] > 1 the tasks are split into that many [Concurrent] streams
-/// (each in lock step).
-Iterable<Step> driveChainPasses(
-  List<({int subject, Iterator<EvalRequest> it})> tasks,
-  Iterable<Step> Function(
-    List<int> subjectOf,
-    List<Float64List> points,
-    Out<(Float64List, List<Float64List>)> result,
-  )
-  evaluate, {
-  int streams = 1,
-}) sync* {
-  if (streams > 1 && tasks.length > 1) {
-    yield Concurrent([
-      for (final group in splitTasks(tasks.length, streams))
-        _driveChains([for (final t in group) tasks[t]], evaluate),
-    ]);
-  } else {
-    yield* _driveChains(tasks, evaluate);
+/// The chains of a run, dealt into one [NutsEnsemble] per stream (strided,
+/// as [splitTasks]).
+final class NutsEnsembles {
+  NutsEnsembles._(this.ensembles, this._groupOf);
+
+  final List<NutsEnsemble> ensembles;
+  final Int32List _groupOf;
+
+  /// Adds chain [chain] (`0 ≤ chain < chains`) to its stream's ensemble.
+  void add(
+    int chain, {
+    required Float64List Function(int attempt) init,
+    required math.Random random,
+    required ChainOutput out,
+    int subject = 0,
+  }) => ensembles[_groupOf[chain]].add(
+    init: init,
+    random: random,
+    out: out,
+    subject: subject,
+  );
+
+  /// Runs every chain to its end, each ensemble's pending points in one
+  /// [evaluate] call per round; the ensembles as [Concurrent] streams when
+  /// there are several.
+  Iterable<Step> drive(EnsembleEvaluator evaluate) sync* {
+    if (ensembles.length > 1) {
+      yield Concurrent([for (final e in ensembles) _drive(e, evaluate)]);
+    } else if (ensembles.isNotEmpty) {
+      yield* _drive(ensembles.first, evaluate);
+    }
+  }
+
+  static Iterable<Step> _drive(
+    NutsEnsemble e,
+    EnsembleEvaluator evaluate,
+  ) sync* {
+    final evaluated = Out<(Float64List, Float64List)>();
+    while (e.request() > 0) {
+      yield* evaluate(e.pendingSubjects, e.points, evaluated);
+      final (values, gradients) = evaluated.value;
+      e.answer(values, gradients);
+    }
   }
 }
 
-Iterable<Step> _driveChains(
-  List<({int subject, Iterator<EvalRequest> it})> tasks,
-  Iterable<Step> Function(
-    List<int> subjectOf,
-    List<Float64List> points,
-    Out<(Float64List, List<Float64List>)> result,
-  )
-  evaluate,
-) sync* {
-  final evaluated = Out<(Float64List, List<Float64List>)>();
-  var active = [
-    for (final t in tasks)
-      if (t.it.moveNext()) t,
-  ];
-  while (active.isNotEmpty) {
-    final subjectOf = <int>[], points = <Float64List>[];
-    for (final t in active) {
-      for (final p in t.it.current.points) {
-        subjectOf.add(t.subject);
-        points.add(p);
-      }
+/// [chains] chains of dimension [k] for [streams] streams (one ensemble
+/// unless `streams > 1` and there are several chains).
+NutsEnsembles nutsEnsembles(
+  Nuts sampler,
+  int k, {
+  required int warmup,
+  required int draws,
+  required int chains,
+  required int streams,
+}) {
+  final groups = streams > 1 && chains > 1
+      ? splitTasks(chains, streams)
+      : [
+          [for (var c = 0; c < chains; c++) c],
+        ];
+  final groupOf = Int32List(chains);
+  for (var g = 0; g < groups.length; g++) {
+    for (final c in groups[g]) {
+      groupOf[c] = g;
     }
-    yield* evaluate(subjectOf, points, evaluated);
-    final (values, grads) = evaluated.value;
-    var j = 0;
-    for (final t in active) {
-      final r = t.it.current;
-      final n = r.points.length;
-      r.values = Float64List.sublistView(values, j, j + n);
-      r.gradients = grads.sublist(j, j + n);
-      j += n;
-    }
-    active = [
-      for (final t in active)
-        if (t.it.moveNext()) t,
-    ];
   }
+  return NutsEnsembles._([
+    for (final _ in groups)
+      NutsEnsemble(sampler, k, warmup: warmup, draws: draws),
+  ], groupOf);
 }
 
 /// A per-chain seed from the run seed, subject and chain (`math.Random`

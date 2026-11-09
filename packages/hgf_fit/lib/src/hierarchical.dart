@@ -4,7 +4,6 @@ import 'dart:typed_data';
 
 import 'fit.dart';
 import 'model.dart';
-import 'optim/optimizer.dart';
 import 'pass.dart';
 import 'prior.dart';
 import 'sample/nuts.dart';
@@ -660,31 +659,42 @@ Iterable<Step> _sampleHierarchical(
   final objective = model._objective(subjects, gradients, fdStep);
   final theta0 = model.initialPoint(subjects.length, start: start);
   final outs = <ChainOutput>[];
-  final tasks = <({int subject, Iterator<EvalRequest> it})>[];
+  final ensembles = nutsEnsembles(
+    sampler,
+    theta0.length,
+    warmup: warmup,
+    draws: draws,
+    chains: chains,
+    streams: streams,
+  );
   for (var c = 0; c < chains; c++) {
     final rng = math.Random(chainSeed(seed, 0, c));
     final out = ChainOutput();
     outs.add(out);
-    tasks.add((
-      subject: 0,
-      it: sampler
-          .chain(
-            init: (_) => Float64List.fromList([
-              for (final v in theta0) v + jitter * (2 * rng.nextDouble() - 1),
-            ]),
-            warmup: warmup,
-            draws: draws,
-            random: rng,
-            out: out,
-          )
-          .iterator,
-    ));
+    ensembles.add(
+      c,
+      init: (_) => Float64List.fromList([
+        for (final v in theta0) v + jitter * (2 * rng.nextDouble() - 1),
+      ]),
+      random: rng,
+      out: out,
+    );
   }
-  yield* driveChainPasses(
-    tasks,
-    (_, points, o) => objective.evaluatePasses(points, o),
-    streams: streams,
-  );
+  final dim = theta0.length;
+  yield* ensembles.drive((_, y, o) sync* {
+    final n = y.length ~/ dim;
+    final joint = Out<(Float64List, List<Float64List>)>();
+    yield* objective.evaluatePasses([
+      for (var j = 0; j < n; j++)
+        Float64List.sublistView(y, j * dim, (j + 1) * dim),
+    ], joint);
+    final (v, g) = joint.value;
+    final flat = Float64List(n * dim);
+    for (var j = 0; j < n; j++) {
+      flat.setRange(j * dim, (j + 1) * dim, g[j]);
+    }
+    o.value = (v, flat);
+  });
   result.value = HierarchicalFit(
     model,
     subjects,

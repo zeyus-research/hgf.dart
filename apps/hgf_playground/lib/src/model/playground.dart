@@ -123,6 +123,33 @@ class Playground extends ChangeNotifier {
     _rerun();
   }
 
+  /// Back to the preset as it ships: its parameters, couplings and update
+  /// scheme, and simulated data with the default settings and trials.
+  void resetToPreset() {
+    player = null;
+    selected = null;
+    _paramEdits.clear();
+    _couplingEdits.clear();
+    _volatilityUpdates =
+        _preset.volatilityUpdates ?? VolatilityUpdates.unbounded;
+    final d = DataSettings();
+    data
+      ..nTrials = _preset.defaultTrials
+      ..seed = d.seed
+      ..pHigh = d.pHigh
+      ..block = d.block
+      ..sdLow = d.sdLow
+      ..sdHigh = d.sdHigh
+      ..noise = d.noise
+      ..nSources = d.nSources
+      ..sourceSd = d.sourceSd;
+    source = DataSource.simulated;
+    loadedName = null;
+    _rebuild();
+    _simulate();
+    _rerun();
+  }
+
   void setVolatilityUpdates(VolatilityUpdates v) {
     if (v == _volatilityUpdates) return;
     player = null;

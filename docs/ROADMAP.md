@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-07, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools and the playground's fitting view)
+## Where things stand (2026-11-09, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting and the playground's fitting view and settings)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -21,7 +21,7 @@ supersedes its phase list.
     data, bit-identical to `Network` (W4);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
-- 632 engine tests pass (plus 112 fitting, 16 widget and 23 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+- 632 engine tests pass (plus 112 fitting, 16 widget and 27 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
   `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
@@ -73,7 +73,8 @@ supersedes its phase list.
   Since 2026-11-09 (Phase 7b) the fitting functions run on it too:
   `GpuFitter` evaluates hgf_fit's passes with exact gradients from
   forward-mode tangents compiled into the kernel. MAP on 2000 agents takes
-  89 ms (8 isolates: 332 ms), and NUTS on 200 agents 9.4 s (34.7 s).
+  89 ms (8 isolates: 332 ms), and NUTS on 200 agents 5.0–5.4 s (34 s),
+  on 2000 agents 30 s (319 s).
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -1191,9 +1192,13 @@ the CPU is the 8-isolate `FitWorkers` pool on the i7-7700):
 | MAP | 20 | 7.3 ms | 13.8 ms |
 | MAP | 200 | 34 ms | 25 ms |
 | MAP | 2000 | 332 ms | 89 ms |
-| NUTS 4×(300+300) | 20 | 4.5 s | 2.4 s |
-| NUTS 4×(300+300) | 200 | 34.7 s | 9.4 s |
-| NUTS 4×(300+300) | 2000 | 395 s | 139 s |
+| NUTS 4×(300+300) | 20 | 4.2 s | 2.1–3.0 s |
+| NUTS 4×(300+300) | 200 | 34 s | 5.0–5.4 s |
+| NUTS 4×(300+300) | 2000 | 319 s | 30–31 s |
+
+NUTS rows as of 2026-11-09 with `NutsEnsemble` (below); before it, GPU
+2.4 s / 9.4 s / 139 s and pool 4.5 s / 34.7 s / 395 s. The 20-agent GPU
+time is mostly round-trip latency, which varies by ±0.5 s between runs.
 
 **Finding: at thousands of chains, the NUTS driver is the bottleneck.**
 At 2000 agents (8000 chains), the GPU passes take 7 s of a 55 s run. The
@@ -1207,6 +1212,43 @@ rest is the sampler's own host work per chain and leapfrog step.
   instead of one generator per chain would remove most of it. That is
   the lever for GPU NUTS at scale: about 7× at 2000 agents.
 
+**Done (2026-11-09): `NutsEnsemble`** (`sample/nuts_ensemble.dart`).
+- Every NUTS driver now advances its chains as a state machine.
+- Each chain's states, vectors and per-level tree locals live in one
+  `Float64List` at fixed offsets.
+- Stan's `build_tree` recursion is an explicit stack of frames: 7 buffer
+  offsets and a state per tree level.
+- The order of operations and random draws is unchanged, so every chain's
+  draws are **bit-identical** to `Nuts.chain`. That generator stays as the
+  readable reference.
+  - `test/nuts_ensemble_test.dart` checks this for all three metrics,
+    divergences, max-depth hits, depth 0, short or no warmup, and failed
+    starts, on the VM, dart2js and dart2wasm.
+  - Fingerprints of `sampleNuts` (exact and forward differences) and
+    `sampleHierarchical` matched before and after.
+- `BatchedObjective.evaluateGradientPasses` hands the ensemble's flat
+  points to a single pass, with no per-point lists.
+- Driver cost per chain-step (`nuts_overhead`, AOT): 0.73 / 0.68 / 0.87 µs
+  at 400 / 1600 / 8000 chains (before: 1.7 / 2.7 / 5.8). It no longer
+  grows with the number of chains.
+- GPU NUTS: 4.6× faster at 2000 agents (139 → 30 s) and 1.8× at 200. The
+  pool gains 1.24× at 2000 agents, because its sampler also runs on the
+  main isolate.
+
+**What is left at 2000 agents (30 s):**
+- GPU wait: 3.4 s.
+- Host work per pass: 7 s (prepare 1.8 + finish 5.2), about 210 ns per
+  element. That is the transforms, the `f32` job packing, and the priors
+  and Jacobians in `completeNegLogPosterior`.
+- The sampler itself: about 20 s, around 0.6 µs per chain-step. A perf
+  profile is flat: copies, tree bookkeeping, the RNG and `exp`/`log` in
+  the weights. Swapping `setRange` for loops changed nothing.
+- Overlapping host and GPU work would save at most the 3.4 s wait.
+- The next lever is to run the ensembles on worker isolates and gather
+  their points into one GPU pass per round: about 3.5× on the sampler's
+  share on 4 cores. The per-element host cost could also move into the
+  kernel (transforms) or be vectorised.
+
 **Next steps (Phase 7 follow-up):**
 - [ ] HGF neural networks: port rshgf's vectorised backend
   (`src/vectorised/`, about 3.4k lines, f32 by default). It is per-layer
@@ -1219,8 +1261,11 @@ rest is the sampler's own host work per chain and leapfrog step.
   Phase 7b.
 - [x] Response models with response data (`BinarySoftmax`,
   `GaussianResponse`): Phase 7b. Per-trial surprise output is still open.
-- [ ] Structure-of-arrays NUTS across chains (see the Phase 7b finding),
-  so GPU NUTS scales past ~1000 chains.
+- [x] Structure-of-arrays NUTS across chains (`NutsEnsemble`,
+  2026-11-09): GPU NUTS on 8000 chains 139 → 30 s.
+- [ ] Sampler ensembles on worker isolates feeding one GPU pass per round,
+  and less host work per element (see the Phase 7b note): the remaining
+  ~27 s of host time at 2000 agents.
 - [ ] `GpuFitter` with `ResponseModel.fn`: needs a way to express the
   response in WGSL (an `Ex` builder callback?).
 - [ ] Vector node kinds on the GPU (ef-state first). dp-state's
@@ -1235,21 +1280,80 @@ rest is the sampler's own host work per chain and leapfrog step.
 - [ ] Tuning not tried yet: the workgroup size (64 is used), the memory
   layout at very large B, and a kernel variant whose state is in
   registers only, without a store between dispatches.
-- Make sure the GPU and other new features are now available in the
-  playground
+- [x] The GPU and the newer fitting features in the playground
+  (2026-11-09): see Phase 8.
 
 ### Phase 8: App -> HGF GUI modelling
 
 - [ ] Since the performance is excellent so far, the playground can be
   extended to be a fully-fledged fitting app, where the user can load
   and map data, fit a model and view and save the results.
-- [ ] Make sure the app runs with GPU if available, and allow user to
-  toggle GPU, precision, other settings/preferences.
+- [x] Make sure the app runs with GPU if available, and allow user to
+  toggle GPU, precision, other settings/preferences (2026-11-09, quick
+  wins; see below).
 - [ ] Consider allowing real-time sources and define a model for them
   (e.g. sensor data, think about including LSL streams with liblsl.dart).
 - [ ] Allow custom agents / models and parameters, to be able to e.g.
   fit something like the Iowa Gambling Task, or abitrary experimental
   data.
+
+#### Phase 8 quick wins (2026-11-09): done
+
+- **GPU in the playground.** `Fitting` runs passes on a `GpuDevice`:
+  WebGPU through `GpuFitter` on the web (its calls are asynchronous, so the
+  page keeps drawing), and on desktop wgpu-native through the new
+  `WgpuIsolateFitter` (hgf_gpu): a `GpuFitter` in a background isolate,
+  since wgpu-native's calls block. Precise passes (Laplace's Hessian, the
+  reported values) still run on the CPU pool. A model without a kernel
+  falls back to the CPU, and the result says so.
+- **Settings drawer** (`SettingsPanel`, saved with `easy_shared_preferences`):
+  theme; device (Auto / CPU f64 / GPU f32) with the adapter found or why
+  there is none; workers (default now one per logical processor, was 4;
+  `FitWorkers.defaultCount`); MAP restarts; NUTS chains, warm-up, draws,
+  target acceptance, max tree depth. The fit card shows what the next fit
+  runs and links to it.
+- **Reset button** (app bar): the preset back as it ships (parameters,
+  couplings, update scheme, data settings).
+- `GpuFitter.cancel()` and `yieldInterval`.
+
+**When the GPU pays off for one series.** Each NUTS leapfrog round is a
+GPU round trip, so a few chains lose to CPU workers; many chains win.
+Auto switches to the GPU at 32 chains (`FitConfig.autoGpuChains`).
+NUTS 500 + 500 iterations, RX 7600 XT, i7-7700:
+
+| where | chains | CPU (4 workers) | GPU |
+|---|--:|--:|--:|
+| VM, binary 2-level, 320 trials (`fit_gpu --agents 1`) | 4 | 1.3 s | 2.5 s |
+| | 16 | 2.5 s | 2.7 s |
+| | 64 | 6.5 s | 4.5 s |
+| | 256 | 21 s | 13 s |
+| Wasm page, binary 3-level, 400 trials (`?fitbench`) | 4 | 12 s | 30 s |
+| | 64 | 89 s | 37 s |
+| Flutter test VM, binary 3-level, 400 trials | 64 | 63 s | 19 s |
+| Linux desktop app, same (UI idle / a frame every vsync) | 64 | — / 93 s | 37 / 55 s |
+
+MAP on one series: 4 ms CPU vs 14 ms GPU (VM); 50–90 ms vs 90–160 ms in
+the apps.
+
+**Found:**
+- In the desktop app, wgpu-native on the UI isolate (with yields) held
+  frames at 33–110 ms; `WgpuIsolateFitter` gives 60 fps (median 16.7 ms)
+  at ~3% cost in the VM bench.
+- The Flutter desktop UI isolate still costs 1.5–2× on fits whose driver
+  runs there (GPU 19 s in the VM vs 37 s in the app, idle; CPU pool 63 vs
+  93 s with frames). Every pass's reply waits for the UI isolate's event
+  loop. Next lever: run the whole job (driver + pool + GPU) in a host
+  isolate and send only progress and results.
+- A 64 × 500 NUTS summary takes ~0.4 s (rank normalisation sorts 32k
+  draws several times per parameter), visible as a 0.5–1 s frame at the
+  end of a fit. The app no longer calls `converged()` (a second summary);
+  `diagnostics.dart` could share the z-scaled draws between R̂ and bulk
+  ESS, or the summary could move off the UI thread.
+
+**Next (Phase 8):** fit host isolate (above); a multi-agent parameter
+recovery view (simulate N agents, fit all, true-vs-estimated scatter), which
+is where the GPU shines (MAP on 2000 agents in 89 ms); the remaining
+items above.
 
 ## Upstream issues
 

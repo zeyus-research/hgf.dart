@@ -77,6 +77,11 @@ final class FitWorkers implements PassRunner {
     );
   }
 
+  /// The number of workers [spawn] starts by default: the logical
+  /// processors (`Platform.numberOfProcessors` on the VM,
+  /// `navigator.hardwareConcurrency` on the web).
+  static int get defaultCount => platform.processorCount;
+
   /// Default for [minSliceTrials].
   static const defaultMinSliceTrials = 2048;
 

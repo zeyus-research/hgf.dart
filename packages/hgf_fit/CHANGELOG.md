@@ -1,5 +1,17 @@
 ## Unreleased
 
+- `FitWorkers.defaultCount`: the logical processors `spawn` uses by
+  default (`Platform.numberOfProcessors` / `navigator.hardwareConcurrency`).
+
+- `NutsEnsemble`: the NUTS drivers now advance all chains as a state
+  machine over flat per-chain buffers (Stan's tree recursion as an
+  explicit stack) instead of one `sync*` generator per chain. The draws
+  are bit-identical to `Nuts.chain`'s; the driver's own cost per chain and
+  leapfrog step drops from 1.7–5.8 µs (400–8000 chains) to 0.7–0.9 µs and
+  no longer grows with the number of chains. GPU NUTS on 2000 agents
+  (8000 chains) goes from 139 s to 30 s.
+- `BatchedObjective.evaluateGradientPasses`: points and gradients in flat
+  arrays (one pass over the points themselves with exact gradients).
 - `PassRunner`: the fitting functions' extension methods (`fitMap`,
   `laplace`, `sampleNuts`, `sampleHierarchical`, `fitEmpiricalBayes`) are
   now on this interface, which `FitWorkers` implements, so other
