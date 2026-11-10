@@ -40,7 +40,7 @@ app builds, tests and publishes on its own.
 | path | what |
 |---|---|
 | `packages/hgf` | the core engine (pure Dart, web-safe) |
-| `packages/hgf_fit` | parameter estimation: priors, response models, batched MAP fitting (L-BFGS, Nelder–Mead) |
+| `packages/hgf_fit` | parameter estimation: priors, response models, MAP, Laplace, NUTS, hierarchical models, worker pools; export to Dart or pyhgf/PyMC code (`codegen.dart`) |
 | `packages/hgf_deep` | deep HGF networks (pyhgf's vectorised `DeepNetwork`): layers of volatile, binary and categorical nodes with learned weights; f64, matches JAX to 1e-9 |
 | `packages/hgf_gpu` | GPU kernels (phase 7): a `Network` compiled to a WGSL compute shader, run on WebGPU (browser) or wgpu-native (desktop); f32 |
 | `packages/hgf_widgets` | Flutter widgets: trajectory plots (10k trials per frame) and a network graph |

@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Export to code (`package:hgf_fit/codegen.dart`, `dart run
+  hgf_fit:export`): a network or a model, with its data and fit settings,
+  as a runnable Dart script (`DartExport`) or Python script on pyhgf and
+  PyMC (`PythonExport`). `NetworkPlan` recovers the builder calls from a
+  `Network.toJson()` snapshot and checks they rebuild it exactly.
+
 - Choice tasks. `SoftmaxReadout`: choices among options valued at
   weighted sums of beliefs (`pₖ ∝ exp(β vₖ)`; one node per option with
   `SoftmaxReadout.nodes`, or e.g. `W − L` for pyhgf's two-armed bandit),

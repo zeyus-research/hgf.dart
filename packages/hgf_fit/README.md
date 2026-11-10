@@ -312,6 +312,55 @@ Custom drivers can use the pool too: write a `Program` (a `sync*`
 generator yielding `Pass`es, or `Concurrent` streams of them) and run it
 with `workers.run(program)` or `runInline(program)`.
 
+## Export to code
+
+`package:hgf_fit/codegen.dart` turns a network (`Network.toJson()`) or a
+model (`FitCodec.encodeModel`) into a runnable script, to carry on from the
+playground (its Data card's code button) in code:
+
+```dart
+final spec = ExportSpec(
+  model: const FitCodec().encodeModel(model),
+  data: ExportData(inputs: u, responses: responses),
+  fit: const ExportMap(), // or ExportNuts(chains: 4, ...)
+);
+File('fit.dart').writeAsStringSync(DartExport(spec).script());
+File('fit.py').writeAsStringSync(PythonExport(spec).script());
+File('data.csv').writeAsStringSync(spec.data!.toCsv(spec.plan));
+```
+
+or from the command line:
+
+```sh
+dart run hgf_fit:export model.json --to python --fit nuts --data data.csv
+```
+
+- **Dart** (`package:hgf`, `hgf_fit`): `buildNetwork()` as
+  `Network()..addNodes(...)` calls with the non-default parameters only,
+  `buildModel()`, the data (embedded, and a CSV reader), and a `main` that
+  filters it and runs the fit as the playground does (MAP + Laplace, or
+  NUTS from the mode).
+- **Python** (pyhgf, PyMC): the same calls on pyhgf's `Network`, values set
+  after building written to `net.attributes`, and a PyMC model (the priors,
+  the network's log-likelihood from JAX via `pytensor.wrap_jax`) fitted
+  with `pm.find_MAP` or `pm.sample`. What pyhgf can't express is said in
+  the script: hgf.dart's eHGF MGF correction, the dp-state surprise, an
+  input node's tonic volatility set after building (pyhgf resets it).
+
+`NetworkPlan` recovers the builder calls from a snapshot (implied nodes
+folded back into `addEfState` / `addCategoricalState`) and checks that
+they rebuild it exactly; whatever they don't set becomes `setInitial` /
+`setValueCoupling` calls. Custom couplings, priors, transforms and
+response models are code, not data: they come out as stubs marked TODO.
+
+Tested: on every parity fixture, plain and with values changed after
+building, the generated Dart analyses clean and filters bit for bit like
+the original (embedded data and CSV), and its model encodes like the
+original (`test/codegen_test.dart`); a generated MAP script prints
+hgf_fit's Laplace result. The generated Python, run by pyhgf (JAX,
+float64), matches hgf.dart at the parity suite's tolerance, and its PyMC
+MAP is within 1e-3 of hgf_fit's (`melos run test:export-python`).
+
 ## Status
 
 Phase 6 of the [roadmap](../../docs/ROADMAP.md): MAP estimation, the

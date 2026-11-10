@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:hgf/hgf.dart';
+import 'package:hgf_fit/codegen.dart';
 import 'package:hgf_fit/hgf_fit.dart';
 import 'package:hgf_widgets/hgf_widgets.dart';
 
@@ -885,6 +886,45 @@ class Fitting extends ChangeNotifier {
                 )
               : Parameter(p.id, targets: p.targets, prior: p.prior),
       ],
+    );
+  }
+
+  /// What "Export as code" writes: the network and its data and, when
+  /// parameters are chosen and the fit could run, the model and the fit
+  /// with the current settings (MAP + Laplace, or NUTS from the mode, as
+  /// [fit] runs them).
+  ExportSpec exportSpec() {
+    _catchUp();
+    final params = [
+      for (final c in offered)
+        if (free.contains(c.id)) c,
+    ];
+    final withModel = canFit && params.isNotEmpty;
+    final subject = _subject(
+      includeResponses: withModel && target == FitTarget.responses,
+    );
+    final c = _config;
+    return ExportSpec(
+      network: withModel ? null : pg.network.toJson(),
+      model: withModel ? const FitCodec().encodeModel(_model(params)) : null,
+      data: ExportData(
+        inputs: subject.inputs,
+        observed: subject.observed,
+        responses: subject.responses,
+      ),
+      fit: !withModel
+          ? null
+          : method == FitMethod.map
+          ? ExportMap(restarts: c.restarts)
+          : ExportNuts(
+              restarts: c.restarts,
+              chains: c.chains,
+              warmup: c.warmup,
+              draws: c.draws,
+              targetAccept: c.targetAccept,
+              maxTreeDepth: c.maxTreeDepth,
+            ),
+      title: pg.preset.name,
     );
   }
 

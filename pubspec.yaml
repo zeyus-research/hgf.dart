@@ -43,7 +43,7 @@ melos:
       # Exit code 79 is "no tests ran" (all of a package's tests excluded by tag).
       # `\$` because melos runs this through a second (outer) shell.
       exec:
-        command: dart test --exclude-tags "performance,benchmark" 2>&1 || [ \$? -eq 79 ]
+        command: dart test --exclude-tags "performance,benchmark,pyhgf" 2>&1 || [ \$? -eq 79 ]
         concurrency: 1
       packageFilters:
         dirExists: test
@@ -162,6 +162,12 @@ melos:
         Fits in the playground's Wasm build, on Web Workers and on the main
         thread: wall time, frame intervals while fitting, and recovery of a
         simulated agent's parameters (headless Chromium).
+    test:export-python:
+      run: cd packages/hgf_fit && dart test --tags pyhgf test/codegen_python_test.dart
+      description: >-
+        The Python export run by pyhgf: every parity fixture's exported
+        network against hgf.dart (parity tolerance), and an exported PyMC fit
+        against hgf_fit's MAP (needs tool/parity/.venv: `uv sync` there).
     fixtures:
       run: cd tool/parity && uv run python gen_fixtures.py
       description: Regenerate the pyhgf parity fixtures (needs ../pyhgf and uv).

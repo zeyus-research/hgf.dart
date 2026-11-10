@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:hgf/hgf.dart';
+import 'package:hgf_fit/codegen.dart';
 import 'package:hgf_widgets/hgf_widgets.dart';
 
 import '../model/export.dart';
@@ -442,6 +443,38 @@ class DataCard extends StatelessWidget {
     await saveText(context, '${pg.preset.id}_trajectories.csv', csv);
   }
 
+  /// The network, its data and the fit set up as a runnable script, in
+  /// Dart (package:hgf, hgf_fit) or Python (pyhgf, PyMC).
+  Future<void> _exportCode(BuildContext context, {required bool python}) async {
+    final pg = playground;
+    final messenger = ScaffoldMessenger.of(context);
+    final String script;
+    try {
+      final spec =
+          fitting?.exportSpec() ??
+          ExportSpec(
+            network: pg.network.toJson(),
+            data: ExportData(inputs: pg.networkInput, observed: pg.observed),
+            title: pg.preset.name,
+          );
+      script = python ? PythonExport(spec).script() : DartExport(spec).script();
+    } on UnsupportedError catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not export: ${e.message}')),
+      );
+      return;
+    }
+    if (!context.mounted) return;
+    await saveText(
+      context,
+      python
+          ? '${pg.preset.id.replaceAll('-', '_')}.py'
+          : '${pg.preset.id}.dart',
+      script,
+      mimeType: python ? 'text/x-python' : 'text/x-dart',
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final pg = playground;
@@ -457,6 +490,23 @@ class DataCard extends StatelessWidget {
             tooltip: 'Save the trajectories as CSV',
             onPressed: pg.trajectories == null ? null : () => _export(context),
             icon: const Icon(Icons.download_outlined, size: 20),
+          ),
+          PopupMenuButton<bool>(
+            tooltip:
+                'Export as code: the network, this data and the fit as set '
+                'up',
+            icon: const Icon(Icons.code, size: 20),
+            onSelected: (python) => _exportCode(context, python: python),
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: false,
+                child: Text('Dart script (package:hgf, hgf_fit)'),
+              ),
+              PopupMenuItem(
+                value: true,
+                child: Text('Python script (pyhgf, PyMC)'),
+              ),
+            ],
           ),
           TextButton.icon(
             onPressed: () => _load(context),

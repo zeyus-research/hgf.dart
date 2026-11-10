@@ -6,4 +6,8 @@ tags:
     timeout: 4x
   # FitWorkers on Web Workers (test/web): needs the compiled workers, see
   # `melos run test:web-workers`.
+  # The Python export run by pyhgf (needs tool/parity/.venv):
+  # `melos run test:export-python`.
+  pyhgf:
+    timeout: 4x
   web-workers:

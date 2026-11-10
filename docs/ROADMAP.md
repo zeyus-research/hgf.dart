@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, HGF neural networks on the CPU and GPU, GPU ensembles of sequential fits, the playground's parameter recovery, fit host isolate and worker, categorical and dp fitting, data import/export, hgf_deep's data loading and model saving, and choice tasks)
+## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, HGF neural networks on the CPU and GPU, GPU ensembles of sequential fits, the playground's parameter recovery, fit host isolate and worker, categorical and dp fitting, data import/export, hgf_deep's data loading and model saving, choice tasks, and export to code)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -23,7 +23,7 @@ supersedes its phase list.
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`; a dp-state
     surprise (`DpSurprise`, an hgf.dart extension, 2026-11-10).
-- 658 engine tests pass (plus 135 fitting, 120 hgf_deep, 16 widget and 65
+- 658 engine tests pass (plus 142 fitting, 120 hgf_deep, 16 widget and 80
   playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
   `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
@@ -1634,7 +1634,8 @@ network per participant.
     model builder (pick a network per option, how options are valued, the
     reveals). The choice rows overlap the panel title's box (as in the
     categorical panel).
-- [ ] **Export a network / model to code** (requested 2026-11-10). Someone
+- [x] **Export a network / model to code** (requested 2026-11-10; Dart
+  and Python done 2026-11-11, see "Export to code" below). Someone
   designs a network or a whole fitting setup in the playground (structure,
   node parameters, couplings, update scheme, the response model, the free
   parameters with their priors and transforms) and exports it as a
@@ -1959,6 +1960,62 @@ browsers now that a round trip is ~0.3 ms.
   test accuracy 0.972 either way. README section "Getting started with your
   own data".
 
+#### Export to code (2026-11-11): Dart and Python done
+
+- **`package:hgf_fit/codegen.dart`.** `ExportSpec` (a network or a
+  `FitCodec` model, the data, the fit settings) → `DartExport.script()` or
+  `PythonExport.script()`; `dart run hgf_fit:export model.json --to
+  dart|python [--fit map|nuts|none] [--data file.csv]`. The playground's
+  Data card has a code button (Dart / Python): the current network with
+  every slider value, the data, and, when parameters are chosen, the model
+  and the fit as set up (method, restarts, chains, warm-up, draws, target
+  acceptance, tree depth).
+- **`NetworkPlan`** recovers the builder calls from a `Network.toJson()`
+  snapshot: `addNodes` per node with its edges to earlier nodes (each list
+  keeps its order), consecutive identical declarations merged
+  (`nNodes`), implied nodes folded back into `addEfState` (learning
+  chains; a run's fixed-rate prefix split off) and `addCategoricalState`,
+  then `setInitial` / `setInitialVector` / `set*Coupling` for what the
+  calls don't set. Parameters equal to the defaults are left out. The plan
+  is replayed on a fresh `Network` and must give the same snapshot (bit
+  for bit, edge order included) or it throws.
+- **Dart script**: `buildNetwork()`, `buildModel()`, the data embedded and
+  a CSV reader (one column per input column, `observed` flags when the data
+  has a mask, responses), and a `main` that filters and fits as the
+  playground does. The CSV keeps the values at unobserved trials: pyhgf
+  (and hgf.dart) record them in the input node's mean, so "empty = missing"
+  alone would change the trajectories.
+- **Python script** (pyhgf + PyMC): the same calls on pyhgf's `Network`
+  (`binary_parameters` and ef-state `xis`, which pyhgf ignores, become
+  attribute writes), `set_attribute` / `set_coupling` helpers, hgf_fit's
+  readouts written in JAX (`gaussian_readout_surprise`,
+  `binary_softmax_surprise`, `categorical_softmax_surprise`,
+  `softmax_surprise`; pyhgf's own functions for the observation
+  surprises), and a PyMC model: the priors, the log-likelihood through
+  `pytensor.wrap_jax` as a `pm.Potential` (pyhgf's `distribution` module is
+  deprecated), `pm.find_MAP` or `pm.sample`. Flagged in the docstring:
+  `ehgfMgfCorrection`, `DpSurprise`, `maxPosteriorPrecision`, and an input
+  node's tonic volatility or autoconnection set after building (**found
+  here**: pyhgf resets both to 0 for input nodes in `input_data`, hgf.dart
+  only when it builds, so a value set afterwards is honoured by hgf.dart
+  and dropped by pyhgf; it matters for inputs with a volatility parent).
+- **Tests.** `test/codegen_test.dart`: 123 scripts (61 fixtures plain and
+  with values changed after building, plus an IGT model) analyse clean
+  with `--fatal-infos`, filter bit for bit like the original from the
+  embedded data and from the CSV, and their models encode like the
+  original; a generated MAP script prints hgf_fit's Laplace result.
+  `test/codegen_python_test.dart` (`melos run test:export-python`, needs
+  `tool/parity/.venv`): 114 exported networks run by pyhgf JAX (float64)
+  match hgf.dart at the parity suite's tolerance (scalar nodes; the
+  `*_mgf_correction` and `dp_missing` fixtures, which need a patched
+  pyhgf, are left out), and a PyMC MAP is within 1e-3 of hgf_fit's.
+  `apps/hgf_playground/test/export_code_test.dart`: every preset exports,
+  with and without a model, and the exported plan filters like the
+  playground.
+- Left: hgf_deep networks and Julia (item 3 above); the Python export's
+  transforms are PyMC's defaults (the MAP is the same, NUTS geometry may
+  differ); `Population` priors (empirical Bayes) export as stubs.
+
 #### Choice tasks: softmax choices, closed-loop simulation, the IGT (2026-11-10): done (library)
 
 - **`SoftmaxReadout`** (hgf_fit): choices among options, option `k` with
@@ -2113,11 +2170,12 @@ the parameter recovery view, the fit host isolate (desktop), categorical
 fitting, the web's fit host worker and WebGPU queue polling (Firefox:
 100 ms → 0.25 ms per round trip), dp fitting (a dp-state surprise),
 column mapping on import and CSV exports are done (2026-11-10), and so is
-the library side of choice tasks (`SoftmaxReadout`, `simulateChoices`,
-`IowaGamblingTask`, CPU and GPU). Next are the playground's choice-task
-presets (the plan is under Phase 8's custom-models item), export to
-code (Dart, then pyhgf), real-time sources / LSL, vector node kinds on the
-GPU, and a faster dp candidate search.
+choice tasks (`SoftmaxReadout`, `simulateChoices`, `IowaGamblingTask`,
+CPU and GPU; the playground's IGT and two-armed bandit presets). Export to
+code is done (2026-11-11: Dart and pyhgf/PyMC scripts from the playground
+or `dart run hgf_fit:export`). Next are real-time sources / LSL, vector
+node kinds on the GPU, a faster dp candidate search, and the choice-task
+follow-ups (stickiness, lapse rate, a model builder).
 
 ```sh
 cd hgf.dart
@@ -2135,6 +2193,7 @@ melos run bench:playground-fit                    # the playground's fits (~3 mi
 melos run fixtures:deep && melos run bench:deep   # hgf_deep: fixtures, speed vs pyhgf
 melos run test:gpu && melos run bench:gpu-deep    # GPU kernels incl. GpuDeepNetwork
 melos run test:gpu-firefox                        # the same in Firefox (WebGPU on the real GPU)
+melos run test:export-python                      # exported Python run by pyhgf (needs tool/parity/.venv)
 melos run bench:gpu-ensemble                      # GpuDeepEnsemble (sequential fit)
 (cd apps/hgf_playground && flutter run -d chrome --wasm)   # try it
 dart compile exe packages/hgf/benchmark/bin/profile_modes.dart -o /tmp/pm && \
