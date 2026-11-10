@@ -139,7 +139,7 @@ void main() {
 
   test('parseColumn skips a header and reads NaN as missing', () {
     expect(parseColumn('u,rt\n1,0.3\n0,0.5\nNaN,0.1\n').length, 3);
-    expect(parseColumn('a\n1\n2', column: 0), [1, 2]);
+    expect(parseColumn('a\n1\n2'), [1, 2]);
     expect(() => parseColumn('1\nx\n'), throwsFormatException);
   });
 

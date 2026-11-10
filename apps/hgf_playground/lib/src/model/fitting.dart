@@ -87,8 +87,37 @@ class Fitting extends ChangeNotifier {
   /// with an inverse temperature β) rather than continuous reports.
   bool get choices => binary || categorical;
 
+  /// Whether the network clusters its input with a Dirichlet process node.
+  bool get dirichlet {
+    final net = pg.network;
+    for (final i in net.inputIdxs) {
+      if (net.kindOf(i) == NodeKind.dpState) return true;
+    }
+    return false;
+  }
+
+  /// Why only the observations can be fitted (null if responses can too):
+  /// no response model reads a Dirichlet process node's beliefs.
+  String? get responsesUnavailable => dirichlet
+      ? 'An agent\'s responses can\'t be fitted here: no response model '
+            'reads a Dirichlet process node\'s clusters.'
+      : null;
+
+  /// Why NUTS is not offered (null if it is). A dp node's likelihood jumps
+  /// where a cluster assignment flips, so it has no gradients, and each of
+  /// its trials weighs pyhgf's 20 000 cluster proposals (~1 ms): NUTS on
+  /// finite differences would take hours.
+  String? get nutsUnavailable => dirichlet
+      ? 'NUTS needs gradients; a Dirichlet process\'s likelihood jumps '
+            'wherever an observation changes cluster, and each trial costs '
+            '~1 ms, so only MAP (Nelder–Mead) is offered.'
+      : null;
+
   void setTarget(FitTarget t) {
-    if (t == target) return;
+    if (t == target ||
+        (t == FitTarget.responses && responsesUnavailable != null)) {
+      return;
+    }
     target = t;
     _cancel();
     result = null;
@@ -97,7 +126,9 @@ class Fitting extends ChangeNotifier {
   }
 
   void setMethod(FitMethod m) {
-    if (m == method) return;
+    if (m == method || (m == FitMethod.nuts && nutsUnavailable != null)) {
+      return;
+    }
     method = m;
     notifyListeners();
   }
@@ -266,6 +297,7 @@ class Fitting extends ChangeNotifier {
 
   bool get canFit =>
       unsupported == null &&
+      (method != FitMethod.nuts || nutsUnavailable == null) &&
       free.any((id) => offered.any((c) => c.id == id)) &&
       (target == FitTarget.observations || responses != null);
 
@@ -414,6 +446,7 @@ class Fitting extends ChangeNotifier {
   /// a free parameter, but no responses of its own.
   bool get canRecover =>
       unsupported == null &&
+      responsesUnavailable == null &&
       target == FitTarget.responses &&
       free.any((id) => offered.any((c) => c.id == id));
 
@@ -499,12 +532,7 @@ class Fitting extends ChangeNotifier {
     final net = pg.network;
     final kinds = {for (var i = 0; i < net.nNodes; i++) net.kindOf(i)};
     if (kinds.contains(NodeKind.dpState)) {
-      // pyhgf defines no surprise for a dp-state node, so nothing scores
-      // its observations (BatchNetwork runs it since 2026-11-10).
-      unsupported =
-          'A Dirichlet process node defines no surprise for its '
-          'observations yet, so there is nothing to fit its parameters to.';
-      candidates = const [];
+      _buildDpCandidates();
       return;
     }
     if (kinds.contains(NodeKind.efState)) {
@@ -603,6 +631,48 @@ class Fitting extends ChangeNotifier {
     candidates = out;
   }
 
+  /// α and π_s of each dp-state node, fitted to the observations' surprise
+  /// under the node's predictive mixture (`DpSurprise`, an hgf.dart
+  /// extension: pyhgf defines none).
+  void _buildDpCandidates() {
+    unsupported = null;
+    target = FitTarget.observations;
+    method = FitMethod.map;
+    final net = pg.network;
+    final base = pg.preset.build()..build();
+    final out = <FreeParam>[];
+    for (var i = 0; i < net.nNodes; i++) {
+      if (net.kindOf(i) != NodeKind.dpState) continue;
+      final label = defaultNodeLabel(i);
+      final a = math.log(base.getInitial(i, NodeField.alpha));
+      out.add(
+        FreeParam(
+          id: 'alpha_$i',
+          symbol: 'α $label',
+          help: 'Concentration of $label: how readily a new cluster opens.',
+          target: NodeTarget(i, NodeField.alpha),
+          prior: LogNormal(a, 2),
+          priorText: _logNormalText(a, 2),
+          defaultFree: true,
+        ),
+      );
+      final sp = math.log(base.getInitial(i, NodeField.sensoryPrecision));
+      out.add(
+        FreeParam(
+          id: 'pi_s_$i',
+          symbol: 'π_s $label',
+          help:
+              'Sensory precision of $label: how tightly a new cluster is '
+              'fitted to the observation that opens it.',
+          target: NodeTarget(i, NodeField.sensoryPrecision),
+          prior: LogNormal(sp, 1),
+          priorText: _logNormalText(sp, 1),
+        ),
+      );
+    }
+    candidates = out;
+  }
+
   void _defaultFree() {
     free
       ..clear()
@@ -623,6 +693,8 @@ class Fitting extends ChangeNotifier {
             ? const FirstLevelBinarySurprise()
             : categorical
             ? const CategoricalSurprise()
+            : dirichlet
+            ? const DpSurprise()
             : const TotalGaussianSurprise(),
       );
     }

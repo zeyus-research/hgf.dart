@@ -1,5 +1,12 @@
 ## Unreleased
 
+- `GpuDeepEnsemble` keeps each member's working state in workgroup memory
+  where that was measured faster (`DeepKernels.sequential(workgroupState:)`):
+  always for small states, below 128 members for medium ones (more
+  members lose occupancy). Small networks 10–40 % faster, medium 12–16 %
+  up to 16 members. `workgroupParams` puts the weights and optimiser
+  moments there too (opt-in; no consistent gain measured).
+  `benchmark/bin/deep_ensemble.dart --state` compares them.
 - `WebGpuBackend` polls the GPU queue while `read` and `idle` wait (an
   empty `queue.submit` every 8th event-loop task through a
   `MessageChannel`, then once per timer tick after 20 ms; `pokeQueue =

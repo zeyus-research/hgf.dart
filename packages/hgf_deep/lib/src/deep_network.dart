@@ -11,6 +11,8 @@ import 'optimiser.dart';
 import 'state.dart';
 import 'trace.dart';
 
+part 'deep_network_json.dart';
+
 /// A deep predictive-coding network of HGF layers with learned weights: a
 /// port of pyhgf's vectorised `DeepNetwork`.
 ///
@@ -481,6 +483,32 @@ final class DeepNetwork {
     );
     return rec.finish(List.of(out.data));
   }
+
+  /// Rebuilds a network from [toJson]'s output: the same layers, settings,
+  /// weights, per-node parameters and current beliefs, so it predicts and
+  /// learns bit for bit like the original. Custom couplings are looked up
+  /// by name in [couplings].
+  factory DeepNetwork.fromJson(
+    Map<String, Object?> json, {
+    Map<String, Coupling> couplings = const {},
+  }) => _deepNetworkFromJson(json, couplings);
+
+  /// The whole network as JSON (`jsonEncode` accepts it): its settings,
+  /// layers, weights, per-node parameters and current beliefs. Save a
+  /// trained network with it and load it back with [DeepNetwork.fromJson]:
+  ///
+  /// ```dart
+  /// File('model.json').writeAsStringSync(jsonEncode(net.toJson()));
+  /// final again = DeepNetwork.fromJson(
+  ///   jsonDecode(File('model.json').readAsStringSync()) as Map<String, Object?>,
+  /// );
+  /// ```
+  ///
+  /// The optimiser's state (Adam's moments) is not part of the network;
+  /// training a loaded network goes on with a fresh optimiser. Custom
+  /// couplings are written by name only. Non-finite numbers are written as
+  /// the strings `"NaN"`, `"Infinity"` and `"-Infinity"`.
+  Map<String, Object?> toJson() => _deepNetworkToJson(this);
 
   /// A copy of the weights and beliefs, for [restore].
   DeepSnapshot snapshot() => DeepSnapshot._(

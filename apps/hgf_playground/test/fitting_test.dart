@@ -13,15 +13,15 @@ import 'package:hgf_playground/src/ui/fit_card.dart';
 Future<FitWorkers> _inline([int? _]) => FitWorkers.spawn(count: 0);
 
 void main() {
-  test('candidates per preset; dp and ef nodes are not fitted', () {
+  test('candidates per preset; ef nodes are not fitted', () {
     for (final p in presets) {
       final f = Fitting(
         Playground(presetId: p.id, nTrials: 50),
         spawnWorkers: _inline,
       );
-      final skipped = p.id == 'dp' || p.id == 'ef';
+      final skipped = p.id == 'ef';
       expect(f.unsupported != null, skipped, reason: p.id);
-      if (skipped) continue;
+      if (skipped || p.id == 'dp') continue;
       // Every non-input continuous node's ω is free by default.
       expect(f.free, isNotEmpty, reason: p.id);
       expect(f.free.every((id) => id.startsWith('omega_')), isTrue);
@@ -314,16 +314,52 @@ void main() {
     },
   );
 
-  testWidgets('vector node presets explain why they can\'t be fitted', (
+  test('dp: alpha fitted to the observations by Nelder-Mead', () async {
+    final pg = Playground(presetId: 'dp', nTrials: 60);
+    final f = Fitting(
+      pg,
+      spawnWorkers: _inline,
+      config: const FitConfig(restarts: 0),
+    );
+    expect(f.unsupported, isNull);
+    expect(f.dirichlet, isTrue);
+    expect(f.free, {'alpha_0'});
+    expect(f.offered.map((c) => c.id), containsAll(['alpha_0', 'pi_s_0']));
+    // Observations only, MAP only.
+    f
+      ..setTarget(FitTarget.responses)
+      ..setMethod(FitMethod.nuts);
+    expect(f.target, FitTarget.observations);
+    expect(f.method, FitMethod.map);
+    expect(f.canRecover, isFalse);
+    await f.fit();
+    expect(f.error, isNull);
+    final alpha = f.result!.estimates.single;
+    expect(alpha.estimate, inInclusiveRange(1e-4, 10));
+    f.apply();
+    expect(pg.network.getInitial(0, NodeField.alpha), alpha.estimate);
+  });
+
+  testWidgets('dp offers MAP only, ef explains why it can\'t be fitted', (
     tester,
   ) async {
-    final f = Fitting(Playground(presetId: 'dp', nTrials: 20));
+    var f = Fitting(Playground(presetId: 'dp', nTrials: 20));
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(body: FitCard(fitting: f)),
       ),
     );
-    expect(find.textContaining('Dirichlet process'), findsOneWidget);
+    expect(find.text('Fit'), findsOneWidget);
+    expect(find.textContaining('only MAP (Nelder–Mead)'), findsOneWidget);
+    f = Fitting(Playground(presetId: 'ef', nTrials: 20));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: FitCard(key: UniqueKey(), fitting: f),
+        ),
+      ),
+    );
+    expect(find.textContaining('exponential-family'), findsOneWidget);
     expect(find.text('Fit'), findsNothing);
   });
 }

@@ -25,6 +25,83 @@ the one above (`W @ g(μ̂_parent)`), clamps the observations at the bottom,
 propagates prediction errors up through each layer's value and volatility
 posteriors, and learns the weights from the settled beliefs.
 
+## Getting started with your own data
+
+`example/workflow.dart` is a template for the usual steps, on the UCI wine
+data (`example/data/wine.csv`; test accuracy 0.97). In short:
+
+```dart
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:hgf_deep/datasets.dart';
+import 'package:hgf_deep/hgf_deep.dart';
+
+// Load: a CSV with a header row. Every column but the target is a feature
+// (or pass `features:`); text labels become classes 0, 1, … (`classNames`);
+// rows with missing values are dropped. A real-valued target, or several,
+// make a regression set.
+final data = Dataset.fromCsv(
+  File('wine.csv').readAsStringSync(),
+  target: ['cultivar'],
+);
+
+// Split into training, validation and test sets; scale the inputs with the
+// training set's statistics.
+final (train: rest, test: testRaw) = split(data, testFraction: 0.2, seed: 1);
+final (train: trainRaw, test: validRaw) = split(rest, testFraction: 0.25);
+final scale = Standardiser.fit(trainRaw.x);
+final train = trainRaw.withX(scale.apply(trainRaw.x));
+final valid = validRaw.withX(scale.apply(validRaw.x));
+
+final net = DeepNetwork()
+  ..addLayer(data.classes, kind: LayerKind.categorical) // output first
+  ..addLayer(16, coupling: CouplingFn.tanh, volatilityParent: false)
+  ..addLayer(data.x.cols)                                // inputs last
+  ..weightInitialisation(const XavierInit(), seed: 1);
+
+// Train: one sample at a time (`fit`), or in minibatches (`batchUpdate`).
+// Keep the best network on the validation set.
+final adam = Adam(1e-3);
+var best = double.infinity;
+DeepSnapshot? bestNet;
+for (var epoch = 1; epoch <= 60; epoch++) {
+  final e = shuffled(train, seed: epoch);
+  net.fit(e.x, e.y, optimiser: adam);
+  // or: for (final b in minibatches(train, 16, seed: epoch)) {
+  //       net.batchUpdate(b.x, b.y, optimiser: adam);
+  //     }
+  final loss = crossEntropy(net.predict(valid.x), valid.y);
+  if (loss < best) (best, bestNet) = (loss, net.snapshot());
+}
+net.restore(bestNet!);
+
+// Save the network with its input scaling, and load it back.
+File('model.json').writeAsStringSync(
+  jsonEncode({'network': net.toJson(), 'scale': scale.toJson()}),
+);
+final saved = jsonDecode(File('model.json').readAsStringSync()) as Map;
+final model = DeepNetwork.fromJson(saved['network'] as Map<String, Object?>);
+final s = Standardiser.fromJson(saved['scale'] as Map<String, Object?>);
+final p = model.predict(s.apply(newRows)); // class probabilities per row
+```
+
+| task | tools |
+|---|---|
+| load data | `Dataset.fromCsv` (pure Dart: read the text with `dart:io`, `fetch` or a file picker), `CsvData`, or build `Matrix`es yourself (`Matrix.fromRows`) |
+| split, shuffle, batch | `split`, `shuffled`, `minibatches`, `Dataset.subset` |
+| scale inputs | `Standardiser` (`fit` on the training set, `apply` to every set, `toJson` to save) |
+| train | `fit` (sequential, one sample at a time, as pyhgf's `fit`), `batchUpdate` (one step per minibatch), any `Optimiser` (`Sgd`, `Adam`) |
+| early stopping, checkpoints | `snapshot` / `restore` (in memory), `toJson` / `DeepNetwork.fromJson` (to disk) |
+| evaluate | `accuracy`, `confusionMatrix` + `formatConfusion`, `crossEntropy`, `mse`, `r2`, `predictedClasses` |
+| output layer | classification: `LayerKind.categorical` (3+ classes) or `LayerKind.binary` (two classes, one column); regression: the default volatile layer |
+| on the GPU | `GpuDeepNetwork` (minibatches, `trainEpoch`) and `GpuDeepEnsemble` (many sequential fits at once), in `hgf_gpu` |
+
+`toJson` saves the layers, settings, weights, per-node parameters and the
+current beliefs, so a loaded network predicts and keeps learning bit for bit
+like the original; the optimiser's moments are not saved (training goes on
+with a fresh one).
+
 ## Examples
 
 Run from `packages/hgf_deep` (`melos run examples:deep` runs them all
@@ -35,6 +112,7 @@ briefly):
 | `toy_classification.dart [xor\|moons\|circles\|spirals\|all]` | 2-D classification, binary or 3-way categorical output; prints a confusion matrix and an ASCII map of the decision regions | XOR 1.000, moons 0.987, circles 1.000, spirals 1.000 |
 | `regression.dart` | noisy `sin(x)`, 1-16-16-1 tanh | R² 0.963 (noise floor MSE 0.010, reached 0.018) |
 | `digits.dart` | UCI handwritten digits (8×8, ten classes), 64-32-10 | accuracy 0.969 |
+| `workflow.dart [--minibatch] [--epochs n]` | your own CSV, end to end: load, split, standardise, train with early stopping, evaluate, save and reload (UCI wine, 13 features, three cultivars) | accuracy 0.972 |
 | `volatility_effect.dart` | the same networks with and without hidden volatility levels, under each update scheme, with and without the fixes below | see output |
 | `../hgf_gpu/example/deep_digits_gpu.dart` | digits on the GPU: minibatches against the CPU, and 64 seeds fitted sequentially at once | 0.976; 0.964 mean over seeds |
 

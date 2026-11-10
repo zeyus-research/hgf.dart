@@ -143,6 +143,12 @@ final class DpScratch {
   final Float64List _pre, _iso, _w, _ll, _sample;
   final Int32List _idx;
 
+  /// The log of the base measure's predictive density at the value of the
+  /// last [dpCandidate] call: `log(Σⱼ N(x; μⱼ, σⱼ) / n)` over the
+  /// proposals, a Monte Carlo estimate of `∫ N(x; θ) G₀(dθ)` (what
+  /// [dpSurprise] weighs a new cluster by).
+  double logBaseDensity = double.nan;
+
   // Per row r = slot * clusters + cluster: the cluster's density at each
   // proposal's mean, and the proposal's isolation factor from it; computed
   // for (_rowMean[r], _rowSigma[r]) (NaN: not yet).
@@ -255,7 +261,6 @@ void _clusterRows(DpProposals p, DpScratch s, int i, double m, double sd) {
     if (q > iHi) iHi = q;
     if (r != r || q != q) nan = true;
   }
-  if (nan) return (double.nan, double.nan);
   final rScale = rHi - rLo, iScale = iHi - iLo;
 
   // 3. The new observation's likelihood under each proposal, normalised,
@@ -268,6 +273,10 @@ void _clusterRows(DpProposals p, DpScratch s, int i, double m, double sd) {
     ll[j] = l;
     sum += l;
   }
+  s.logBaseDensity = sum > 0.0
+      ? math.log(sum / n)
+      : _logMeanDensity(value, mu, sigma2, logNorm);
+  if (nan) return (double.nan, double.nan);
   if (sensoryPrecision == 1.0) {
     for (var j = 0; j < n; j++) {
       final x = w[j] * (ll[j] / sum);
@@ -378,4 +387,91 @@ void _swap(Int32List a, int i, int j) {
   final t = a[i];
   a[i] = a[j];
   a[j] = t;
+}
+
+/// The surprise of [value] under a dp-state node's predictive distribution
+/// (the Chinese-restaurant process mixture), before the value is assigned:
+///
+/// `−log(Σᵢ nᵢ/(α+N) · N(x; μᵢ, σᵢ) + α/(α+N) · p₀(x))`
+///
+/// over the open clusters `i` (`active[i] = 1`), where
+/// `p₀(x) = ∫ N(x; θ) G₀(dθ)` is the base measure's predictive density
+/// ([DpScratch.logBaseDensity], passed as [logBaseDensity]). Cluster `i` is
+/// read at `start + i * stride` of [means], [sigmas], [counts] and [active]
+/// (`stride` is 1 for a `Network` and the batch width for a
+/// `BatchNetwork`).
+///
+/// **An hgf.dart extension:** pyhgf defines no surprise for a dp-state
+/// node. The new-cluster term uses the base measure, not the candidate
+/// cluster the node would open: the candidate is fitted to `x` itself, so
+/// weighing `x` by it rewards opening a cluster per observation (on three
+/// well-separated clusters, α = 10⁴ would score better than α = 0.1).
+/// Computed in log space (log-sum-exp), so it stays finite far from every
+/// cluster, where the densities underflow. NaN if any term is NaN.
+double dpSurprise(
+  double value,
+  double alpha,
+  double nTotal,
+  Float64List means,
+  Float64List sigmas,
+  Float64List counts,
+  Float64List active,
+  int start,
+  int stride,
+  int count,
+  double logBaseDensity,
+) {
+  // Log weights and densities; the normaliser log(α + N) is added at the
+  // end. Terms with zero weight (closed or empty clusters) are left out.
+  final base = math.log(alpha) + logBaseDensity;
+  if (base.isNaN) return double.nan;
+  var hi = base;
+  // Two passes over the (few) clusters: the largest term, then the sum.
+  for (var i = 0, q = start; i < count; i++, q += stride) {
+    final w = counts[q] * active[q];
+    if (w.isNaN) return double.nan;
+    if (w == 0.0) continue;
+    final l = math.log(w) + _normLogPdf(value, means[q], sigmas[q]);
+    if (l.isNaN) return double.nan;
+    if (l > hi) hi = l;
+  }
+  if (hi == double.negativeInfinity) return double.infinity;
+  var sum = math.exp(base - hi);
+  for (var i = 0, q = start; i < count; i++, q += stride) {
+    final w = counts[q] * active[q];
+    if (w == 0.0) continue;
+    sum += math.exp(math.log(w) + _normLogPdf(value, means[q], sigmas[q]) - hi);
+  }
+  return math.log(alpha + nTotal) - hi - math.log(sum);
+}
+
+/// `log N(x; loc, scale)`.
+double _normLogPdf(double x, double loc, double scale) {
+  final s2 = scale * scale, d = x - loc;
+  return (math.log(_twoPi * s2) + d * d / s2) * -0.5;
+}
+
+/// `log(Σⱼ N(x; μⱼ, σⱼ) / n)` in log space, for when every density
+/// underflows.
+double _logMeanDensity(
+  double x,
+  Float64List mu,
+  Float64List sigma2,
+  Float64List logNorm,
+) {
+  final n = mu.length;
+  var hi = double.negativeInfinity;
+  for (var j = 0; j < n; j++) {
+    final d = x - mu[j];
+    final l = (logNorm[j] + d * d / sigma2[j]) * -0.5;
+    if (l.isNaN) return double.nan;
+    if (l > hi) hi = l;
+  }
+  if (hi == double.negativeInfinity) return hi;
+  var sum = 0.0;
+  for (var j = 0; j < n; j++) {
+    final d = x - mu[j];
+    sum += math.exp((logNorm[j] + d * d / sigma2[j]) * -0.5 - hi);
+  }
+  return hi + math.log(sum / n);
 }

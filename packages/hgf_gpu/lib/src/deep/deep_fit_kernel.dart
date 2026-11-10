@@ -55,12 +55,16 @@ extension SequentialFitKernel on DeepKernels {
     DeepOptimiserKind? optimiser,
     int workgroupSize = 64,
   }) {
-    if (_pb.isEmpty) {
+    if (!sequentialLayout) {
       throw StateError('Build the kernels with DeepKernels.sequential.');
     }
     final wg = '${workgroupSize}u';
     final top = nLayers - 1;
-    final b = StringBuffer()
+    final ws = workgroupState, wp = workgroupParams;
+    final b = StringBuffer();
+    if (ws) b.writeln('var<workgroup> WS: array<f32, ${stateFloats}u>;');
+    if (wp) b.writeln('var<workgroup> WP: array<f32, ${paramFloats}u>;');
+    b
       ..writeln('@compute @workgroup_size($workgroupSize)')
       ..writeln(
         'fn main(@builtin(local_invocation_id) lid3: vec3<u32>, '
@@ -73,8 +77,21 @@ extension SequentialFitKernel on DeepKernels {
       ..writeln('  let sb = member * ${stateFloats}u;')
       ..writeln('  let xb = member * U.xStride;')
       ..writeln('  let yb = member * U.yStride;')
-      ..writeln('  let ob = member * U.outStride;')
-      ..writeln('  for (var row = U.start; row < U.end; row++) {');
+      ..writeln('  let ob = member * U.outStride;');
+    if (ws) {
+      b
+        ..writeln('  for (var i = lid; i < ${stateFloats}u; i += $wg) {')
+        ..writeln('    WS[i] = S[sb + i];')
+        ..writeln('  }');
+      if (wp) {
+        b
+          ..writeln('  for (var i = lid; i < ${paramFloats}u; i += $wg) {')
+          ..writeln('    WP[i] = P[pb + i];')
+          ..writeln('  }');
+      }
+      b.writeln('  workgroupBarrier();');
+    }
+    b.writeln('  for (var row = U.start; row < U.end; row++) {');
 
     void nodes(int n, String body) {
       b
@@ -86,7 +103,12 @@ extension SequentialFitKernel on DeepKernels {
 
     // Phases hand data over through storage buffers, which only
     // storageBarrier orders (workgroupBarrier covers workgroup memory).
-    void barrier() => b.writeln('    storageBarrier();');
+    // With the state in workgroup memory, the phases within a row hand
+    // over only WS (the weights and carried beliefs in P are written by
+    // the optimiser and carry phases and read in the next row, after the
+    // row's final barrier, which orders both).
+    void barrier() =>
+        b.writeln(ws ? '    workgroupBarrier();' : '    storageBarrier();');
 
     // Prediction sweep.
     nodes(topSize, _topBody('X[xb + row * ${topSize}u + i]'));
@@ -200,10 +222,22 @@ extension SequentialFitKernel on DeepKernels {
     b.writeln('    if ((U.flags & ${DeepFitFlags.updatePrecisions}u) != 0u) {');
     _sequentialCarry(b, wg);
     b.writeln('    }');
-    barrier();
-    b
-      ..writeln('  }')
-      ..writeln('}');
+    if (!wp) b.writeln('    storageBarrier();');
+    if (ws) b.writeln('    workgroupBarrier();');
+    b.writeln('  }');
+    if (ws) {
+      b
+        ..writeln('  for (var i = lid; i < ${stateFloats}u; i += $wg) {')
+        ..writeln('    S[sb + i] = WS[i];')
+        ..writeln('  }');
+    }
+    if (wp) {
+      b
+        ..writeln('  for (var i = lid; i < ${paramFloats}u; i += $wg) {')
+        ..writeln('    P[pb + i] = WP[i];')
+        ..writeln('  }');
+    }
+    b.writeln('}');
     return _kernel(
       'sequential fit${optimiser == null ? '' : ' (${optimiser.name})'}',
       b.toString(),

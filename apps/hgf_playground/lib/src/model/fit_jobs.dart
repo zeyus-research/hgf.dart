@@ -333,6 +333,9 @@ final class ParameterFitJob extends FitJobSpec<FitOutcome> {
     final map = await workers.fitMap(
       model,
       [subject],
+      // Without exact gradients (a dp node: piecewise smooth), a
+      // derivative-free optimiser.
+      optimizer: model.hasExactGradients ? const Lbfgs() : const NelderMead(),
       restarts: config.restarts,
       random: math.Random(1),
     );

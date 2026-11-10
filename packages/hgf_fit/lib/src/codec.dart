@@ -186,6 +186,7 @@ final class FitCodec {
         'TotalGaussianSurprise' => const TotalGaussianSurprise(),
         'FirstLevelBinarySurprise' => const FirstLevelBinarySurprise(),
         'CategoricalSurprise' => const CategoricalSurprise(),
+        'DpSurprise' => const DpSurprise(),
         final name =>
           responseFunctions[name] ??
               (throw ArgumentError(

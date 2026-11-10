@@ -1,5 +1,8 @@
 ## Unreleased
 
+- `DpSurprise` is serialisable (`ObservationSurprise(DpSurprise())`), so dp
+  networks can be fitted (α, sensory precision); without exact gradients,
+  use `NelderMead` for MAP (`test/dp_fit_test.dart`).
 - `FitCodec.encodeTarget` / `decodeTarget` are public (a parameter's
   target as JSON on its own).
 - `Lbfgs` and `NelderMead` run as explicit state machines instead of

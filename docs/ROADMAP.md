@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, HGF neural networks on the CPU and GPU, GPU ensembles of sequential fits, and the playground's parameter recovery, fit host isolate and worker, and categorical fitting)
+## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, HGF neural networks on the CPU and GPU, GPU ensembles of sequential fits, the playground's parameter recovery, fit host isolate and worker, categorical and dp fitting, data import/export, and hgf_deep's data loading and model saving)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -21,8 +21,10 @@ supersedes its phase list.
     data, bit-identical to `Network` (W4); ef-state and categorical nodes
     too since 2026-11-10, and dp-state (so every node kind);
   - surprise and response functions (`Network.surprise`), generative
-    sampling (`Network.sample`), `saveState`/`restoreState`.
-- 632 engine tests pass (plus 112 fitting, 16 widget and 27 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+    sampling (`Network.sample`), `saveState`/`restoreState`; a dp-state
+    surprise (`DpSurprise`, an hgf.dart extension, 2026-11-10).
+- 657 engine tests pass (plus 126 fitting, 120 hgf_deep, 16 widget and 65
+  playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
   `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
@@ -88,6 +90,9 @@ supersedes its phase list.
   The sequential `fit` runs on the GPU for ensembles (`GpuDeepEnsemble`,
   2026-11-10): one workgroup per network, 1024 medium networks ~200×
   faster than one core runs them. See "Sequential fit on the GPU".
+  Networks save to and load from JSON, and `Dataset.fromCsv`,
+  `minibatches` and `example/workflow.dart` cover the usual workflow on
+  your own data (see "Data loading, model saving").
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -625,8 +630,8 @@ First version done 2026-11-06.
     ~2400 (the P17 structure: binary HGFs under a volatility parent).
 - [x] Fitting view (2026-11-07): see Phase 6.
 - [ ] Next: zoom and pan on the time axis;
-      editable structure (add/remove nodes); export (CSV of trajectories,
-      PNG); a guided "lessons" mode for teaching; measure desktop (GPU)
+      editable structure (add/remove nodes); export as PNG (CSV of the
+      trajectories, fit results and recoveries: done 2026-11-10); a guided "lessons" mode for teaching; measure desktop (GPU)
       frame times (`flutter run --profile --dart-define=HGF_BENCH=10000`);
       if 10k-trial drags must hold 60 fps on Wasm, filter in a web worker
       or the engine needs to get faster there.
@@ -1002,7 +1007,8 @@ First part done 2026-11-06: MAP estimation.
     (2026-11-10, see Phase 8); dp-state still has none;
   - NUTS in the playground takes 11–18 s: fewer iterations by default,
     or more chains than workers;
-  - responses in the same CSV as the observations (a second column);
+  - [x] responses in the same CSV as the observations (a second column;
+    2026-11-10, the column-mapping dialog, see Phase 8);
   - hierarchical fits in the playground (several simulated agents).
 
 ### Phase 7: GPU probe (go/no-go): **go** (2026-11-07)
@@ -1560,9 +1566,28 @@ network per participant.
   medium, 256 for wide; the default is twice the largest layer, clamped to
   32–256.
 - **What bounds one network:** a small network's row takes ~26 µs (13
-  barrier-separated phases, each a chain of dependent global loads). Next
-  lever: keep a member's working state (and a small network's weights) in
-  workgroup memory, which fits up to medium networks.
+  barrier-separated phases, each a chain of dependent global loads).
+- **Workgroup memory (2026-11-10):** `DeepKernels.sequential(workgroupState:
+  true)` keeps a member's working state in `var<workgroup> WS` (loaded
+  once per call, stored back at the end; phases within a row then need
+  only `workgroupBarrier`, and one `storageBarrier` per row orders the
+  weights and carried beliefs in `P`). `workgroupParams` moves `P` there
+  too. Fits in the 16 KB every device offers: small 1.7 KB of state
+  (+2.9 KB parameters), medium 12 KB (parameters 80 KB: no), wide 44 KB
+  (no). `deep_ensemble --state`, RX 7600 XT, 500 rows, Adam, µs per
+  member-sample (storage / state / state + parameters):
+
+  | network | 1 member | 16 | 256 | 1024 | 4096 |
+  |---|--:|--:|--:|--:|--:|
+  | small | 19.8 / 12.2 / 15.7 | 1.51 / 1.03 / 0.86 | 0.218 / 0.160 / 0.148 | 0.148 / 0.118 / 0.134 | 0.117 / 0.106 / 0.111 |
+  | medium | 44.4 / 37.4 / — | 2.83 / 2.49 / — | 0.629 / 0.703 / — | 0.619 / 0.723 / — | 0.591 / 0.655 / — |
+
+  Default (`GpuDeepEnsemble._workgroupPlan`): the state in workgroup
+  memory when it is ≤ 4 KB, or below 128 members (12 KB per workgroup
+  costs occupancy at scale); the parameters only on request (no
+  consistent gain). One small network is now ~CPU speed (12 vs 10.6 µs per
+  sample on one core); the rest is barrier latency, 13 phases per row.
+  Tested in all three placements on wgpu-native and SwiftShader.
 
 ### Phase 8: App -> HGF GUI modelling
 
@@ -1577,7 +1602,9 @@ network per participant.
 - [ ] Allow custom agents / models and parameters, to be able to e.g.
   fit something like the Iowa Gambling Task, or abitrary experimental
   data.
-- [ ] **dp-state surprise, to fit dp networks** (agreed 2026-11-10).
+- [x] **dp-state surprise, to fit dp networks** (agreed 2026-11-10; done
+  the same day, see "dp fitting" below: the new-cluster term became the
+  base measure's predictive, not the candidate).
   **Diverges from pyhgf**, which defines no surprise for a dp-state node
   (its node surprise is NaN). Use the predictive mixture of the
   Chinese-restaurant process, `−log(Σᵢ nᵢ/(α+N) N(x; μᵢ, σᵢ) + α/(α+N)
@@ -1755,9 +1782,9 @@ the apps.
   in Chromium went from 37 s (Phase 8 quick wins) to 24–26 s; in Firefox
   it now beats its CPU workers (33 vs 63 s).
 
-**Next (Phase 8):** the remaining items above; a dp-state surprise (its
-batched kernels are done, see below); a categorical readout on the GPU; re-measure `FitConfig.autoGpuChains` /
-`autoGpuMapRuns` in browsers now that a round trip is ~0.3 ms.
+**Next (Phase 8):** the remaining items above; a categorical readout on
+the GPU; re-measure `FitConfig.autoGpuChains` / `autoGpuMapRuns` in
+browsers now that a round trip is ~0.3 ms.
 
 
 #### Deep network examples and playground page (2026-11-10): done
@@ -1830,6 +1857,51 @@ batched kernels are done, see below); a categorical readout on the GPU; re-measu
   would ignore the jumps, which suggests Nelder–Mead or NUTS on finite
   differences.
 
+#### dp fitting, data import/export, deep-learning quick start (2026-11-10): done
+
+- **dp-state surprise** (`dpSurprise` in `dirichlet_process.dart`, the
+  node's `NodeField.surprise`, `DpSurprise`): the observation's surprise
+  under the Chinese-restaurant-process predictive, computed before the
+  assignment, in log space; 0 on a missing observation; bit-identical in
+  `BatchNetwork`. **Changed from the agreed formula:** the new-cluster term
+  is the base measure's predictive `p₀(x)` (the mean density of the 20 000
+  proposals, which the step computes anyway), not the candidate
+  `N(x; μ*, σ*)`. The candidate is fitted to `x`, so with it α = 10⁴ scored
+  better than α = 0.1 on three clean clusters; with `p₀` the NLL over α has
+  its minimum where the node finds the three clusters (α ≈ 0.01–0.3, 300
+  draws). Written up as [P20](upstream/README.md#p20).
+  `Trajectories.nodeSurprise` stays NaN (pyhgf), so the parity tests need
+  no switch.
+- **Fitting dp networks:** hgf_fit already falls back to finite
+  differences without exact gradients; `ObservationSurprise(DpSurprise())`
+  serialises. The playground offers α and π_s per dp node, to the
+  observations only (no response model reads clusters), MAP only, by
+  Nelder–Mead; NUTS is disabled with the reason. **Cost:** a dp
+  element-trial is ~1 ms on AOT and the JIT VM alike (`dp_cost.dart`):
+  pyhgf's candidate search evaluates ~60 000 exps per trial (590 µs with
+  every cluster row cached, +410 µs for the row of the cluster that
+  learned). A Nelder–Mead MAP of one subject × 100 trials took 42 passes,
+  ~20 s on the JIT VM; NUTS on finite differences would take hours. A 2×
+  is possible with loop fusion; an order of magnitude would need fewer
+  proposals (a deliberate divergence from pyhgf).
+- **Playground data import/export:** `parseTable` (comma, semicolon with
+  decimal commas, tab or whitespace; quoted cells; header detection; empty,
+  `NA`, `NaN` … as missing; text columns set aside) replaces the old
+  splitter, which collapsed empty cells (`1,,2` read as two values). A file
+  with several numeric columns opens a column-mapping dialog (observations,
+  and optionally responses for fitting, guessed from the names, with a
+  preview). Exports (`export.dart`, `FilePicker.saveFile`, a download on
+  the web): the trajectories in wide format with pyhgf's `to_pandas()`
+  names, a fit's estimates (and NUTS draws), a recovery's truth and
+  estimates per agent.
+- **hgf_deep quick start:** `DeepNetwork.toJson` / `fromJson` (bit-identical
+  predictions and continued learning), `Dataset.fromCsv` / `CsvData`,
+  `minibatches`, `Standardiser` JSON, and `example/workflow.dart` on the UCI
+  wine data (load, split train/validation/test, standardise, train with
+  early stopping by `fit` or minibatches, evaluate, save, reload, predict):
+  test accuracy 0.972 either way. README section "Getting started with your
+  own data".
+
 ## Upstream issues
 
 Found while porting and optimising; none reported yet. Details, suggested
@@ -1878,6 +1950,9 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
         μ₁ explodes (JAX and rshgf; found with the playground, 2026-11-06).
   - [ ] [P18](upstream/README.md#p18) `DeepNetwork`'s volatility levels run
         away (all three updates, frozen weights too), then NaN (2026-11-09).
+  - [ ] [P20](upstream/README.md#p20) dp-state defines no surprise, so dp
+        networks can't be fitted (suggestion: the CRP predictive with the
+        base measure for new clusters; 2026-11-10).
 - **rshgf**
   - [ ] [R1](upstream/README.md#r1) ef-state ignores `observed`; univariate
         fixed rate only.
@@ -1946,13 +2021,17 @@ networks, GPU tangents and a GPU transport for hgf_fit) are listed there.
 The HGF neural networks have a CPU baseline (`packages/hgf_deep`,
 2026-11-09, parity with JAX f64) and run batched on the GPU
 (`GpuDeepNetwork`, 2026-11-10), and the sequential `fit` runs on the GPU
-for ensembles (`GpuDeepEnsemble`, 2026-11-10). Open there: workgroup
-memory for the sequential kernel (one network is still CPU-speed), tile
-sizes for small batches, and a browser benchmark. Phase 8: the parameter
-recovery view, the fit host isolate (desktop), categorical fitting, the
-web's fit host worker and WebGPU queue polling (Firefox: 100 ms → 0.25 ms
-per round trip) are done (2026-11-10); next are the app's remaining Phase 8
-items and a dp-state surprise (to fit dp networks).
+for ensembles (`GpuDeepEnsemble`, 2026-11-10). The sequential kernel keeps
+its state in workgroup memory where that pays (2026-11-10); open there:
+tile sizes for small batches, and a browser benchmark. hgf_deep saves and
+loads networks and reads CSV datasets (`example/workflow.dart`). Phase 8:
+the parameter recovery view, the fit host isolate (desktop), categorical
+fitting, the web's fit host worker and WebGPU queue polling (Firefox:
+100 ms → 0.25 ms per round trip), dp fitting (a dp-state surprise),
+column mapping on import and CSV exports are done (2026-11-10); next are
+the app's remaining Phase 8 items (custom models such as the Iowa Gambling
+Task, real-time sources / LSL), vector node kinds on the GPU, and a faster
+dp candidate search.
 
 ```sh
 cd hgf.dart

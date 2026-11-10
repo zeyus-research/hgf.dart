@@ -191,6 +191,7 @@ void main() {
       int? workgroupSize,
       bool carryPrecision = true,
       int minFull = 2,
+      (bool, bool)? memory,
     }) async {
       DeepNetwork net(int seed) => randomNetwork(
         sizes,
@@ -212,6 +213,8 @@ void main() {
         backend!,
         nets,
         workgroupSize: workgroupSize,
+        workgroupState: memory?.$1,
+        workgroupParams: memory?.$2,
       );
       final cpuOpt = [for (var e = 0; e < members; e++) optimiser()];
       final gpuOpt = optimiser();
@@ -292,15 +295,40 @@ void main() {
       );
     }
 
+    // State and parameters in storage, the state in workgroup memory,
+    // and both there.
+    const memories = {
+      'storage': (false, false),
+      'workgroup state': (true, false),
+      'workgroup state + params': (true, true),
+    };
     for (final update in DeepVolatilityUpdate.values) {
-      test('${update.name}, Adam, 6 members on their own data', () async {
+      for (final MapEntry(key: where, value: memory) in memories.entries) {
+        test('${update.name}, Adam, 6 members on their own data, '
+            '$where', () async {
+          await check(
+            sizes: [3, 12, 9, 4],
+            members: 6,
+            rows: 120,
+            shared: false,
+            optimiser: () => Adam(1e-3),
+            update: update,
+            memory: memory,
+          );
+        });
+      }
+    }
+    for (final MapEntry(key: where, value: memory) in memories.entries) {
+      test('SGD over layers wider than the workgroup, $where', () async {
         await check(
-          sizes: [3, 12, 9, 4],
-          members: 6,
-          rows: 120,
-          shared: false,
-          optimiser: () => Adam(1e-3),
-          update: update,
+          sizes: [3, 40, 10, 2],
+          members: 3,
+          rows: 60,
+          shared: true,
+          optimiser: () => const Sgd(0.01),
+          workgroupSize: 32,
+          memory: memory,
+          minFull: 1,
         );
       });
     }

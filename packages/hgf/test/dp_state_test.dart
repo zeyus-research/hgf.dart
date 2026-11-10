@@ -352,6 +352,116 @@ void main() {
     });
   });
 
+  group('surprise (hgf.dart extension)', () {
+    final x = mixture(120);
+
+    /// The base measure's predictive density at [v], by brute force.
+    double baseDensity(double v) {
+      final p = DpProposals.instance;
+      var sum = 0.0;
+      for (var j = 0; j < p.mu.length; j++) {
+        final z = (v - p.mu[j]) / p.sigma[j];
+        sum += math.exp(-0.5 * z * z) / (p.sigma[j] * math.sqrt(2 * math.pi));
+      }
+      return sum / p.mu.length;
+    }
+
+    test('first trial: the base measure alone', () {
+      final net = dpNetwork()..inputData(x.sublist(0, 1), record: false);
+      expect(
+        net.get(0, NodeField.surprise),
+        closeTo(-math.log(baseDensity(x[0])), 1e-12),
+      );
+    });
+
+    test('matches the mixture computed from the state before each trial', () {
+      final net = dpNetwork();
+      for (var t = 0; t < 60; t++) {
+        final alpha = net.get(0, NodeField.alpha);
+        final nTotal = net.get(0, NodeField.nTotal);
+        final counts = net.getVector(0, VectorField.n);
+        final active = net.getVector(0, VectorField.activated);
+        double pdf(double v, double m, double sd) =>
+            math.exp(-0.5 * ((v - m) / sd) * ((v - m) / sd)) /
+            (sd * math.sqrt(2 * math.pi));
+        var mix = alpha / (alpha + nTotal) * baseDensity(x[t]);
+        for (var i = 0; i < 3; i++) {
+          // The cluster's prediction, as the dp step forms it.
+          final xi = net.getVector(1 + i, VectorField.xis);
+          final sd = math.sqrt(xi[1] - xi[0] * xi[0]);
+          mix +=
+              counts[i] * active[i] / (alpha + nTotal) * pdf(x[t], xi[0], sd);
+        }
+        net.step(Float64List.fromList([x[t]]));
+        expect(
+          net.get(0, NodeField.surprise),
+          closeTo(-math.log(mix), 1e-9),
+          reason: 'trial $t',
+        );
+      }
+    });
+
+    test('stays finite far from every cluster', () {
+      final net = dpNetwork()..inputData(x, record: false);
+      net.step(Float64List.fromList([1e3]));
+      final s = net.get(0, NodeField.surprise);
+      expect(s.isFinite, isTrue);
+      expect(s, greaterThan(100));
+    });
+
+    test('DpSurprise sums it; missing observations add nothing', () {
+      final observed = Float64List(x.length)..fillRange(0, x.length, 1);
+      for (var t = 5; t < x.length; t += 7) {
+        observed[t] = 0;
+      }
+      final traj = dpNetwork().inputData(
+        x,
+        observed: observed,
+        fields: const [NodeField.surprise],
+      )!;
+      final perTrial = Float64List(x.length);
+      final total = dpNetwork().surprise(
+        x,
+        const DpSurprise(),
+        observed: observed,
+        perTrial: perTrial,
+      );
+      final recorded = traj.series(0, NodeField.surprise);
+      expect(perTrial, recorded);
+      for (var t = 5; t < x.length; t += 7) {
+        expect(perTrial[t], 0.0);
+      }
+      expect(total, closeTo(recorded.reduce((a, b) => a + b), 1e-9));
+      expect(const DpSurprise().supportsGradients, isFalse);
+      expect(
+        () => Network().addNodes().surprise(Float64List(3), const DpSurprise()),
+        throwsArgumentError,
+      );
+    });
+
+    test('BatchNetwork matches Network bit for bit, per alpha', () {
+      final alphas = Float64List.fromList([0.01, 0.3, 5.0]);
+      final batch = BatchNetwork(dpNetwork(), alphas.length)
+        ..setInitial(0, NodeField.alpha, alphas);
+      final totals = batch.surprise(x, const DpSurprise());
+      for (var e = 0; e < alphas.length; e++) {
+        final net = dpNetwork()..setInitial(0, NodeField.alpha, alphas[e]);
+        expect(totals[e], net.surprise(x, const DpSurprise()), reason: '$e');
+      }
+    });
+
+    test('a sensible alpha explains three clusters best', () {
+      final mix = mixture(300);
+      double nll(double alpha) =>
+          (dpNetwork(k: 6)..setInitial(0, NodeField.alpha, alpha)).surprise(
+            mix,
+            const DpSurprise(),
+          );
+      final small = nll(0.1), huge = nll(1e4);
+      expect(small, lessThan(huge));
+    });
+  });
+
   group('BatchNetwork', () {
     // Bit-for-bit agreement with Network on the fixtures is in batch_test.
     final x = mixture(60);

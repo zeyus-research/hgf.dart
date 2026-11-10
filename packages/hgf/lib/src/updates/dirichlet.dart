@@ -38,12 +38,19 @@ extension on Network {
   /// other (a NaN one opens a NaN cluster;
   /// [P14](../../../../docs/upstream/README.md#p14)). Here it is skipped:
   /// no cluster observes it and the counts don't change.
+  ///
+  /// Records the observation's surprise under the predictive mixture in
+  /// [NodeField.surprise] (see [dpSurprise]; 0 for a missing observation),
+  /// which pyhgf does not define.
   void _predictionErrorDp(int c) {
     final vp0 = _vpStart[c], k = _vpStart[c + 1] - vp0, off = _dpStart[c];
     for (var i = 0; i < k; i++) {
       _observed[_vpIdx[vp0 + i]] = 0.0;
     }
-    if (_observed[c] == 0.0) return;
+    if (_observed[c] == 0.0) {
+      _surprise[c] = 0.0;
+      return;
+    }
 
     final value = _mean[c], alpha = _dpAlpha[c], nTotal = _nTotal[c];
     final em = _dpExpectedMeans, es = _dpExpectedSigmas, n = _dpN;
@@ -74,6 +81,19 @@ extension on Network {
     );
     final candidate =
         jaxNormPdf(value, cMean, cSigma) * (alpha / (alpha + nTotal));
+    _surprise[c] = dpSurprise(
+      value,
+      alpha,
+      nTotal,
+      em,
+      es,
+      n,
+      act,
+      off,
+      1,
+      k,
+      _dpScratch!.logBaseDensity,
+    );
 
     for (var i = 0; i < k; i++) {
       final p = _vpIdx[vp0 + i];

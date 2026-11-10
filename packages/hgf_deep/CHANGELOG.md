@@ -1,5 +1,19 @@
 ## Unreleased
 
+- `DeepNetwork.toJson` / `DeepNetwork.fromJson`: save a network (settings,
+  layers, weights, per-node parameters, current beliefs) and load it back
+  bit for bit; custom couplings by name.
+- `Dataset.fromCsv` (and `CsvData`): datasets from CSV text, with feature
+  and target columns by name, text class labels (`classNames`),
+  regression with one or more targets, rows with missing values dropped.
+  `Dataset.featureNames`.
+- `minibatches`: an epoch of shuffled minibatches for `batchUpdate`.
+- `Standardiser(mean, sd)`, `toJson` / `fromJson`, to save the input
+  scaling with a model.
+- `example/workflow.dart` (+ `example/data/wine.csv`, UCI wine, CC BY 4.0):
+  load, split, standardise, train with early stopping (`fit` or
+  minibatches), evaluate, save and reload. README: "Getting started with
+  your own data".
 - `Layer` (a built layer, from `DeepNetwork.debugLayers`) is exported, for
   `hgf_gpu`'s `GpuDeepNetwork`.
 

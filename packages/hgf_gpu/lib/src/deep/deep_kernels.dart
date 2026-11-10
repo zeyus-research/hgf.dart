@@ -92,6 +92,9 @@ final class DeepKernels {
   DeepKernels(DeepNetwork net, {required this.capacity})
     : settings = net.settings,
       layers = net.debugLayers,
+      workgroupState = false,
+      workgroupParams = false,
+      sequentialLayout = false,
       _pb = '',
       _sb = '' {
     _check();
@@ -102,13 +105,51 @@ final class DeepKernels {
   /// width-1 copy of the parameter and state layouts, `paramFloats` and
   /// `stateFloats` apart, and the generated code addresses them relative
   /// to the member's base offsets `pb` and `sb`.
-  DeepKernels.sequential(DeepNetwork net)
-    : capacity = 1,
-      settings = net.settings,
-      layers = net.debugLayers,
-      _pb = 'pb + ',
-      _sb = 'sb + ' {
+  ///
+  /// With [workgroupState] the kernel keeps the member's working state in
+  /// workgroup memory (`WS`, loaded from `S` once per call and stored back
+  /// at the end) instead of addressing `S` in storage: it needs
+  /// `stateFloats · 4` bytes of workgroup storage (see [fitsWorkgroup]).
+  /// [workgroupParams] does the same with the member's parameters (weights,
+  /// optimiser moments, beliefs; `paramFloats · 4` bytes more), so a row
+  /// touches no storage at all but `X`, `Y` and `OUT`.
+  DeepKernels.sequential(
+    DeepNetwork net, {
+    this.workgroupState = false,
+    this.workgroupParams = false,
+  }) : capacity = 1,
+       settings = net.settings,
+       layers = net.debugLayers,
+       sequentialLayout = true,
+       _pb = workgroupParams ? '' : 'pb + ',
+       _sb = workgroupState ? '' : 'sb + ' {
+    if (workgroupParams && !workgroupState) {
+      throw ArgumentError('workgroupParams needs workgroupState');
+    }
     _check();
+  }
+
+  /// Whether these are [DeepKernels.sequential]'s width-1 layouts.
+  final bool sequentialLayout;
+
+  /// Whether the sequential kernel's working state lives in workgroup
+  /// memory (see [DeepKernels.sequential]).
+  final bool workgroupState;
+
+  /// Whether the sequential kernel's parameters live in workgroup memory
+  /// too (see [DeepKernels.sequential]).
+  final bool workgroupParams;
+
+  /// Workgroup storage every WebGPU device offers
+  /// (`maxComputeWorkgroupStorageSize`'s default).
+  static const workgroupStorageBytes = 16384;
+
+  /// Whether [net]'s width-1 working state (with [params], its parameters
+  /// as well) fits in [workgroupStorageBytes].
+  static bool fitsWorkgroup(DeepNetwork net, {bool params = false}) {
+    final k = DeepKernels.sequential(net);
+    return (k.stateFloats + (params ? k.paramFloats : 0)) * 4 <=
+        workgroupStorageBytes;
   }
 
   void _check() {
@@ -248,13 +289,22 @@ final class DeepKernels {
   String get _bm => '${capacity}u';
 
   /// `S[...]` of field [f] of layer [l] at flat index [k] (`i·cap + s`).
-  String _s(int l, LayerField f, String k) => 'S[$_sb${_l[l].state[f]!}u + $k]';
+  String _s(int l, LayerField f, String k) =>
+      '$_sArr[$_sb${_l[l].state[f]!}u + $k]';
   String _t(int l, LayerField f, String i) =>
-      'P[$_pb${_l[l].template[f]!}u + $i]';
-  String _at(int base, String k) => 'S[$_sb${base}u + $k]';
+      '$_pArr[$_pb${_l[l].template[f]!}u + $i]';
+  String _at(int base, String k) => '$_sArr[$_sb${base}u + $k]';
+
+  /// The array the working state is read from: `S` (storage) or `WS`
+  /// (workgroup memory).
+  String get _sArr => workgroupState ? 'WS' : 'S';
 
   /// `P[...]` at [base] + [k] (member-relative in a sequential kernel).
-  String _p(int base, String k) => 'P[$_pb${base}u + $k]';
+  String _p(int base, String k) => '$_pArr[$_pb${base}u + $k]';
+
+  /// The array the parameters are read from: `P` (storage) or `WP`
+  /// (workgroup memory).
+  String get _pArr => workgroupParams ? 'WP' : 'P';
 
   static String _f(double v) {
     if (!v.isFinite) throw ArgumentError('Non-finite constant $v');

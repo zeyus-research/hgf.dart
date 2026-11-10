@@ -254,7 +254,7 @@ class _HomePageState extends State<HomePage>
     const SizedBox(height: 12),
     NodeCard(playground: pg),
     const SizedBox(height: 12),
-    DataCard(playground: pg, settings: widget.settings),
+    DataCard(playground: pg, settings: widget.settings, fitting: fit),
     const SizedBox(height: 12),
     FitCard(fitting: fit, onOpenSettings: _openSettings),
     const SizedBox(height: 12),

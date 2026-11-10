@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'csv.dart';
 import 'matrix.dart';
 
 /// Inputs and targets, one row per sample.
@@ -10,7 +11,15 @@ import 'matrix.dart';
 /// one-hot rows otherwise (a categorical output layer). For regression
 /// [labels] is `null` and [classes] is 0.
 final class Dataset {
-  Dataset(this.name, this.x, this.y, {this.labels, this.classes = 0}) {
+  Dataset(
+    this.name,
+    this.x,
+    this.y, {
+    this.labels,
+    this.classes = 0,
+    this.classNames,
+    this.featureNames,
+  }) {
     if (x.rows != y.rows) {
       throw ArgumentError('x has ${x.rows} rows but y has ${y.rows}.');
     }
@@ -27,6 +36,12 @@ final class Dataset {
   final List<int>? labels;
   final int classes;
 
+  /// The name of each class (label `k` is `classNames[k]`), when known.
+  final List<String>? classNames;
+
+  /// The name of each column of [x], when known.
+  final List<String>? featureNames;
+
   int get length => x.rows;
   bool get isClassification => labels != null;
 
@@ -37,11 +52,47 @@ final class Dataset {
     _rows(y, rows),
     labels: labels == null ? null : [for (final r in rows) labels![r]],
     classes: classes,
+    classNames: classNames,
+    featureNames: featureNames,
   );
 
   /// A copy with inputs [x] (same rows).
-  Dataset withX(Matrix x) =>
-      Dataset(name, x, y, labels: labels, classes: classes);
+  Dataset withX(Matrix x) => Dataset(
+    name,
+    x,
+    y,
+    labels: labels,
+    classes: classes,
+    classNames: classNames,
+    featureNames: featureNames,
+  );
+
+  /// Reads a dataset from CSV text (comma-, semicolon- or tab-separated,
+  /// with a header row; see [CsvData.parse]): the [target] column(s) as
+  /// `y`, the [features] columns (by default every other column) as `x`.
+  ///
+  /// [classification] (by default: when a target column holds text, or
+  /// when there is one target holding at most 20 distinct whole numbers)
+  /// turns the single
+  /// target into class labels: its distinct values, sorted (numerically if
+  /// they are numbers), become classes `0, 1, …` ([classNames]), encoded as
+  /// [encodeLabels] does. Rows with a missing value (an empty cell, `NA`,
+  /// `NaN`, …) in a column used are dropped; a feature that holds text is
+  /// an error.
+  ///
+  /// ```dart
+  /// final iris = Dataset.fromCsv(
+  ///   File('iris.csv').readAsStringSync(),
+  ///   target: ['species'],
+  /// );
+  /// ```
+  factory Dataset.fromCsv(
+    String text, {
+    required List<String> target,
+    List<String>? features,
+    bool? classification,
+    String name = 'csv',
+  }) => _fromCsv(CsvData.parse(text), target, features, classification, name);
 }
 
 Matrix _rows(Matrix m, List<int> rows) {
@@ -200,6 +251,32 @@ List<int> permutation(int n, {int seed = 0}) =>
 Dataset shuffled(Dataset ds, {int seed = 0}) =>
     ds.subset(permutation(ds.length, seed: seed));
 
+/// [ds] in minibatches of [batchSize] rows (the last one may be smaller),
+/// in a seeded random order unless [shuffle] is false: one epoch of
+/// `DeepNetwork.batchUpdate` calls.
+///
+/// ```dart
+/// for (var epoch = 0; epoch < 20; epoch++) {
+///   for (final b in minibatches(train, 64, seed: epoch)) {
+///     net.batchUpdate(b.x, b.y, optimiser: adam);
+///   }
+/// }
+/// ```
+Iterable<Dataset> minibatches(
+  Dataset ds,
+  int batchSize, {
+  bool shuffle = true,
+  int seed = 0,
+}) sync* {
+  if (batchSize < 1) throw ArgumentError.value(batchSize, 'batchSize');
+  final order = shuffle
+      ? permutation(ds.length, seed: seed)
+      : List<int>.generate(ds.length, (i) => i);
+  for (var s = 0; s < ds.length; s += batchSize) {
+    yield ds.subset(order.sublist(s, math.min(s + batchSize, ds.length)));
+  }
+}
+
 /// A seeded random train/test split.
 ({Dataset train, Dataset test}) split(
   Dataset ds, {
@@ -240,8 +317,29 @@ final class Standardiser {
     }
   }
 
+  /// A standardiser with these column [mean]s and [sd]s.
+  Standardiser(this.mean, this.sd) {
+    if (mean.length != sd.length) {
+      throw ArgumentError('mean and sd have different lengths');
+    }
+  }
+
+  /// Reads [toJson]'s output.
+  factory Standardiser.fromJson(Map<String, Object?> json) => Standardiser(
+    Float64List.fromList([
+      for (final v in json['mean'] as List<Object?>) (v as num).toDouble(),
+    ]),
+    Float64List.fromList([
+      for (final v in json['sd'] as List<Object?>) (v as num).toDouble(),
+    ]),
+  );
+
   final Float64List mean;
   final Float64List sd;
+
+  /// The means and standard deviations, to save with a trained network:
+  /// new inputs must be scaled as the training data were.
+  Map<String, Object?> toJson() => {'mean': mean, 'sd': sd};
 
   Matrix apply(Matrix x) {
     final out = Matrix(x.rows, x.cols);
@@ -252,4 +350,100 @@ final class Standardiser {
     }
     return out;
   }
+}
+
+Dataset _fromCsv(
+  CsvData csv,
+  List<String> target,
+  List<String>? features,
+  bool? classification,
+  String name,
+) {
+  if (target.isEmpty) throw ArgumentError('No target column');
+  int col(String n) {
+    final c = csv.header.indexOf(n);
+    if (c < 0) {
+      throw ArgumentError(
+        'No column "$n"; the columns are ${csv.header.join(', ')}',
+      );
+    }
+    return c;
+  }
+
+  final tCols = [for (final n in target) col(n)];
+  final fCols = features == null
+      ? [
+          for (var c = 0; c < csv.header.length; c++)
+            if (!tCols.contains(c)) c,
+        ]
+      : [for (final n in features) col(n)];
+  if (fCols.isEmpty) throw ArgumentError('No feature columns');
+  for (final c in fCols) {
+    final bad = csv.firstText(c);
+    if (bad != null) {
+      throw FormatException(
+        'Feature "${csv.header[c]}" holds text on row ${bad + 1}: '
+        '"${csv.rows[bad][c]}"',
+      );
+    }
+  }
+  final textTarget = tCols.any((c) => csv.firstText(c) != null);
+  final rows = [
+    for (var r = 0; r < csv.rows.length; r++)
+      if ([...fCols, ...tCols].every((c) => !csv.isMissing(r, c))) r,
+  ];
+  final cls =
+      classification ??
+      (textTarget ||
+          (tCols.length == 1 &&
+              rows.every((r) {
+                final v = csv.number(r, tCols.single)!;
+                return v == v.roundToDouble();
+              }) &&
+              {for (final r in rows) csv.number(r, tCols.single)}.length <=
+                  20));
+  final x = Matrix(rows.length, fCols.length);
+  for (var i = 0; i < rows.length; i++) {
+    for (var j = 0; j < fCols.length; j++) {
+      x.data[i * fCols.length + j] = csv.number(rows[i], fCols[j])!;
+    }
+  }
+  final featureNames = [for (final c in fCols) csv.header[c]];
+  if (!cls) {
+    if (textTarget) {
+      throw FormatException('A regression target holds text');
+    }
+    final y = Matrix(rows.length, tCols.length);
+    for (var i = 0; i < rows.length; i++) {
+      for (var j = 0; j < tCols.length; j++) {
+        y.data[i * tCols.length + j] = csv.number(rows[i], tCols[j])!;
+      }
+    }
+    return Dataset(name, x, y, featureNames: featureNames);
+  }
+  if (tCols.length != 1) {
+    throw ArgumentError('Classification takes one target column');
+  }
+  final t = tCols.single;
+  final values = {for (final r in rows) csv.rows[r][t].trim()}.toList();
+  final numeric = values.every((v) => double.tryParse(v) != null);
+  values.sort(
+    numeric
+        ? (a, b) => double.parse(a).compareTo(double.parse(b))
+        : (a, b) => a.compareTo(b),
+  );
+  if (values.length < 2) {
+    throw FormatException('The target has ${values.length} class(es)');
+  }
+  final index = {for (var k = 0; k < values.length; k++) values[k]: k};
+  final labels = [for (final r in rows) index[csv.rows[r][t].trim()]!];
+  return Dataset(
+    name,
+    x,
+    encodeLabels(labels, values.length),
+    labels: labels,
+    classes: values.length,
+    classNames: values,
+    featureNames: featureNames,
+  );
 }

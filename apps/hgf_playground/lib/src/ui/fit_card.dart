@@ -1,12 +1,11 @@
-import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hgf_widgets/hgf_widgets.dart';
 
-import '../model/data.dart';
+import '../model/export.dart';
 import '../model/fitting.dart';
+import 'files.dart';
 import 'panels.dart';
 
 /// Parameter estimation: what to fit, which parameters are free, the
@@ -43,14 +42,16 @@ class FitCard extends StatelessWidget {
       children: [
         SegmentedButton<FitTarget>(
           showSelectedIcon: false,
-          segments: const [
-            ButtonSegment(
+          segments: [
+            const ButtonSegment(
               value: FitTarget.observations,
               label: Text('to the observations'),
             ),
             ButtonSegment(
               value: FitTarget.responses,
-              label: Text('to responses'),
+              label: const Text('to responses'),
+              enabled: f.responsesUnavailable == null,
+              tooltip: f.responsesUnavailable,
             ),
           ],
           selected: {f.target},
@@ -99,14 +100,27 @@ class FitCard extends StatelessWidget {
               '${c.warmup + c.draws} steps).',
           child: SegmentedButton<FitMethod>(
             showSelectedIcon: false,
-            segments: const [
-              ButtonSegment(value: FitMethod.map, label: Text('MAP + Laplace')),
-              ButtonSegment(value: FitMethod.nuts, label: Text('NUTS')),
+            segments: [
+              const ButtonSegment(
+                value: FitMethod.map,
+                label: Text('MAP + Laplace'),
+              ),
+              ButtonSegment(
+                value: FitMethod.nuts,
+                label: const Text('NUTS'),
+                enabled: f.nutsUnavailable == null,
+                tooltip: f.nutsUnavailable,
+              ),
             ],
             selected: {f.method},
             onSelectionChanged: f.running ? null : (s) => f.setMethod(s.single),
           ),
         ),
+        if (f.nutsUnavailable != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(f.nutsUnavailable!, style: muted),
+          ),
         _configRow(context),
         _runRow(context),
         if (f.error != null && f.lastJob == FitJob.fit)
@@ -191,14 +205,26 @@ class FitCard extends StatelessWidget {
   Future<void> _load(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final file = await FilePicker.pickFile(
-        dialogTitle: 'Responses (one per trial, or the first column)',
-        type: FileType.custom,
-        allowedExtensions: const ['csv', 'tsv', 'txt'],
+      final picked = await pickTable('Responses: one row per trial');
+      if (picked == null) return;
+      final (table, name) = picked;
+      final choice =
+          obviousColumns(table, observations: false, responses: true) ??
+          (context.mounted
+              ? await showColumnMapping(
+                  context,
+                  table,
+                  name,
+                  observations: false,
+                  responses: true,
+                )
+              : null);
+      final r = choice?.responses;
+      if (r == null) return;
+      fitting.loadResponses(
+        table.columns[r],
+        table.columns.length > 1 ? '$name: ${table.names[r]}' : name,
       );
-      if (file == null) return;
-      final text = utf8.decode(await file.readAsBytes(), allowMalformed: true);
-      fitting.loadResponses(parseColumn(text), file.name);
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Could not load: $e')));
     }
@@ -213,7 +239,7 @@ class FitCard extends StatelessWidget {
       color: theme.colorScheme.onSurfaceVariant,
     );
     final what = f.method == FitMethod.map
-        ? 'L-BFGS from ${c.restarts + 1} '
+        ? '${f.dirichlet ? 'Nelder–Mead' : 'L-BFGS'} from ${c.restarts + 1} '
               '${c.restarts == 0 ? 'start' : 'starts'}'
         : '${c.chains} ${c.chains == 1 ? 'chain' : 'chains'} × '
               '(${c.warmup} + ${c.draws})';
@@ -306,6 +332,18 @@ class FitCard extends StatelessWidget {
               style: theme.textTheme.labelLarge,
             ),
           ),
+          IconButton(
+            tooltip: 'Save the estimates as CSV',
+            onPressed: () =>
+                saveText(context, 'fit_${r.method.name}.csv', fitResultsCsv(r)),
+            icon: const Icon(Icons.download_outlined, size: 20),
+          ),
+          if (fitDrawsCsv(r) case final draws?)
+            IconButton(
+              tooltip: 'Save the posterior draws as CSV',
+              onPressed: () => saveText(context, 'fit_nuts_draws.csv', draws),
+              icon: const Icon(Icons.scatter_plot_outlined, size: 20),
+            ),
           TextButton(
             onPressed: r.estimates.every((e) => e.param.isResponse)
                 ? null

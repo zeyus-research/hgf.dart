@@ -1,5 +1,17 @@
 ## Unreleased
 
+- dp-state nodes record a surprise (an hgf.dart extension; pyhgf defines
+  none, see docs/upstream P20): `NodeField.surprise` holds the
+  observation's surprise under the node's Chinese-restaurant-process
+  predictive, `−log(Σᵢ nᵢ/(α+N) N(x; μᵢ, σᵢ) + α/(α+N) p₀(x))`, with `p₀`
+  the base measure's predictive (the mean density of the 20 000
+  proposals; not the candidate cluster, which is fitted to `x` and would
+  reward one cluster per observation). Log-space, 0 on a missing
+  observation, in `Network` and `BatchNetwork` (bit-identical).
+  `DpSurprise` sums it over dp inputs; no gradients (the likelihood jumps
+  where an assignment flips). `Trajectories.nodeSurprise` stays NaN for dp
+  nodes, as in pyhgf.
+- `benchmark/bin/dp_cost.dart`: ~1 ms per dp element-trial (AOT and JIT).
 - `BatchNetwork` runs dp-state nodes too (`batch/batch_vectors.dart`), so
   it now takes every node kind. Each element has its own α, sensory
   precision and clusters (`getVector` reads `n`, `expectedMeans`,

@@ -1,15 +1,16 @@
-import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hgf/hgf.dart';
 import 'package:hgf_widgets/hgf_widgets.dart';
 
-import '../model/data.dart';
+import '../model/export.dart';
+import '../model/fitting.dart';
 import '../model/playground.dart';
 import '../model/presets.dart';
 import '../settings.dart';
+import 'files.dart';
 import 'home.dart' show nodeCaption;
 
 /// A titled card in the side panel.
@@ -328,23 +329,43 @@ String? _about(Network net, int i) {
 // -----------------------------------------------------------------------------
 
 class DataCard extends StatelessWidget {
-  const DataCard({super.key, required this.playground, required this.settings});
+  const DataCard({
+    super.key,
+    required this.playground,
+    required this.settings,
+    this.fitting,
+  });
 
   final Playground playground;
   final Settings settings;
 
+  /// Receives a responses column loaded with the observations (if the
+  /// network's responses can be fitted).
+  final Fitting? fitting;
+
   Future<void> _load(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final file = await FilePicker.pickFile(
-        dialogTitle: 'Observations (one value per line, or the first column)',
-        type: FileType.custom,
-        allowedExtensions: const ['csv', 'tsv', 'txt'],
+      final picked = await pickTable(
+        'Observations: one row per trial (and responses, optionally)',
       );
-      if (file == null) return;
-      final text = utf8.decode(await file.readAsBytes(), allowMalformed: true);
-      final values = parseColumn(text);
-      if (values.isEmpty) throw const FormatException('No numbers found');
+      if (picked == null) return;
+      final (table, name) = picked;
+      final f = fitting;
+      final responses = f != null && f.responsesUnavailable == null;
+      final choice =
+          obviousColumns(table, observations: true, responses: responses) ??
+          (context.mounted
+              ? await showColumnMapping(
+                  context,
+                  table,
+                  name,
+                  observations: true,
+                  responses: responses,
+                )
+              : null);
+      if (choice == null) return;
+      final values = table.columns[choice.observations!];
       final pg = playground;
       if (!Playground.loadedFits(pg.preset, values, pg.nCategories)) {
         throw FormatException(switch (pg.preset.input) {
@@ -354,10 +375,33 @@ class DataCard extends StatelessWidget {
           _ => 'This network has a binary input: the values must be 0 or 1',
         });
       }
-      playground.load(values, file.name);
+      final label = table.columns.length > 1
+          ? '$name: ${table.names[choice.observations!]}'
+          : name;
+      playground.load(values, label);
+      final r = choice.responses;
+      if (r != null) {
+        f!.loadResponses(table.columns[r], '$name: ${table.names[r]}');
+      }
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Could not load: $e')));
     }
+  }
+
+  /// The trajectories (and responses) as CSV.
+  Future<void> _export(BuildContext context) async {
+    final pg = playground;
+    final traj = pg.trajectories;
+    if (traj == null) return;
+    final raw = Float64List.fromList(pg.observations);
+    final obs = pg.observed;
+    final csv = trajectoriesCsv(
+      traj,
+      observations: raw,
+      observed: obs,
+      responses: fitting?.responses,
+    );
+    await saveText(context, '${pg.preset.id}_trajectories.csv', csv);
   }
 
   @override
@@ -368,10 +412,20 @@ class DataCard extends StatelessWidget {
     final model = pg.preset.data;
     return SectionCard(
       title: 'Data',
-      action: TextButton.icon(
-        onPressed: () => _load(context),
-        icon: const Icon(Icons.file_open_outlined, size: 18),
-        label: const Text('Load CSV'),
+      action: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: 'Save the trajectories as CSV',
+            onPressed: pg.trajectories == null ? null : () => _export(context),
+            icon: const Icon(Icons.download_outlined, size: 20),
+          ),
+          TextButton.icon(
+            onPressed: () => _load(context),
+            icon: const Icon(Icons.file_open_outlined, size: 18),
+            label: const Text('Load CSV'),
+          ),
+        ],
       ),
       children: [
         if (pg.source == DataSource.loaded)

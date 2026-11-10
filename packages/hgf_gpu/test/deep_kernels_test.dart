@@ -121,6 +121,31 @@ void main() {
       k.sequentialFit(workgroupSize: 128).source,
       contains('@workgroup_size(128)'),
     );
+    // In storage, every phase ends in a storage barrier; with the state in
+    // workgroup memory, only each row does; with the parameters there too,
+    // none does, and storage is touched only to load and store them.
+    final storage = adam.source;
+    final ws = DeepKernels.sequential(
+      _net(),
+      workgroupState: true,
+    ).sequentialFit(optimiser: DeepOptimiserKind.adam).source;
+    final wp = DeepKernels.sequential(
+      _net(),
+      workgroupState: true,
+      workgroupParams: true,
+    ).sequentialFit(optimiser: DeepOptimiserKind.adam).source;
+    int count(String src, String what) => what.allMatches(src).length;
+    expect(count(storage, 'storageBarrier'), greaterThan(5));
+    expect(count(storage, 'var<workgroup>'), 0);
+    expect(count(ws, 'storageBarrier'), 1);
+    expect(count(ws, 'var<workgroup> WS'), 1);
+    expect(count(wp, 'storageBarrier'), 0);
+    expect(count(wp, RegExp(r'\bP\[').pattern), 0);
+    expect(RegExp(r'\bP\[').allMatches(wp).length, 2);
+    expect(
+      () => DeepKernels.sequential(_net(), workgroupParams: true),
+      throwsArgumentError,
+    );
   });
 
   final naga = Process.runSync('which', ['naga']).exitCode == 0;
@@ -144,18 +169,28 @@ void main() {
               ),
               capacity: 1024,
             );
-            final seq = DeepKernels.sequential(
-              _net(
-                update: update,
-                ffu: ffu,
-                meanField: meanField,
-                bottom: bottom,
-              ),
-            );
+            final seqs = [
+              for (final (ws, wp) in [
+                (false, false),
+                (true, false),
+                (true, true),
+              ])
+                DeepKernels.sequential(
+                  _net(
+                    update: update,
+                    ffu: ffu,
+                    meanField: meanField,
+                    bottom: bottom,
+                  ),
+                  workgroupState: ws,
+                  workgroupParams: wp,
+                ),
+            ];
             for (final s in [
               ..._all(k),
-              for (final opt in [null, ...DeepOptimiserKind.values])
-                seq.sequentialFit(optimiser: opt),
+              for (final seq in seqs)
+                for (final opt in [null, ...DeepOptimiserKind.values])
+                  seq.sequentialFit(optimiser: opt),
             ]) {
               final f = File('${dir.path}/k.wgsl')..writeAsStringSync(s.source);
               final r = Process.runSync('naga', [f.path]);

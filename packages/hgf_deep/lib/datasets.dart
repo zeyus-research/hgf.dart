@@ -8,5 +8,6 @@
 /// ```
 library;
 
+export 'src/csv.dart';
 export 'src/datasets.dart';
 export 'src/metrics.dart';

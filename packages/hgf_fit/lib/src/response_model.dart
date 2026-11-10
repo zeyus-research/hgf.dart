@@ -593,6 +593,7 @@ final class ObservationSurprise extends ResponseModel {
       TotalGaussianSurprise() => 'TotalGaussianSurprise',
       FirstLevelBinarySurprise() => 'FirstLevelBinarySurprise',
       CategoricalSurprise() => 'CategoricalSurprise',
+      DpSurprise() => 'DpSurprise',
       _ => throw UnsupportedError(
         'Cannot serialise ${function.runtimeType}: name it in '
         'FitCodec.responseFunctions',

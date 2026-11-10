@@ -38,6 +38,7 @@ P19) against pyhgf `1e6e98d7` (after #475–#477).
 | [P17](#p17) | pyhgf JAX + rshgf | unbounded volatility update (the default) runs away on 3-level binary HGFs | **high**: runaway beliefs | [ ] |
 | [P18](#p18) | pyhgf JAX + rshgf | `DeepNetwork`'s volatility levels run away (all three updates), then NaN: the value posterior's precision floor lets the curvature term cancel the evidence | **high**: NaN | [ ] |
 | [P19](#p19) | pyhgf JAX | `DeepNetwork`: exp overflow and a cancelling reconstruction turn a runaway volatility level into NaN; an improper 0/0 posterior after it | medium: NaN | [ ] |
+| [P20](#p20) | pyhgf JAX | dp-state defines no surprise, so a dp network can't be fitted (suggestion: the CRP predictive) | feature | [ ] |
 | [R1](#r1) | rshgf | ef-state ignores `observed`; univariate fixed rate only | medium | [ ] |
 | [R2](#r2) | rshgf | hot-path costs (string compares, allocations, clones) | perf | [ ] |
 | [R3](#r3) | rshgf | GELU coupling uses a 1.5e-7 `erfc` approximation (called exact) | low | [ ] |
@@ -506,6 +507,38 @@ posterior is `π = 0 + 0` and its mean step `msg·g′/π = 0/0`. A flat prior
 meeting no evidence has no posterior, so this is a modelling question,
 not a numerical one (hgf_deep leaves the NaN). One option: no update when
 π = 0 (the limit of a fixed prior as the information vanishes).
+
+### P20
+
+**A dp-state node defines no surprise** (suggestion, not a bug). Its node
+surprise is NaN in `to_pandas()` and no response function reads it, so
+nothing scores a dp network's observations and its α can't be fitted.
+
+**Suggestion:** the observation's surprise under the node's predictive
+distribution, the Chinese-restaurant-process mixture, computed before the
+assignment:
+
+`−log(Σᵢ nᵢ/(α+N) · N(x; μᵢ, σᵢ) + α/(α+N) · p₀(x))`
+
+over the open clusters, where `p₀(x) = ∫ N(x; θ) G₀(dθ)` is the base
+measure's predictive density. The node already draws a Monte Carlo sample
+of G₀ (its 20 000 proposals) and evaluates `N(x; μⱼ, σⱼ)` for each one, so
+`p₀(x)` is the mean of values it computes anyway.
+
+Not the candidate cluster `N(x; μ*, σ*)` in the new-cluster term, though
+that is what the assignment compares: the candidate is fitted to `x`
+itself, so the score rewards opening a cluster per observation (on 300
+draws from three well-separated clusters, α = 10⁴ scored better than
+α = 0.1). With `p₀` the profile over α has its minimum where the node finds
+the three clusters (α ≈ 0.01–0.3).
+
+α changes the assignments in jumps, so the likelihood is only piecewise
+smooth: fit it with a derivative-free optimiser or finite differences, not
+autodiff through the assignment.
+
+**hgf.dart:** records it as the dp node's `NodeField.surprise` (0 on a
+missing observation), with the `DpSurprise` response function;
+`Trajectories.nodeSurprise` stays NaN for dp nodes, as in pyhgf.
 
 ## rshgf
 

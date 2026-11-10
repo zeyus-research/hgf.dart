@@ -4,7 +4,11 @@
 ///
 ///     dart compile exe benchmark/bin/deep_ensemble.dart -o .dart_tool/deep_ensemble
 ///     .dart_tool/deep_ensemble [--members 1,64,1024] [--rows 500] \
-///       [--wg 32,64,128,256] [--problems small,medium,wide]
+///       [--wg 32,64,128,256] [--problems small,medium,wide] [--state]
+///
+/// `--state` times each case with the working state in storage, in
+/// workgroup memory (`ws`), and with the parameters there too (`ws+wp`),
+/// where they fit; by default the ensemble picks.
 library;
 
 import 'dart:io';
@@ -55,6 +59,10 @@ Future<void> main(List<String> args) async {
   final rows = intList(args, '--rows', [500]).first;
   final memberCounts = intList(args, '--members', [1, 16, 256, 1024, 4096]);
   final workgroups = intList(args, '--wg', []);
+  // (state, params) in workgroup memory; null: the ensemble's choice.
+  final stateModes = args.contains('--state')
+      ? [(false, false), (true, false), (true, true)]
+      : [(null, null)];
   final rng = math.Random(1);
   final only = args.contains('--problems')
       ? args[args.indexOf('--problems') + 1].split(',')
@@ -77,11 +85,20 @@ Future<void> main(List<String> args) async {
       '(${(cpuMs * 1000 / rows).toStringAsFixed(1)} µs/sample)',
     );
     for (final e in memberCounts) {
-      for (final wg in workgroups.isEmpty ? [null] : workgroups) {
+      for (final (wg, ws) in [
+        for (final wg in workgroups.isEmpty ? [null] : workgroups)
+          for (final ws in stateModes) (wg, ws),
+      ]) {
         final nets = [for (var i = 0; i < e; i++) network(sizes, i)];
         final GpuDeepEnsemble gpu;
         try {
-          gpu = await GpuDeepEnsemble.create(backend, nets, workgroupSize: wg);
+          gpu = await GpuDeepEnsemble.create(
+            backend,
+            nets,
+            workgroupSize: wg,
+            workgroupState: ws.$1,
+            workgroupParams: ws.$2,
+          );
         } on ArgumentError catch (err) {
           print('  $e members: ${err.message}');
           continue;
@@ -103,7 +120,9 @@ Future<void> main(List<String> args) async {
         gpu.dispose();
         final perMemberSample = best * 1000 / (e * rows);
         print(
-          '  ${'$e'.padLeft(5)} members (wg ${gpu.workgroupSize}): '
+          '  ${'$e'.padLeft(5)} members (wg ${gpu.workgroupSize}'
+          '${gpu.kernels.workgroupState ? ', ws' : ''}'
+          '${gpu.kernels.workgroupParams ? '+wp' : ''}): '
           '${best.toStringAsFixed(1).padLeft(8)} ms, '
           '${perMemberSample.toStringAsFixed(3)} µs/member-sample, '
           '${(cpuMs * e / best).toStringAsFixed(1)}× one core'

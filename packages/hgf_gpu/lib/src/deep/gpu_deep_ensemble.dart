@@ -40,10 +40,19 @@ final class GpuDeepEnsemble {
   /// work; by default twice the largest layer's size rounded up to a power
   /// of two, between 32 and 256 (the fastest of 32–256 on an RX 7600 XT at
   /// 1024 members, `benchmark/bin/deep_ensemble.dart`).
+  ///
+  /// [workgroupState] keeps each member's working state in workgroup
+  /// memory rather than in a storage buffer, and [workgroupParams] its
+  /// weights, optimiser moments and beliefs too (see
+  /// `DeepKernels.sequential`; `DeepKernels.fitsWorkgroup` tells whether
+  /// they fit). By default the state goes there when that was measured
+  /// faster (see [_workgroupPlan]), the parameters never.
   static Future<GpuDeepEnsemble> create(
     GpuBackend backend,
     List<DeepNetwork> members, {
     int? workgroupSize,
+    bool? workgroupState,
+    bool? workgroupParams,
   }) async {
     if (members.isEmpty) throw ArgumentError('No members.');
     final first = members.first;
@@ -55,7 +64,17 @@ final class GpuDeepEnsemble {
         );
       }
     }
-    final kernels = DeepKernels.sequential(first);
+    final (ws, wp) = _workgroupPlan(
+      first,
+      members.length,
+      workgroupState,
+      workgroupParams,
+    );
+    final kernels = DeepKernels.sequential(
+      first,
+      workgroupState: ws,
+      workgroupParams: wp,
+    );
     final wg =
         workgroupSize ??
         math.max(
@@ -83,6 +102,43 @@ final class GpuDeepEnsemble {
     }
     backend.write(gpu._params, host);
     return gpu;
+  }
+
+  /// What goes into workgroup memory: the requested choices, or by
+  /// default the working state when it is small (≤ a quarter of the
+  /// workgroup memory) or the ensemble is (< 128 members), and never the
+  /// parameters. Measured on an RX 7600 XT (`deep_ensemble --state`): the
+  /// small network's 1.7 KB state is 10–40 % faster at every size; the
+  /// medium network's 12 KB state is 12–16 % faster up to 16 members and
+  /// 10–17 % slower from 256 (it limits how many workgroups run at once);
+  /// the parameters as well (small network) were no faster on balance.
+  static (bool, bool) _workgroupPlan(
+    DeepNetwork net,
+    int members,
+    bool? state,
+    bool? params,
+  ) {
+    final k = DeepKernels.sequential(net);
+    final limit = DeepKernels.workgroupStorageBytes;
+    final stateBytes = k.stateFloats * 4;
+    final allBytes = stateBytes + k.paramFloats * 4;
+    final wp = params ?? false;
+    final ws =
+        state ??
+        (wp ||
+            (stateBytes <= limit &&
+                (stateBytes * 4 <= limit || members < 128)));
+    if (wp && !ws) {
+      throw ArgumentError('workgroupParams needs workgroupState');
+    }
+    final need = wp ? allBytes : (ws ? stateBytes : 0);
+    if (need > limit) {
+      throw ArgumentError(
+        'A member of ${net.layerSizes} needs $need bytes of workgroup '
+        'memory for this; a workgroup has $limit.',
+      );
+    }
+    return (ws, wp);
   }
 
   static int _pow2AtLeast(int n) {

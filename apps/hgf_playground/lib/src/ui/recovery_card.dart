@@ -6,6 +6,8 @@ import 'package:hgf_widgets/hgf_widgets.dart';
 
 import '../model/fitting.dart';
 import 'panels.dart';
+import '../model/export.dart';
+import 'files.dart';
 
 /// Parameter recovery: simulate many agents with known parameters, fit
 /// them all, and plot the estimates against the truth.
@@ -26,7 +28,9 @@ class RecoveryCard extends StatelessWidget {
     final theme = Theme.of(context);
     final small = theme.textTheme.bodySmall;
     final muted = small?.copyWith(color: theme.colorScheme.onSurfaceVariant);
-    if (f.unsupported != null) return const SizedBox.shrink();
+    if (f.unsupported != null || f.responsesUnavailable != null) {
+      return const SizedBox.shrink();
+    }
     if (f.target != FitTarget.responses) {
       return SectionCard(
         title: 'Parameter recovery',
@@ -174,6 +178,22 @@ class RecoveryCard extends StatelessWidget {
     ];
     return [
       const Divider(height: 20),
+      Row(
+        children: [
+          Expanded(
+            child: Text(
+              'Truth against estimate, per parameter',
+              style: theme.textTheme.labelLarge,
+            ),
+          ),
+          IconButton(
+            tooltip: 'Save truth and estimates per agent as CSV',
+            onPressed: () =>
+                saveText(context, 'recovery_${r.agents}.csv', recoveryCsv(r)),
+            icon: const Icon(Icons.download_outlined, size: 20),
+          ),
+        ],
+      ),
       if (r.deviceNote != null)
         Padding(
           padding: const EdgeInsets.only(bottom: 4),

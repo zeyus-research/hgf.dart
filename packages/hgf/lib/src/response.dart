@@ -386,6 +386,48 @@ final class CategoricalSurprise extends ResponseFunction {
   }
 }
 
+/// The surprise of the observations at the dp-state input nodes under each
+/// node's predictive distribution: the mixture of its open clusters,
+/// weighted by their counts, and a new cluster at the candidate it would
+/// open (see `dpSurprise`; the node's [NodeField.surprise]). Other input
+/// nodes are ignored; a missing observation contributes 0.
+///
+/// **An hgf.dart extension:** pyhgf defines no surprise for a dp-state node.
+///
+/// No gradients: α and the sensory precision change the cluster
+/// assignments in jumps, so the likelihood is only piecewise smooth. Fit
+/// with a derivative-free optimiser (Nelder–Mead), or finite differences.
+final class DpSurprise extends ResponseFunction {
+  const DpSurprise();
+
+  @override
+  void prepare(Network network, int nTime) {
+    if (!network.inputIdxs.any((i) => network.kindOf(i) == NodeKind.dpState)) {
+      throw ArgumentError('DpSurprise needs a dp-state input');
+    }
+  }
+
+  @override
+  double surprise(Network network, int t) {
+    var s = 0.0;
+    for (final i in network.inputIdxs) {
+      if (network.kindOf(i) != NodeKind.dpState) continue;
+      s += network.get(i, NodeField.surprise);
+    }
+    return _nanToInf(s);
+  }
+
+  @override
+  double batchSurprise(BatchNetwork network, int t, int element) {
+    var s = 0.0;
+    for (final i in network.inputIdxs) {
+      if (network.kindOf(i) != NodeKind.dpState) continue;
+      s += network.get(element, i, NodeField.surprise);
+    }
+    return _nanToInf(s);
+  }
+}
+
 /// Binary decisions (`1` or `0`) made with the probability the agent
 /// predicts at [node]: `binarySurprise(responses[t], μ̂_node)`.
 ///

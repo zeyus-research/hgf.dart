@@ -201,7 +201,10 @@ extension on BatchNetwork {
       for (var i = 0; i < k; i++) {
         obs[_vpIdx[vp0 + i] * b + e] = 0.0;
       }
-      if (obs[c * b + e] == 0.0) continue;
+      if (obs[c * b + e] == 0.0) {
+        _surprise[c * b + e] = 0.0;
+        continue;
+      }
 
       final value = mean[c * b + e], alpha = _dpAlpha[c * b + e];
       final nTotal = _nTotal[c * b + e];
@@ -234,6 +237,19 @@ extension on BatchNetwork {
       );
       final candidate =
           jaxNormPdf(value, cMean, cSigma) * (alpha / (alpha + nTotal));
+      _surprise[c * b + e] = dpSurprise(
+        value,
+        alpha,
+        nTotal,
+        em,
+        es,
+        n,
+        act,
+        off * b + e,
+        b,
+        k,
+        scratch.logBaseDensity,
+      );
 
       for (var i = 0; i < k; i++) {
         final p = _vpIdx[vp0 + i];

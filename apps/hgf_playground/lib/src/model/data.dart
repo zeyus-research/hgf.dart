@@ -141,23 +141,145 @@ Float64List oneHot(Float64List categories, int n) {
   return out;
 }
 
-/// Parse one column of numbers from CSV or plain text: the first numeric
-/// column of each line; a header line and blank lines are skipped, `NaN`
-/// or an empty field marks a missing observation.
-Float64List parseColumn(String text, {int column = 0}) {
-  final out = <double>[];
-  for (final raw in const LineSplitter().convert(text)) {
-    final line = raw.trim();
-    if (line.isEmpty || line.startsWith('#')) continue;
-    final cells = line.split(RegExp(r'[,;\t ]+'));
-    if (column >= cells.length) continue;
-    final cell = cells[column].trim();
-    final v = cell.isEmpty ? double.nan : double.tryParse(cell);
-    if (v == null) {
-      if (out.isEmpty) continue; // a header
-      throw FormatException('Not a number on line ${out.length + 1}', cell);
+/// A table of numbers read from CSV, TSV or whitespace-separated text
+/// ([parseTable]).
+class CsvTable {
+  CsvTable(this.names, this.columns, this.textCells);
+
+  /// Column names: the header's, or `column 1`, `column 2`, … without one.
+  final List<String> names;
+
+  /// One series per column; NaN marks a missing (or non-numeric) cell.
+  final List<Float64List> columns;
+
+  /// Per column, how many cells held text other than a missing-value
+  /// marker (such a column is not numeric).
+  final List<int> textCells;
+
+  int get rows => columns.isEmpty ? 0 : columns.first.length;
+
+  /// Indexes of the columns that hold numbers only (and missing values),
+  /// and at least one number.
+  List<int> get numericColumns => [
+    for (var c = 0; c < columns.length; c++)
+      if (textCells[c] == 0 && columns[c].any((v) => v.isFinite)) c,
+  ];
+
+  /// The column whose name matches one of [hints] best (case-insensitive:
+  /// equal, then starts with, then contains), among [among]; null if none.
+  int? guess(List<String> hints, Iterable<int> among) {
+    for (final match in <bool Function(String, String)>[
+      (n, h) => n == h,
+      (n, h) => n.startsWith(h),
+      (n, h) => n.contains(h),
+    ]) {
+      for (final h in hints) {
+        for (final c in among) {
+          if (match(names[c].toLowerCase().trim(), h)) return c;
+        }
+      }
     }
-    out.add(v);
+    return null;
   }
-  return Float64List.fromList(out);
+}
+
+/// Cells read as a missing value.
+const _missing = {'', 'na', 'nan', 'null', 'n/a', 'none', '.', '-'};
+
+/// Parse a table of numbers: comma-, semicolon-, tab- or
+/// whitespace-separated (detected from the first row), with an optional
+/// header row (a first row with any non-numeric cell). Blank lines and
+/// lines starting with `#` are skipped; double-quoted cells may contain the
+/// separator. Empty cells and `NA`, `NaN`, `null`, … are missing values.
+/// With semicolons as separators, a decimal comma is accepted.
+CsvTable parseTable(String text) {
+  final lines = [
+    for (final raw in const LineSplitter().convert(text))
+      if (raw.trim().isNotEmpty && !raw.trimLeft().startsWith('#')) raw,
+  ];
+  if (lines.isEmpty) return CsvTable(const [], const [], const []);
+  final first = lines.first;
+  final sep = first.contains('\t')
+      ? '\t'
+      : first.contains(';')
+      ? ';'
+      : first.contains(',')
+      ? ','
+      : null;
+  final decimalComma = sep == ';';
+  final rows = [for (final l in lines) _splitRow(l, sep)];
+  double? number(String cell) {
+    final c = cell.trim();
+    return double.tryParse(decimalComma ? c.replaceAll(',', '.') : c);
+  }
+
+  bool isMissing(String cell) => _missing.contains(cell.trim().toLowerCase());
+  final header = rows.first.any((c) => !isMissing(c) && number(c) == null);
+  final width = rows.fold(0, (w, r) => math.max(w, r.length));
+  final body = header ? rows.skip(1).toList() : rows;
+  final names = [
+    for (var c = 0; c < width; c++)
+      header && c < rows.first.length && rows.first[c].trim().isNotEmpty
+          ? rows.first[c].trim()
+          : 'column ${c + 1}',
+  ];
+  final columns = [for (var c = 0; c < width; c++) Float64List(body.length)];
+  final textCells = List.filled(width, 0);
+  for (var r = 0; r < body.length; r++) {
+    final row = body[r];
+    for (var c = 0; c < width; c++) {
+      final cell = c < row.length ? row[c] : '';
+      final v = number(cell);
+      if (v == null && !isMissing(cell)) textCells[c]++;
+      columns[c][r] = v ?? double.nan;
+    }
+  }
+  return CsvTable(names, columns, textCells);
+}
+
+/// Split one line at [sep] (null: runs of whitespace), keeping separators
+/// inside double quotes, and unquoting (`""` is a literal quote).
+List<String> _splitRow(String line, String? sep) {
+  if (sep == null) return line.trim().split(RegExp(r'\s+'));
+  final out = <String>[];
+  final cell = StringBuffer();
+  var quoted = false;
+  for (var i = 0; i < line.length; i++) {
+    final ch = line[i];
+    if (quoted) {
+      if (ch == '"') {
+        if (i + 1 < line.length && line[i + 1] == '"') {
+          cell.write('"');
+          i++;
+        } else {
+          quoted = false;
+        }
+      } else {
+        cell.write(ch);
+      }
+    } else if (ch == '"') {
+      quoted = true;
+    } else if (ch == sep) {
+      out.add(cell.toString());
+      cell.clear();
+    } else {
+      cell.write(ch);
+    }
+  }
+  out.add(cell.toString());
+  return out;
+}
+
+/// The first numeric column of a table ([parseTable]): one value per row,
+/// NaN for a missing one.
+Float64List parseColumn(String text) {
+  final t = parseTable(text);
+  final numeric = t.numericColumns;
+  if (numeric.isEmpty) {
+    final c = t.textCells.indexWhere((n) => n > 0);
+    throw FormatException(
+      c < 0 ? 'No numbers found' : 'Column "${t.names[c]}" holds text',
+    );
+  }
+  return t.columns[numeric.first];
 }
