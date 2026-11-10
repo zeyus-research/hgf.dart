@@ -17,6 +17,7 @@ environment:
 dependencies:
   ffi: ^2.1.4
   hgf: ^0.1.0-dev.1
+  hgf_deep: ^0.1.0-dev.1
   hgf_fit: ^0.1.0-dev.1
 
 dev_dependencies:

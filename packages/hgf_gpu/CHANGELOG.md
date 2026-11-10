@@ -1,5 +1,14 @@
 ## Unreleased
 
+- `GpuDeepNetwork`: hgf_deep's `DeepNetwork` on the GPU (`batchUpdate`,
+  `trainEpoch`, `predict`, `upload`/`download`), from `DeepKernels`, which
+  generates one fused GEMM-plus-epilogue kernel per layer, a split-K weight
+  gradient fused with the SGD/Adam step, and the carried-belief reduction.
+- `GpuBackend` records copies and dispatches into one command buffer (one
+  compute pass for consecutive dispatches) and submits at the next write,
+  read, `idle` or the new `flush`; bind groups are cached. `dispatch` takes
+  a second grid dimension and `null` bindings (left out of the group).
+
 - Phase 7 probe: `HgfKernel` (Network → WGSL compute shader, one thread
   per parameter set), `GpuBatch` (per-element parameters, GPU-side reset,
   dirty-slot uploads), `WebGpuBackend` (`dart:js_interop`) and

@@ -15,7 +15,10 @@ abstract interface class GpuPipeline {}
 /// The few WebGPU operations [GpuBatch] needs, so the same host code runs on
 /// the browser's WebGPU and on a native implementation.
 ///
-/// Writes, copies and dispatches run in the order they are queued.
+/// Writes, copies and dispatches run in the order they are queued. Copies
+/// and dispatches are recorded and submitted together (one command buffer,
+/// consecutive dispatches in one compute pass) at the next write, read,
+/// [idle] or [flush], so long chains of small dispatches stay cheap.
 abstract interface class GpuBackend {
   /// Adapter / driver description, for reports.
   String get description;
@@ -60,9 +63,19 @@ abstract interface class GpuBackend {
     int bytes,
   );
 
-  /// Queues one dispatch of [pipeline] over [groups] workgroups, with
-  /// [bindings] at bindings 0, 1, 2... of group 0.
-  void dispatch(GpuPipeline pipeline, List<GpuBuffer> bindings, int groups);
+  /// Queues one dispatch of [pipeline] over [groups] × [groupsY]
+  /// workgroups (at most 65535 each), with [bindings] at bindings 0, 1, 2...
+  /// of group 0 (a `null` entry leaves that binding out, for a kernel that
+  /// doesn't use it). Bind groups are cached per pipeline and buffer list.
+  void dispatch(
+    GpuPipeline pipeline,
+    List<GpuBuffer?> bindings,
+    int groups, [
+    int groupsY = 1,
+  ]);
+
+  /// Submits the recorded copies and dispatches now.
+  void flush();
 
   /// Reads [bytes] bytes of [buffer] from [offset], after all queued work.
   Future<Float32List> read(

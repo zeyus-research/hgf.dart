@@ -18,6 +18,7 @@ import 'package:hgf_gpu/hgf_gpu.dart';
 import 'package:hgf_gpu/web.dart';
 import 'package:test/test.dart';
 
+import 'src/deep_gpu_check.dart' as deep;
 import 'src/fit_check.dart';
 import 'src/gpu_check.dart';
 
@@ -25,8 +26,8 @@ const _reader = '''
 import 'dart:io';
 import 'package:stream_channel/stream_channel.dart';
 
-void hybridMain(StreamChannel<Object?> channel) {
-  final files = Directory('../hgf/test/fixtures')
+void hybridMain(StreamChannel<Object?> channel, Object? dir) {
+  final files = Directory(dir! as String)
       .listSync()
       .whereType<File>()
       .where((f) => f.path.endsWith('.json'))
@@ -40,15 +41,17 @@ void hybridMain(StreamChannel<Object?> channel) {
 ''';
 
 void main() {
-  late List<Map<String, Object?>> fixtures;
+  late List<Map<String, Object?>> fixtures, deepFixtures;
   GpuBackend? backend;
 
+  Future<List<Map<String, Object?>>> read(String dir) async => [
+    await for (final text in spawnHybridCode(_reader, message: dir).stream)
+      jsonDecode(text! as String) as Map<String, Object?>,
+  ];
+
   setUpAll(() async {
-    final channel = spawnHybridCode(_reader);
-    fixtures = [
-      await for (final text in channel.stream)
-        jsonDecode(text! as String) as Map<String, Object?>,
-    ];
+    fixtures = await read('../hgf/test/fixtures');
+    deepFixtures = await read('../hgf_deep/test/fixtures');
     backend = await WebGpuBackend.create();
   });
 
@@ -70,5 +73,23 @@ void main() {
     final failures = await checkFitCases(fitter, log: print);
     expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
     expect(failures, isEmpty, reason: failures.take(20).join('\n'));
+  });
+
+  test('hgf_deep fixtures: batchUpdate and predict match f64 CPU', () async {
+    if (backend == null) {
+      markTestSkipped('No WebGPU adapter in this browser');
+      return;
+    }
+    final bad = <String>[];
+    for (final fixture in deepFixtures) {
+      final name = fixture['name']! as String;
+      final results = [
+        for (final r in await deep.checkFixture(backend!, fixture))
+          if (!r.$2.isNaN) r,
+      ];
+      bad.addAll([for (final f in deep.failures(name, results)) '$name: $f']);
+    }
+    expect(deepFixtures, isNotEmpty);
+    expect(bad, isEmpty, reason: bad.join('\n'));
   });
 }

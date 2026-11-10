@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-09, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting and the playground's fitting view and settings)
+## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, and HGF neural networks on the CPU and GPU)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -78,8 +78,12 @@ supersedes its phase list.
 
 - `packages/hgf_deep` (2026-11-09): pyhgf's vectorised `DeepNetwork` (HGF
   neural networks) in f64, matching JAX to 1e-9 on 26 fixtures. Sequential
-  `fit` is ahead of pyhgf on small networks and ~2× behind JAX on wider ones;
-  batched work waits for the GPU port. See Phase 7's follow-ups.
+  `fit` is ahead of pyhgf on small networks and ~2× behind JAX on wider ones.
+  Since 2026-11-10 the batched work runs on the GPU too (`GpuDeepNetwork`
+  in hgf_gpu, f32, ~1e-6 from f64): a learning step on 256 samples takes
+  0.55–0.75 ms on an RX 7600 XT, 1.7–16× faster than JAX f32 on one core
+  and 3.6–120× faster than the f64 CPU engine; at 4096 samples per step it is
+  40–470× faster than the CPU engine. See "hgf_deep on the GPU".
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -1266,8 +1270,12 @@ rest is the sampler's own host work per chain and leapfrog step.
   updates and rank-1 weight updates, which is GPU-shaped by construction.
   - [x] CPU baseline (2026-11-09): `packages/hgf_deep`, see "HGF neural
     networks (hgf_deep)" below.
-  - [ ] WGSL (tiled GEMM plus elementwise kernels), f32, checked against
-    the f64 CPU engine like hgf_gpu.
+  - [x] WGSL (tiled GEMM plus elementwise kernels), f32, checked against
+    the f64 CPU engine like hgf_gpu (2026-11-10): `GpuDeepNetwork`, see
+    "hgf_deep on the GPU" below.
+  - [ ] The sequential `fit` on the GPU: one persistent workgroup per
+    network looping over samples (barriers instead of dispatches), which
+    would also run ensembles of networks, one per workgroup.
 - [x] Tangents in the codegen (exact gradients on the GPU), then a GPU
   `Pass` transport in hgf_fit (MAP, NUTS with many chains, hierarchical):
   Phase 7b.
@@ -1388,6 +1396,91 @@ arithmetic; four weight initialisers. Not ported: continuous layers
   directly; `uv sync` reuses the cached f32 wheel and ignores
   `MATURIN_PEP517_ARGS`) and compare per op. f32 noise hid which gaps were
   bugs. JAX in float32 also helps as a noise yardstick.
+
+#### hgf_deep on the GPU (2026-11-10): done
+
+`GpuDeepNetwork` (hgf_gpu, `lib/src/deep/`) runs `DeepNetwork`'s batched
+operations on the GPU in f32: `batchUpdate`, `trainEpoch` (a whole epoch
+of minibatches queued with one upload and no readback), `predict`, and
+`upload`/`download` to and from a CPU `DeepNetwork`. The weights, Adam's
+moments and the carried beliefs stay on the GPU. The sequential `fit`
+stays on the CPU.
+
+- **Kernels** (`DeepKernels`, generated per network shape and batch
+  capacity). One step is about 3·layers + 2 dispatches:
+  - one kernel per layer for the top-down prediction: a tiled GEMM
+    (64×64 tiles, 4×4 outputs per thread) whose epilogue does the layer's
+    elementwise work (volatility-level prediction, precisions, `g(μ̂)` for
+    the layer below), and a second accumulator, `W²·g′²/π̂`, with
+    feedforward uncertainty;
+  - one per interior layer for the bottom-up pass: a transposed GEMM with
+    two accumulators (`Wᵀ·gain·δ`, `(W²)ᵀ·π_eff`) whose epilogue is the
+    value posterior, the prediction error, the volatility update (standard,
+    eHGF or unbounded) and the child-side factors for the next layer up;
+  - per layer, the weight gradient (a GEMM over samples) fused with the
+    SGD or Adam step. When a layer's output tiles are too few to fill the
+    GPU it splits the samples into chunks (split-K) and adds a small
+    reduce-and-step kernel; only when each chunk gets ≥ 256 samples,
+    because at 128 the extra dispatch cost more than it saved;
+  - one reduction kernel for `carry_precisions` and the batch-mean
+    increments of the carried beliefs.
+  The batch width is a uniform (any width up to the capacity); shapes,
+  kinds, couplings and settings are compiled in.
+- **Backend change:** `GpuBackend` now records dispatches and copies into
+  one command buffer (consecutive dispatches in one compute pass) and
+  submits at the next queue write, read or `flush`; bind groups are
+  cached. Before, every dispatch was its own submission with a new bind
+  group. An empty dispatch costs 1.8 µs in a long chain (3.8 µs at 12 per
+  submission). The existing hgf_gpu tests are unchanged.
+- **Accuracy** (`test/native_deep_test.dart` on wgpu-native, the same
+  check on Chromium's WebGPU/SwiftShader in `gpu_parity_test.dart`). Every
+  `batch_update` and `predict` of the 26 hgf_deep fixtures runs on the GPU
+  from the CPU's state just before it, with fresh optimisers on both sides.
+  Input errors, weights, predictions and carried beliefs match f64 to
+  ≤ 1e-6 relative to max(1, |x|). After 10 Adam steps on random 5-37-70-6
+  networks the gap is 2.6e-6, and the split-K path matches too. Tolerance
+  2e-4.
+  - Skipped as outside f32 (all P18 runaway states): 4 batch updates whose
+    starting state holds values f32 can't represent (means of 1e94 and
+    1e129) or a predicted variance above √(f32 max) (5.8e33, 9e49), where
+    the posterior's mean shift squares to infinity.
+  - One allowed NaN: in `mean_field_eHGF`, two samples send a volatility
+    mean from 4.5 to 130 and 137 in one step, so eHGF's `exp(ω + μ_vol)`
+    overflows f32. JAX's float32 mode fails the same way.
+  - NaN propagation: WGSL's `min`/`max`/`clamp` may drop NaN, and a NaN
+    belief then turned into finite gradients (weights off by ±lr). The
+    clamps use NaN-propagating `minN`/`maxN` (bit tests), so NaN states
+    zero their gradients as on the CPU.
+- **Lambert W in f32:** the unbounded update's `W₀(exp(L))` runs as
+  Newton on `w + ln w = L` for `L ≥ 1`, so it never forms `exp(L)`
+  (which overflows f32 above 88).
+- **Speed** (`melos run bench:gpu-deep`, RX 7600 XT via RADV, best of 20;
+  CPU f64 on one core of an i7-7700, JAX f32 on one core). Per learning
+  step, with Adam:
+
+  | network | samples/step | GPU, epoch (per step) | GPU, one call with readback | CPU f64 | JAX f32 |
+  |---|--:|--:|--:|--:|--:|
+  | small 2-8-8-4 | 256 | 0.58 ms | 1.1 ms | 2.1 ms | 0.98 ms |
+  | | 4096 | 0.89 ms | 1.3 ms | 36 ms | |
+  | medium 10-64-64-16 | 256 | 0.55 ms | 0.82 ms | 17.6 ms | 3.1 ms |
+  | | 4096 | 1.0–1.1 ms | 2.1 ms | 301 ms | |
+  | wide 16-256-256-32 | 256 | 0.71–0.74 ms | 1.2 ms | 89 ms | 11.4 ms |
+  | | 4096 | 3.2–3.3 ms | 5.6 ms | 1540 ms | |
+
+  `predict` on 32768 rows: 2.0 / 7.5–7.9 / 14 ms (CPU 15 / 174 / 3350 ms).
+  JAX f32 predicts 2000 rows of the medium network in 1.4 ms and 500 of the
+  wide one in 2.1 ms.
+- **What bounds it now:** at 256 samples every network costs about the
+  same ~0.55–0.75 ms per step, and dispatch overhead is only ~50 µs of
+  that. The grids are small (a 256×256 GEMM is 16 workgroups of 64×64 on
+  32 compute units), so smaller tiles for small batches are the next
+  lever. A single call also pays one GPU round trip (~0.3–0.5 ms
+  native); `trainEpoch` avoids it.
+- **Pitfalls:** `precision` is a reserved word in WGSL. Each kernel
+  declares only the buffers it uses, because the bind-group layout is
+  `auto`, and `dispatch` now takes `null` for a binding a kernel leaves
+  out. The GPU clocks down between light calls, so time with a few
+  warm-up runs and best-of-many.
 
 ### Phase 8: App -> HGF GUI modelling
 
@@ -1574,7 +1667,10 @@ kernels and tangents for the vector node kinds. Phase 7's GPU probe is
 done and a go (2026-11-07, `packages/hgf_gpu`); its follow-ups (HGF neural
 networks, GPU tangents and a GPU transport for hgf_fit) are listed there.
 The HGF neural networks have a CPU baseline (`packages/hgf_deep`,
-2026-11-09, parity with JAX f64); next is their WGSL port.
+2026-11-09, parity with JAX f64) and run batched on the GPU
+(`GpuDeepNetwork`, 2026-11-10). Open there: the sequential `fit` (and
+ensembles of networks) on the GPU, tile sizes for small batches, and a
+browser benchmark.
 
 ```sh
 cd hgf.dart
@@ -1590,6 +1686,7 @@ melos run test:web-workers                        # FitWorkers on Web Workers (C
 melos run bench:web-parallel                      # ... and their speed-ups (~10 min)
 melos run bench:playground-fit                    # the playground's fits (~3 min)
 melos run fixtures:deep && melos run bench:deep   # hgf_deep: fixtures, speed vs pyhgf
+melos run test:gpu && melos run bench:gpu-deep    # GPU kernels incl. GpuDeepNetwork
 (cd apps/hgf_playground && flutter run -d chrome --wasm)   # try it
 dart compile exe packages/hgf/benchmark/bin/profile_modes.dart -o /tmp/pm && \
   (cd packages/hgf && /tmp/pm)                    # ns/trial baseline per mode

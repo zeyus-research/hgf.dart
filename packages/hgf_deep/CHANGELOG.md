@@ -1,5 +1,8 @@
 ## Unreleased
 
+- `Layer` (a built layer, from `DeepNetwork.debugLayers`) is exported, for
+  `hgf_gpu`'s `GpuDeepNetwork`.
+
 - Batched products (`batchUpdate`, `predict`) run on `Float64x2` lanes on
   native targets: ~2.8× faster GEMM kernel, bit-identical to the scalar
   kernel, which Wasm and JS builds keep (`Float64x2` is emulated there).

@@ -15,7 +15,11 @@ const _errorTypeNoError = 1;
 const _success = 1; // *Status_Success
 
 final class _NativeBuffer implements GpuBuffer {
-  _NativeBuffer(this.handle, this.bytes);
+  _NativeBuffer(this.handle, this.bytes) : id = _nextId++;
+  static int _nextId = 0;
+
+  /// Identity for the bind-group cache.
+  final int id;
   final WGPUBuffer handle;
   @override
   final int bytes;
@@ -25,6 +29,9 @@ final class _NativePipeline implements GpuPipeline {
   _NativePipeline(this.pipeline, this.layout);
   final WGPUComputePipeline pipeline;
   final WGPUBindGroupLayout layout;
+
+  /// Bind groups by the ids of their buffers.
+  final groups = <String, (List<int>, WGPUBindGroup)>{};
 }
 
 String _str(WGPUStringView v) => v.data == nullptr || v.length == 0
@@ -271,6 +278,7 @@ final class WgpuBackend implements GpuBackend {
     int start = 0,
     int? length,
   }) {
+    _flush();
     final n = length ?? data.length - start;
     if (n > _scratchLength) {
       if (_scratch != nullptr) calloc.free(_scratch);
@@ -289,6 +297,7 @@ final class WgpuBackend implements GpuBackend {
 
   @override
   void writeUints(GpuBuffer buffer, Uint32List data, {int offset = 0}) {
+    _flush();
     final n = data.length;
     if (n > _scratchLength) {
       if (_scratch != nullptr) calloc.free(_scratch);
@@ -305,14 +314,52 @@ final class WgpuBackend implements GpuBackend {
     );
   }
 
-  void _submit(WGPUCommandEncoder encoder) {
-    final commands = _w.wgpuCommandEncoderFinish(encoder, nullptr);
+  // Dispatches and copies are recorded into one pending encoder (one
+  // compute pass for consecutive dispatches) and submitted together, before
+  // the next queue write or read: queue writes are ordered against
+  // submissions, not against commands still being recorded.
+  WGPUCommandEncoder _encoder = nullptr;
+  WGPUComputePassEncoder _pass = nullptr;
+  int _pending = 0;
+
+  /// Commands per submission at most, so one submission stays short.
+  static const _maxPending = 2048;
+
+  WGPUCommandEncoder _recording() {
+    if (_encoder == nullptr) {
+      _encoder = _w.wgpuDeviceCreateCommandEncoder(_device, nullptr);
+    }
+    return _encoder;
+  }
+
+  void _endPass() {
+    if (_pass == nullptr) return;
+    _w
+      ..wgpuComputePassEncoderEnd(_pass)
+      ..wgpuComputePassEncoderRelease(_pass);
+    _pass = nullptr;
+  }
+
+  void _flush() {
+    if (_encoder == nullptr) return;
+    _endPass();
+    final commands = _w.wgpuCommandEncoderFinish(_encoder, nullptr);
     using((arena) {
       final list = arena<WGPUCommandBuffer>()..value = commands;
       _w.wgpuQueueSubmit(_queue, 1, list);
     });
-    _w.wgpuCommandBufferRelease(commands);
-    _w.wgpuCommandEncoderRelease(encoder);
+    _w
+      ..wgpuCommandBufferRelease(commands)
+      ..wgpuCommandEncoderRelease(_encoder);
+    _encoder = nullptr;
+    _pending = 0;
+  }
+
+  @override
+  void flush() => _flush();
+
+  void _counted() {
+    if (++_pending >= _maxPending) _flush();
   }
 
   @override
@@ -323,7 +370,8 @@ final class WgpuBackend implements GpuBackend {
     int destinationOffset,
     int bytes,
   ) {
-    final encoder = _w.wgpuDeviceCreateCommandEncoder(_device, nullptr);
+    final encoder = _recording();
+    _endPass();
     _w.wgpuCommandEncoderCopyBufferToBuffer(
       encoder,
       (source as _NativeBuffer).handle,
@@ -332,38 +380,60 @@ final class WgpuBackend implements GpuBackend {
       destinationOffset,
       bytes,
     );
-    _submit(encoder);
+    _counted();
   }
 
-  @override
-  void dispatch(GpuPipeline pipeline, List<GpuBuffer> bindings, int groups) {
-    final p = pipeline as _NativePipeline;
+  WGPUBindGroup _bindGroup(_NativePipeline p, List<GpuBuffer?> bindings) {
+    final ids = [for (final b in bindings) (b as _NativeBuffer?)?.id ?? -1];
+    final key = ids.join(',');
+    final cached = p.groups[key];
+    if (cached != null) return cached.$2;
+    final used = [
+      for (var i = 0; i < bindings.length; i++)
+        if (bindings[i] != null) i,
+    ];
     final group = using((arena) {
-      final entries = arena<WGPUBindGroupEntry>(bindings.length);
-      for (var i = 0; i < bindings.length; i++) {
-        final b = bindings[i] as _NativeBuffer;
-        entries[i]
-          ..binding = i
+      final entries = arena<WGPUBindGroupEntry>(used.length);
+      for (var e = 0; e < used.length; e++) {
+        final b = bindings[used[e]]! as _NativeBuffer;
+        entries[e]
+          ..binding = used[e]
           ..buffer = b.handle
           ..offset = 0
           ..size = b.bytes;
       }
       final d = arena<WGPUBindGroupDescriptor>()
         ..ref.layout = p.layout
-        ..ref.entryCount = bindings.length
+        ..ref.entryCount = used.length
         ..ref.entries = entries;
       return _w.wgpuDeviceCreateBindGroup(_device, d);
     });
-    final encoder = _w.wgpuDeviceCreateCommandEncoder(_device, nullptr);
-    final pass = _w.wgpuCommandEncoderBeginComputePass(encoder, nullptr);
+    p.groups[key] = (ids, group);
+    _pipelines.add(p);
+    return group;
+  }
+
+  /// Pipelines with cached bind groups (to drop those of released buffers).
+  final _pipelines = <_NativePipeline>{};
+
+  @override
+  void dispatch(
+    GpuPipeline pipeline,
+    List<GpuBuffer?> bindings,
+    int groups, [
+    int groupsY = 1,
+  ]) {
+    final p = pipeline as _NativePipeline;
+    final group = _bindGroup(p, bindings);
+    final encoder = _recording();
+    if (_pass == nullptr) {
+      _pass = _w.wgpuCommandEncoderBeginComputePass(encoder, nullptr);
+    }
     _w
-      ..wgpuComputePassEncoderSetPipeline(pass, p.pipeline)
-      ..wgpuComputePassEncoderSetBindGroup(pass, 0, group, 0, nullptr)
-      ..wgpuComputePassEncoderDispatchWorkgroups(pass, groups, 1, 1)
-      ..wgpuComputePassEncoderEnd(pass)
-      ..wgpuComputePassEncoderRelease(pass);
-    _submit(encoder);
-    _w.wgpuBindGroupRelease(group);
+      ..wgpuComputePassEncoderSetPipeline(_pass, p.pipeline)
+      ..wgpuComputePassEncoderSetBindGroup(_pass, 0, group, 0, nullptr)
+      ..wgpuComputePassEncoderDispatchWorkgroups(_pass, groups, groupsY, 1);
+    _counted();
   }
 
   @override
@@ -378,6 +448,7 @@ final class WgpuBackend implements GpuBackend {
       WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst,
     );
     copy(buffer, offset, staging, 0, size);
+    _flush();
     var status = 0;
     final onMap = NativeCallable<WGPUBufferMapCallbackFunction>.isolateLocal((
       int s,
@@ -416,12 +487,22 @@ final class WgpuBackend implements GpuBackend {
 
   @override
   Future<void> idle() async {
+    _flush();
     _w.wgpuDevicePoll(_device, 1, nullptr);
   }
 
   @override
   void release(GpuBuffer buffer) {
-    final h = (buffer as _NativeBuffer).handle;
+    _flush();
+    final b = buffer as _NativeBuffer;
+    for (final p in _pipelines) {
+      p.groups.removeWhere((_, v) {
+        if (!v.$1.contains(b.id)) return false;
+        _w.wgpuBindGroupRelease(v.$2);
+        return true;
+      });
+    }
+    final h = b.handle;
     _w
       ..wgpuBufferDestroy(h)
       ..wgpuBufferRelease(h);

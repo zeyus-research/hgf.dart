@@ -102,15 +102,23 @@ extension type _Pass._(JSObject _) implements JSObject {
 const _mapRead = 1, _copySrc = 4, _copyDst = 8, _uniform = 64, _storage = 128;
 
 final class _WebBuffer implements GpuBuffer {
-  _WebBuffer(this.buffer, this.bytes);
+  _WebBuffer(this.buffer, this.bytes) : id = _nextId++;
+  static int _nextId = 0;
+
+  /// Identity for the bind-group cache.
+  final int id;
   final _Buffer buffer;
   @override
   final int bytes;
 }
 
 final class _WebPipeline implements GpuPipeline {
-  _WebPipeline(this.pipeline);
+  _WebPipeline(this.pipeline) : layout = pipeline.getBindGroupLayout(0);
   final _Pipeline pipeline;
+  final JSObject layout;
+
+  /// Bind groups by the ids of their buffers.
+  final groups = <String, (List<int>, JSObject)>{};
 }
 
 /// [GpuBackend] on the browser's WebGPU (`navigator.gpu`), from dart2wasm or
@@ -223,6 +231,7 @@ final class WebGpuBackend implements GpuBackend {
     int start = 0,
     int? length,
   }) {
+    _flush();
     // toJS is free for a hostFloats array; for other lists dart2wasm copies
     // element by element.
     _device.queue.writeBuffer(
@@ -236,6 +245,7 @@ final class WebGpuBackend implements GpuBackend {
 
   @override
   void writeUints(GpuBuffer buffer, Uint32List data, {int offset = 0}) {
+    _flush();
     _device.queue.writeBuffer(
       (buffer as _WebBuffer).buffer,
       offset,
@@ -243,6 +253,40 @@ final class WebGpuBackend implements GpuBackend {
       0,
       data.length,
     );
+  }
+
+  // Dispatches and copies are recorded into one pending encoder (one
+  // compute pass for consecutive dispatches) and submitted together, before
+  // the next queue write or read: queue writes are ordered against
+  // submissions, not against commands still being recorded.
+  _Encoder? _encoder;
+  _Pass? _pass;
+  int _pending = 0;
+
+  /// Commands per submission at most, so one submission stays short.
+  static const _maxPending = 2048;
+
+  _Encoder _recording() => _encoder ??= _device.createCommandEncoder();
+
+  void _endPass() {
+    _pass?.end();
+    _pass = null;
+  }
+
+  void _flush() {
+    final encoder = _encoder;
+    if (encoder == null) return;
+    _endPass();
+    _device.queue.submit([encoder.finish()].toJS);
+    _encoder = null;
+    _pending = 0;
+  }
+
+  @override
+  void flush() => _flush();
+
+  void _counted() {
+    if (++_pending >= _maxPending) _flush();
   }
 
   @override
@@ -253,47 +297,67 @@ final class WebGpuBackend implements GpuBackend {
     int destinationOffset,
     int bytes,
   ) {
-    final encoder = _device.createCommandEncoder()
-      ..copyBufferToBuffer(
-        (source as _WebBuffer).buffer,
-        sourceOffset,
-        (destination as _WebBuffer).buffer,
-        destinationOffset,
-        bytes,
-      );
-    _device.queue.submit([encoder.finish()].toJS);
+    final encoder = _recording();
+    _endPass();
+    encoder.copyBufferToBuffer(
+      (source as _WebBuffer).buffer,
+      sourceOffset,
+      (destination as _WebBuffer).buffer,
+      destinationOffset,
+      bytes,
+    );
+    _counted();
   }
 
-  @override
-  void dispatch(GpuPipeline pipeline, List<GpuBuffer> bindings, int groups) {
-    final p = (pipeline as _WebPipeline).pipeline;
+  /// Pipelines with cached bind groups (to drop those of released buffers).
+  final _pipelines = <_WebPipeline>{};
+
+  JSObject _bindGroup(_WebPipeline p, List<GpuBuffer?> bindings) {
+    final ids = [for (final b in bindings) (b as _WebBuffer?)?.id ?? -1];
+    final key = ids.join(',');
+    final cached = p.groups[key];
+    if (cached != null) return cached.$2;
     final entries = [
       for (var i = 0; i < bindings.length; i++)
-        JSObject()
-          ..setProperty('binding'.toJS, i.toJS)
-          ..setProperty(
-            'resource'.toJS,
-            JSObject()
-              ..setProperty('buffer'.toJS, (bindings[i] as _WebBuffer).buffer),
-          ),
+        if (bindings[i] != null)
+          JSObject()
+            ..setProperty('binding'.toJS, i.toJS)
+            ..setProperty(
+              'resource'.toJS,
+              JSObject()..setProperty(
+                'buffer'.toJS,
+                (bindings[i] as _WebBuffer).buffer,
+              ),
+            ),
     ].toJS;
     final group = _device.createBindGroup(
       JSObject()
-        ..setProperty('layout'.toJS, p.getBindGroupLayout(0))
+        ..setProperty('layout'.toJS, p.layout)
         ..setProperty('entries'.toJS, entries),
     );
-    final encoder = _device.createCommandEncoder();
-    final pass = encoder.beginComputePass()
-      ..setPipeline(p)
-      ..setBindGroup(0, group);
-    // Large batches: split over the y dimension (65535 groups per axis).
-    if (groups <= 65535) {
-      pass.dispatchWorkgroups(groups);
-    } else {
-      throw ArgumentError('More than 65535 workgroups');
+    p.groups[key] = (ids, group);
+    _pipelines.add(p);
+    return group;
+  }
+
+  @override
+  void dispatch(
+    GpuPipeline pipeline,
+    List<GpuBuffer?> bindings,
+    int groups, [
+    int groupsY = 1,
+  ]) {
+    if (groups > 65535 || groupsY > 65535) {
+      throw ArgumentError('More than 65535 workgroups along one axis');
     }
-    pass.end();
-    _device.queue.submit([encoder.finish()].toJS);
+    final p = pipeline as _WebPipeline;
+    final group = _bindGroup(p, bindings);
+    final pass = _pass ??= _recording().beginComputePass();
+    pass
+      ..setPipeline(p.pipeline)
+      ..setBindGroup(0, group)
+      ..dispatchWorkgroups(groups, groupsY);
+    _counted();
   }
 
   @override
@@ -303,15 +367,15 @@ final class WebGpuBackend implements GpuBackend {
     required int bytes,
   }) async {
     final staging = _create(_align4(bytes), _mapRead | _copyDst);
-    final encoder = _device.createCommandEncoder()
-      ..copyBufferToBuffer(
-        (buffer as _WebBuffer).buffer,
-        offset,
-        staging.buffer,
-        0,
-        staging.bytes,
-      );
-    _device.queue.submit([encoder.finish()].toJS);
+    _endPass();
+    _recording().copyBufferToBuffer(
+      (buffer as _WebBuffer).buffer,
+      offset,
+      staging.buffer,
+      0,
+      staging.bytes,
+    );
+    _flush();
     await staging.buffer.mapAsync(_mapRead).toDart;
     // A JS-side copy (slice) before unmap detaches the mapped range.
     final mapped = JSFloat32Array(
@@ -327,8 +391,18 @@ final class WebGpuBackend implements GpuBackend {
   }
 
   @override
-  Future<void> idle() => _device.queue.onSubmittedWorkDone().toDart;
+  Future<void> idle() {
+    _flush();
+    return _device.queue.onSubmittedWorkDone().toDart;
+  }
 
   @override
-  void release(GpuBuffer buffer) => (buffer as _WebBuffer).buffer.destroy();
+  void release(GpuBuffer buffer) {
+    _flush();
+    final b = buffer as _WebBuffer;
+    for (final p in _pipelines) {
+      p.groups.removeWhere((_, v) => v.$1.contains(b.id));
+    }
+    b.buffer.destroy();
+  }
 }

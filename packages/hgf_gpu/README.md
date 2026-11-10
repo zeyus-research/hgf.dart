@@ -28,6 +28,18 @@ final lap = await gpu.laplace(model, map);         // f64, on the CPU
 Passes that need f64 (finite differences, Hessians, reported estimates)
 and models without a kernel run on the CPU.
 
+For `hgf_deep`'s `DeepNetwork` (HGF neural networks), `GpuDeepNetwork`
+runs batched learning and prediction. Each layer is one fused kernel: a
+tiled GEMM with the layer's belief updates as its epilogue. Weights,
+optimiser moments and carried beliefs stay on the GPU:
+
+```dart
+final gpu = await GpuDeepNetwork.create(backend!, net, capacity: 1024);
+await gpu.trainEpoch(x, y, batchSize: 1024, optimiser: Adam(1e-3));
+final yHat = await gpu.predict(xTest);
+await gpu.download(net);                           // weights + beliefs back
+```
+
 Status: see Phase 7 in `docs/ROADMAP.md`.
 - Supported: continuous, binary and constant nodes; standard, eHGF and
   unbounded updates; named couplings; missing observations; time steps.
@@ -36,6 +48,9 @@ Status: see Phase 7 in `docs/ROADMAP.md`.
   with fitted parameters (`GaussianReadout`, `BinarySoftmaxReadout`).
 - Precision: f32. Totals match f64 to ~1e-6 relative and gradients to ~1e-5.
 - Not yet: vector node kinds, custom couplings or response models.
+- Deep networks: `batchUpdate`, `trainEpoch` (SGD, Adam) and `predict`,
+  every layer kind, volatility update and setting `hgf_deep` has; f32,
+  matching f64 to ~1e-6. The sequential `fit` stays on the CPU.
 
 - Web: `import 'package:hgf_gpu/web.dart'`. On Linux, Chromium needs
   `--enable-unsafe-webgpu` and Vulkan.
@@ -44,4 +59,5 @@ Status: see Phase 7 in `docs/ROADMAP.md`.
   Regenerate the bindings with
   `dart run ffigen --config ffigen.yaml --compiler-opts -I/usr/lib/clang/<v>/include`.
 - Tests: `melos run test:gpu`. Benchmarks: `melos run bench:gpu-web`,
-  `melos run bench:gpu-native`, `melos run bench:gpu-fit`.
+  `melos run bench:gpu-native`, `melos run bench:gpu-fit`,
+  `melos run bench:gpu-deep`.

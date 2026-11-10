@@ -101,14 +101,14 @@ melos:
       # Web: Chromium's WebGPU, on SwiftShader (dart test passes --disable-gpu).
       exec:
         command: >-
-          dart test --tags gpu test/native_parity_test.dart test/native_fit_test.dart 2>&1 &&
+          dart test --tags gpu test/native_parity_test.dart test/native_fit_test.dart test/native_deep_test.dart 2>&1 &&
           dart test -p chrome-gpu -c dart2wasm --tags gpu 2>&1
         concurrency: 1
       packageFilters:
         fileExists: test/gpu_parity_test.dart
       description: >-
-        The GPU kernels (f32) against the f64 engine on every parity fixture,
-        on wgpu-native and on Chromium's WebGPU.
+        The GPU kernels (f32) against the f64 engine on every parity fixture
+        (hgf and hgf_deep), on wgpu-native and on Chromium's WebGPU.
     test:flutter:
       exec:
         command: flutter test --exclude-tags performance
@@ -255,6 +255,18 @@ melos:
         fileExists: benchmark/bin/fit_gpu.dart
       description: >-
         GpuFitter vs FitWorkers on pyhgf's parameter-recovery problem.
+    bench:gpu-deep:
+      # hgf_deep's DeepNetwork on wgpu-native vs the f64 CPU engine (one core).
+      exec:
+        command: >-
+          dart compile exe benchmark/bin/deep_gpu.dart -o .dart_tool/deep_gpu &&
+          taskset -c 0 .dart_tool/deep_gpu --batches 256,1024,4096
+        concurrency: 1
+      packageFilters:
+        fileExists: benchmark/bin/deep_gpu.dart
+      description: >-
+        GpuDeepNetwork batchUpdate / trainEpoch / predict vs DeepNetwork on
+        hgf_deep's small, medium and wide benchmark networks.
     bench:gpu-native:
       exec:
         command: >-

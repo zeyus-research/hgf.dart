@@ -10,7 +10,7 @@ export 'package:hgf/hgf.dart' show Coupling, CouplingFn, CustomCoupling;
 export 'src/config.dart';
 export 'src/deep_network.dart';
 export 'src/init.dart';
-export 'src/kernels.dart' show DeepSettings;
+export 'src/kernels.dart' show DeepSettings, Layer;
 export 'src/matrix.dart';
 export 'src/optimiser.dart';
 export 'src/state.dart';
