@@ -1739,6 +1739,45 @@ the apps.
 a categorical readout on the GPU; re-measure `FitConfig.autoGpuChains` /
 `autoGpuMapRuns` in browsers now that a round trip is ~0.3 ms.
 
+
+#### Deep network examples and playground page (2026-11-10): done
+
+- **hgf_deep synced to pyhgf `1e6e98d7`** (#475–#477): the unbounded update's
+  Lambert W from the log argument (`lambertW0Log` in hgf), one-to-one layers
+  keep diagonal weights (masked gradients, initialisers skip them). Fixtures
+  regenerated; 30 scenarios.
+- **Fixes to pyhgf** (`DeepFixes`, on by default; `DeepFixes.none`,
+  `DeepNetwork.defaultFixes` or `-DHGF_DEEP_UPSTREAM=true` give pyhgf, which
+  the parity tests use): `curvatureFloor` (the cause of P18: the value
+  posterior's precision floored at π̂ + evidence, not π̂; checked against a
+  patched JAX reference, the `floor_*` fixtures) and `logSpaceVolatility`
+  (P19: overflow-safe volatility terms, equal to pyhgf wherever it is
+  finite). Mirrored in hgf_gpu's kernels.
+- **Trace API:** `DeepNetwork.trace` records the network after every phase
+  of one `fit` row (bit-identical to `fit`), `snapshot`/`restore`,
+  `Optimiser.copy`.
+- **Examples** (`packages/hgf_deep/example`, `melos run examples:deep`): toy
+  classification (XOR 1.000, moons 0.987, circles 1.000, spirals 1.000),
+  sine regression (R² 0.963), UCI digits (0.969), the effect of hidden
+  volatility levels, and digits on the GPU (minibatches against the CPU; 64
+  seeds fitted sequentially at once). `package:hgf_deep/datasets.dart` holds
+  the generators and scores.
+- **Playground "Deep network" page** (rail / bottom bar): build hidden layers
+  (size, activation, volatility level), scheme, ω, fixes, optimiser; train
+  at a chosen speed; decision map (tap to trace a point); follow one sample
+  through every phase with per-phase messages on the edges, volatility
+  levels as diamonds, a node inspector and explanations; layer strips above
+  160 nodes.
+- **hgf_gpu:** `GpuDeepEnsemble.fit(readPredictions: false)` crashed (the
+  kernel's OUT binding was left unbound); fixed, with a test. The build hook
+  takes `hooks: user_defines: hgf_gpu: bundle: false` to skip bundling
+  wgpu-native: `flutter test` on macOS needs it, since Flutter's test runner
+  cannot rewrite the prebuilt dylib's install name.
+- **Open:** hidden volatility levels still destabilise learning on some
+  tasks (the model's own feedback, P18 "still open"); the improper 0/0
+  posterior of a dead node (P19) is for upstream to decide; the `hgf`
+  package is not yet synced to pyhgf HEAD.
+
 ## Upstream issues
 
 Found while porting and optimising; none reported yet. Details, suggested
