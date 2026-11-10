@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:hgf_fit/hgf_fit.dart';
+
 import 'presets.dart';
 
 /// Settings of the simulated observations.
@@ -118,6 +120,12 @@ SimulatedData simulate(DataModel model, DataSettings s, {int nCategories = 3}) {
         hidden[t] = p;
         u[t] = rng.nextDouble() < p ? 1 : 0;
       }
+    case DataModel.igt || DataModel.bandit:
+      throw ArgumentError.value(
+        model,
+        'model',
+        'A choice task (see simulateOutcomes)',
+      );
     case DataModel.randomWalk:
       // A random walk whose step size switches between calm and volatile.
       var x = 0.0;
@@ -282,4 +290,53 @@ Float64List parseColumn(String text) {
     );
   }
   return t.columns[numeric.first];
+}
+
+/// A choice task's outcomes: every option's, every trial (what an agent
+/// would see whichever option it chose), and what generated them.
+class TaskOutcomes {
+  TaskOutcomes(this.table, this.nInputs, this.hidden);
+
+  /// Row-major `nTrials × nInputs`.
+  final Float64List table;
+  final int nInputs;
+
+  /// Each option's expected payoff per trial.
+  final List<Float64List> hidden;
+
+  int get nTrials => table.length ~/ nInputs;
+}
+
+/// Simulate a choice task's outcomes ([DataModel.igt], [DataModel.bandit]).
+TaskOutcomes simulateOutcomes(DataModel model, DataSettings s) {
+  final rng = math.Random(s.seed);
+  final n = s.nTrials;
+  switch (model) {
+    case DataModel.igt:
+      // Net payoff per card in units of $100: −0.25 for A and B, +0.25 for
+      // C and D on average.
+      return TaskOutcomes(IowaGamblingTask.outcomes(n, rng), 4, [
+        for (final m in const [-0.25, -0.25, 0.25, 0.25])
+          Float64List(n)..fillRange(0, n, m),
+      ]);
+    case DataModel.bandit:
+      // Inputs: win A, loss A, win B, loss B. The good arm wins with
+      // P(likely outcome) and loses with its complement; the other the
+      // other way round. They swap every block.
+      final table = Float64List(n * 4);
+      final hidden = [Float64List(n), Float64List(n)];
+      final p = s.pHigh;
+      for (var t = 0; t < n; t++) {
+        final good = (t ~/ s.block).isEven ? 0 : 1;
+        for (var arm = 0; arm < 2; arm++) {
+          final pWin = arm == good ? p : 1 - p;
+          table[t * 4 + 2 * arm] = rng.nextDouble() < pWin ? 1 : 0;
+          table[t * 4 + 2 * arm + 1] = rng.nextDouble() < 1 - pWin ? 1 : 0;
+          hidden[arm][t] = pWin - (1 - pWin);
+        }
+      }
+      return TaskOutcomes(table, 4, hidden);
+    default:
+      throw ArgumentError.value(model, 'model', 'Not a choice task');
+  }
 }

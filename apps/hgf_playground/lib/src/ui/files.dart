@@ -303,3 +303,174 @@ class _ColumnMappingDialogState extends State<ColumnMappingDialog> {
     );
   }
 }
+
+/// A choice task's columns: the choice, then what it revealed (one per
+/// [revealed] name), by name if they match ([responseHints] for the
+/// choice), else the numeric columns in order. Null if there are too few.
+List<int>? guessChoiceColumns(CsvTable t, List<String> revealed) {
+  final numeric = t.numericColumns;
+  if (numeric.length < 1 + revealed.length) return null;
+  final out = <int>[];
+  int pick(List<String> hints) {
+    final rest = [
+      for (final c in numeric)
+        if (!out.contains(c)) c,
+    ];
+    return t.guess(hints, rest) ?? rest.first;
+  }
+
+  out.add(pick(responseHints));
+  for (final r in revealed) {
+    out.add(pick([r.toLowerCase()]));
+  }
+  return out;
+}
+
+/// Asks which numeric columns of [table] hold a choice task's choices and
+/// what each choice revealed ([revealed]: e.g. `payoff`), with a preview.
+/// Null if cancelled.
+Future<List<int>?> showChoiceMapping(
+  BuildContext context,
+  CsvTable table,
+  String name, {
+  required List<String> options,
+  required List<String> revealed,
+  String unit = '',
+}) => showDialog<List<int>>(
+  context: context,
+  builder: (_) => _ChoiceMappingDialog(
+    table: table,
+    name: name,
+    options: options,
+    revealed: revealed,
+    unit: unit,
+  ),
+);
+
+class _ChoiceMappingDialog extends StatefulWidget {
+  const _ChoiceMappingDialog({
+    required this.table,
+    required this.name,
+    required this.options,
+    required this.revealed,
+    required this.unit,
+  });
+
+  final CsvTable table;
+  final String name;
+  final List<String> options, revealed;
+  final String unit;
+
+  @override
+  State<_ChoiceMappingDialog> createState() => _ChoiceMappingDialogState();
+}
+
+class _ChoiceMappingDialogState extends State<_ChoiceMappingDialog> {
+  late final List<int> cols = guessChoiceColumns(
+    widget.table,
+    widget.revealed,
+  )!;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = widget.table;
+    final theme = Theme.of(context);
+    final numeric = t.numericColumns;
+    final opts = widget.options;
+    final labels = [
+      'Choice (0 = ${opts.first} … ${opts.length - 1} = ${opts.last})',
+      for (final r in widget.revealed)
+        '${r[0].toUpperCase()}${r.substring(1)} of the chosen option'
+            '${widget.unit.isEmpty ? '' : ' (${widget.unit})'}',
+    ];
+    return AlertDialog(
+      title: Text('Columns of ${widget.name}'),
+      content: SizedBox(
+        width: 420,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '${t.rows} rows. Each row is a trial: the option chosen and '
+                'what it revealed (the other options\' outcomes are '
+                'unknown). Empty cells and NA are missing.',
+                style: theme.textTheme.bodySmall,
+              ),
+              const SizedBox(height: 12),
+              for (final (j, label) in labels.indexed) ...[
+                DropdownButtonFormField<int>(
+                  key: Key('choice column $j'),
+                  initialValue: cols[j],
+                  decoration: InputDecoration(labelText: label),
+                  items: [
+                    for (final c in numeric)
+                      DropdownMenuItem(value: c, child: Text(t.names[c])),
+                  ],
+                  onChanged: (c) => setState(() => cols[j] = c!),
+                ),
+                const SizedBox(height: 8),
+              ],
+              _ColumnPreview(table: t, cols: cols),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: cols.toSet().length == cols.length
+              ? () => Navigator.pop(context, cols)
+              : null,
+          child: const Text('Load'),
+        ),
+      ],
+    );
+  }
+}
+
+class _ColumnPreview extends StatelessWidget {
+  const _ColumnPreview({required this.table, required this.cols});
+
+  final CsvTable table;
+  final List<int> cols;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = table;
+    final theme = Theme.of(context);
+    final rows = math.min(5, t.rows);
+    final style = theme.textTheme.bodySmall?.copyWith(
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
+    String cell(double v) => v.isFinite ? '$v' : '—';
+    return Table(
+      defaultColumnWidth: const IntrinsicColumnWidth(),
+      children: [
+        TableRow(
+          children: [
+            for (final c in cols)
+              Padding(
+                padding: const EdgeInsets.only(right: 16, bottom: 2),
+                child: Text(t.names[c], style: theme.textTheme.labelMedium),
+              ),
+          ],
+        ),
+        for (var r = 0; r < rows; r++)
+          TableRow(
+            children: [
+              for (final c in cols)
+                Padding(
+                  padding: const EdgeInsets.only(right: 16),
+                  child: Text(cell(t.columns[c][r]), style: style),
+                ),
+            ],
+          ),
+      ],
+    );
+  }
+}

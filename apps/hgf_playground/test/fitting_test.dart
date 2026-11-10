@@ -21,7 +21,7 @@ void main() {
       );
       final skipped = p.id == 'ef';
       expect(f.unsupported != null, skipped, reason: p.id);
-      if (skipped || p.id == 'dp') continue;
+      if (skipped || p.id == 'dp' || p.task != null) continue;
       // Every non-input continuous node's ω is free by default.
       expect(f.free, isNotEmpty, reason: p.id);
       expect(f.free.every((id) => id.startsWith('omega_')), isTrue);

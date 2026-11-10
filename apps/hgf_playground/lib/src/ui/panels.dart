@@ -343,7 +343,43 @@ class DataCard extends StatelessWidget {
   /// network's responses can be fitted).
   final Fitting? fitting;
 
+  /// A choice task's record: the choices and what they revealed.
+  Future<void> _loadChoices(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final task = playground.task!;
+    try {
+      final picked = await pickTable(
+        'Choices: one row per trial, the option chosen and '
+        '${task.revealedNames.join(' and ')}',
+      );
+      if (picked == null) return;
+      final (table, name) = picked;
+      if (guessChoiceColumns(table, task.revealedNames) == null) {
+        throw FormatException(
+          'Needs ${1 + task.revealedNames.length} numeric columns: the '
+          'choice and ${task.revealedNames.join(', ')}',
+        );
+      }
+      if (!context.mounted) return;
+      final cols = await showChoiceMapping(
+        context,
+        table,
+        name,
+        options: task.options,
+        revealed: task.revealedNames,
+        unit: task.recordedUnit,
+      );
+      if (cols == null) return;
+      playground.loadChoices(table.columns[cols.first], [
+        for (final c in cols.skip(1)) table.columns[c],
+      ], name);
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Could not load: $e')));
+    }
+  }
+
   Future<void> _load(BuildContext context) async {
+    if (playground.task != null) return _loadChoices(context);
     final messenger = ScaffoldMessenger.of(context);
     try {
       final picked = await pickTable(
@@ -394,12 +430,14 @@ class DataCard extends StatelessWidget {
     final traj = pg.trajectories;
     if (traj == null) return;
     final raw = Float64List.fromList(pg.observations);
-    final obs = pg.observed;
+    // A choice task: what each choice paid, and the choices.
+    final task = pg.task != null;
+    final obs = task ? null : pg.observed;
     final csv = trajectoriesCsv(
       traj,
       observations: raw,
       observed: obs,
-      responses: fitting?.responses,
+      responses: task ? pg.choices : fitting?.responses,
     );
     await saveText(context, '${pg.preset.id}_trajectories.csv', csv);
   }
@@ -434,7 +472,7 @@ class DataCard extends StatelessWidget {
               Expanded(
                 child: Text(
                   '${pg.loadedName} · ${pg.observations.length} trials'
-                  '${pg.observed != null ? ' (with missing ones)' : ''}',
+                  '${pg.observed != null && pg.task == null ? ' (with missing ones)' : ''}',
                   style: theme.textTheme.bodySmall,
                 ),
               ),
@@ -458,6 +496,15 @@ class DataCard extends StatelessWidget {
             DataModel.randomWalk =>
               'A simulated random walk whose step size switches between '
                   'calm and volatile phases, observed with noise.',
+            DataModel.igt =>
+              'A simulated agent plays the task: cards drawn at random '
+                  'with the original task\'s odds (Bechara et al., 1994). '
+                  'Every edit replays it with the same cards and draws, so '
+                  'the choices change only through the agent\'s beliefs.',
+            DataModel.bandit =>
+              'A simulated agent plays the task. Every edit replays it '
+                  'with the same outcomes and draws, so the choices change '
+                  'only through the agent\'s beliefs.',
           }, style: theme.textTheme.bodySmall),
           LabeledSlider(
             label: 'trials',
@@ -497,20 +544,31 @@ class DataCard extends StatelessWidget {
               display: '${d.block} trials',
               onChanged: (v) => pg.updateData((d) => d.block = v.round()),
             ),
-          ] else if (model == DataModel.reversal ||
-              model == DataModel.categoricalReversal) ...[
+          ] else if (model == DataModel.igt)
+            ...[]
+          else if (model == DataModel.reversal ||
+              model == DataModel.categoricalReversal ||
+              model == DataModel.bandit) ...[
             LabeledSlider(
-              label: 'P(likely outcome)',
+              label: model == DataModel.bandit
+                  ? 'P(win), good arm'
+                  : 'P(likely outcome)',
+              help: model == DataModel.bandit
+                  ? 'The good arm wins with this probability and loses '
+                        'with the rest; the other arm the other way round.'
+                  : null,
               value: d.pHigh,
-              min: model == DataModel.reversal ? 0.5 : 1 / pg.nCategories,
+              min: model == DataModel.categoricalReversal
+                  ? 1 / pg.nCategories
+                  : 0.5,
               max: 1,
               display: d.pHigh.toStringAsFixed(2),
               onChanged: (v) => pg.updateData((d) => d.pHigh = v),
             ),
             LabeledSlider(
-              label: model == DataModel.reversal
-                  ? 'reversal every'
-                  : 'switch every',
+              label: model == DataModel.categoricalReversal
+                  ? 'switch every'
+                  : 'reversal every',
               value: d.block.toDouble(),
               min: 5,
               max: 200,
@@ -563,6 +621,20 @@ class DataCard extends StatelessWidget {
             ],
           ),
         ],
+        if (pg.task != null)
+          LabeledSlider(
+            label: 'agent β',
+            help:
+                'The agent\'s inverse temperature: how deterministically it '
+                'picks the option it values most (0: at random). It plays '
+                'the simulated task, and sets the plotted choice '
+                'probabilities.',
+            value: math.log(pg.agentBeta) / math.ln10,
+            min: -1,
+            max: 1.5,
+            display: pg.agentBeta.toStringAsFixed(2),
+            onChanged: (v) => pg.setAgentBeta(math.pow(10, v).toDouble()),
+          ),
       ],
     );
   }

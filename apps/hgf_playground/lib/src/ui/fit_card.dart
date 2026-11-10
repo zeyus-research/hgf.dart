@@ -43,9 +43,11 @@ class FitCard extends StatelessWidget {
         SegmentedButton<FitTarget>(
           showSelectedIcon: false,
           segments: [
-            const ButtonSegment(
+            ButtonSegment(
               value: FitTarget.observations,
-              label: Text('to the observations'),
+              label: const Text('to the observations'),
+              enabled: f.observationsUnavailable == null,
+              tooltip: f.observationsUnavailable,
             ),
             ButtonSegment(
               value: FitTarget.responses,
@@ -141,6 +143,27 @@ class FitCard extends StatelessWidget {
     final theme = Theme.of(context);
     final small = theme.textTheme.bodySmall;
     final r = f.responses;
+    if (f.task case final task?) {
+      final names = task.options.join(', ');
+      return [
+        Text(
+          'Recover an agent\'s parameters from its choices among $names: '
+          'each trial it picks an option with probability ∝ exp(β v), v '
+          'the payoff it predicts for the option, and sees only what that '
+          'option revealed.',
+          style: small,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          r == null
+              ? 'No choices yet.'
+              : '${r.where((v) => v.isFinite).length} choices by '
+                    '${f.responsesSource}. Set β and load recorded choices '
+                    'in the Data card.',
+          style: small?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        ),
+      ];
+    }
     return [
       Text(
         f.binary
@@ -344,11 +367,18 @@ class FitCard extends StatelessWidget {
               onPressed: () => saveText(context, 'fit_nuts_draws.csv', draws),
               icon: const Icon(Icons.scatter_plot_outlined, size: 20),
             ),
-          TextButton(
-            onPressed: r.estimates.every((e) => e.param.isResponse)
-                ? null
-                : fitting.apply,
-            child: const Text('Apply'),
+          Tooltip(
+            message:
+                fitting.applyUnavailable ?? 'Set the sliders to the estimates',
+            child: TextButton(
+              onPressed:
+                  fitting.applyUnavailable != null ||
+                      (fitting.task == null &&
+                          r.estimates.every((e) => e.param.isResponse))
+                  ? null
+                  : fitting.apply,
+              child: const Text('Apply'),
+            ),
           ),
         ],
       ),

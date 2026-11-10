@@ -9,6 +9,7 @@ import '../model/fitting.dart';
 import '../model/playground.dart';
 import '../model/presets.dart';
 import '../settings.dart';
+import 'choice_plots.dart';
 import 'fit_card.dart';
 import 'frame_stats.dart';
 import 'panels.dart';
@@ -156,6 +157,13 @@ class _HomePageState extends State<HomePage>
     if (traj == null) {
       return Center(child: Text(pg.error ?? 'No data'));
     }
+    if (pg.task != null) {
+      return ChoiceTaskView(
+        playground: pg,
+        hover: _hover,
+        panelHeight: panelHeight,
+      );
+    }
     final input = pg.network.inputIdxs.first;
     final hidden = pg.hidden;
     final muted = Theme.of(context).colorScheme.onSurfaceVariant;
@@ -186,6 +194,7 @@ class _HomePageState extends State<HomePage>
                   DataModel.categoricalReversal => 'true P($k)',
                   DataModel.mixture => 'source',
                   DataModel.randomWalk => 'hidden',
+                  DataModel.igt || DataModel.bandit => 'expected payoff',
                 },
               ),
           if (_shownResponses() case final r? when r.length == traj.nTime)
@@ -232,6 +241,8 @@ class _HomePageState extends State<HomePage>
     final traj = pg.trajectories;
     final panels = traj == null
         ? 1
+        : pg.task != null
+        ? ChoiceTaskView.panelCount(pg)
         : HgfTrajectoryView.panelCount(pg.network, layout: pg.layout);
     const h = 150.0;
     return ListView(

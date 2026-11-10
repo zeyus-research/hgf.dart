@@ -11,6 +11,7 @@ import 'fit_engine.dart';
 import 'fit_jobs.dart';
 import 'gpu/open_gpu.dart';
 import 'playground.dart';
+import 'data.dart';
 import 'presets.dart';
 
 export 'fit_engine.dart' show FitEngine, GpuInfo, spawnPlaygroundWorkers;
@@ -79,13 +80,35 @@ class Fitting extends ChangeNotifier {
   /// responses only).
   Map<String, double>? truth;
 
-  bool get binary => pg.preset.input == InputKind.binary;
+  /// The playground's choice task: the responses are the agent's choices
+  /// among its options (null: the agent responds to observations).
+  ChoiceTask? get task => pg.task;
 
-  bool get categorical => pg.preset.input == InputKind.categorical;
+  bool get binary => task == null && pg.preset.input == InputKind.binary;
 
-  /// Whether the agent's responses are choices (binary or categorical,
-  /// with an inverse temperature β) rather than continuous reports.
-  bool get choices => binary || categorical;
+  bool get categorical =>
+      task == null && pg.preset.input == InputKind.categorical;
+
+  /// Whether the agent's responses are choices (binary, categorical or a
+  /// task's options, with an inverse temperature β) rather than continuous
+  /// reports.
+  bool get choices => binary || categorical || task != null;
+
+  /// Why the observations can't be fitted (null if they can): in a choice
+  /// task what was observed depends on the choices.
+  String? get observationsUnavailable => task != null
+      ? 'In a choice task the agent sees only what its choices reveal, so '
+            'its choices are what to fit.'
+      : null;
+
+  /// Why the estimates can't be applied to the sliders (null if they
+  /// can): a simulated choice task would play again and change the data.
+  String? get applyUnavailable =>
+      task != null && pg.source == DataSource.simulated
+      ? 'The simulated agent plays again whenever the sliders move, so '
+            'applying would change the choices just fitted. Load recorded '
+            'choices to fit and apply.'
+      : null;
 
   /// Whether the network clusters its input with a Dirichlet process node.
   bool get dirichlet {
@@ -115,7 +138,8 @@ class Fitting extends ChangeNotifier {
 
   void setTarget(FitTarget t) {
     if (t == target ||
-        (t == FitTarget.responses && responsesUnavailable != null)) {
+        (t == FitTarget.responses && responsesUnavailable != null) ||
+        (t == FitTarget.observations && observationsUnavailable != null)) {
       return;
     }
     target = t;
@@ -135,6 +159,14 @@ class Fitting extends ChangeNotifier {
 
   void toggle(String id, bool on) {
     on ? free.add(id) : free.remove(id);
+    // A task's shared ω and the per-option ones set the same nodes.
+    if (on && task != null) {
+      if (id == 'omega') {
+        free.removeWhere((f) => f.startsWith('omega_'));
+      } else if (id.startsWith('omega_')) {
+        free.remove('omega');
+      }
+    }
     notifyListeners();
   }
 
@@ -158,7 +190,8 @@ class Fitting extends ChangeNotifier {
   /// agent's response parameter; remembers those values as the truth.
   void simulateAgent({int? seed}) {
     _catchUp();
-    if (unsupported != null) return;
+    // A choice task's agent is the playground's (its data).
+    if (unsupported != null || task != null) return;
     final net = Network.fromJson(pg.network.toJson());
     final response = _responseModel(agent: true);
     final rp = candidates.firstWhere((c) => c.isResponse);
@@ -201,6 +234,9 @@ class Fitting extends ChangeNotifier {
   /// Use loaded [values] (one per trial, NaN for none) as the responses.
   void loadResponses(Float64List values, String name) {
     _catchUp();
+    if (task != null) {
+      throw StateError('A choice task\'s choices come with its data');
+    }
     if (values.length != pg.observations.length) {
       throw FormatException(
         '${values.length} responses for ${pg.observations.length} trials',
@@ -393,17 +429,27 @@ class Fitting extends ChangeNotifier {
   /// Set the playground's sliders to the estimates.
   void apply() {
     final r = result;
-    if (r == null) return;
+    if (r == null || applyUnavailable != null) return;
     for (final e in r.estimates) {
-      switch (e.param.target) {
-        case NodeTarget(:final node, :final field):
-          pg.setParam(node, field, e.estimate);
-        case VolatilityCouplingTarget(:final parent, :final child):
-          pg.setCoupling(_edge(parent, child, EdgeKind.volatility), e.estimate);
-        case ValueCouplingTarget(:final parent, :final child):
-          pg.setCoupling(_edge(parent, child, EdgeKind.value), e.estimate);
-        case ResponseTarget() || null:
-          break; // the response model isn't part of the playground
+      if (e.param.isResponse) {
+        // A task's β is the playground's agent's.
+        if (task != null) pg.setAgentBeta(e.estimate);
+        continue;
+      }
+      for (final t in e.param.targets) {
+        switch (t) {
+          case NodeTarget(:final node, :final field):
+            pg.setParam(node, field, e.estimate);
+          case VolatilityCouplingTarget(:final parent, :final child):
+            pg.setCoupling(
+              _edge(parent, child, EdgeKind.volatility),
+              e.estimate,
+            );
+          case ValueCouplingTarget(:final parent, :final child):
+            pg.setCoupling(_edge(parent, child, EdgeKind.value), e.estimate);
+          case ResponseTarget():
+            break;
+        }
       }
     }
   }
@@ -462,6 +508,7 @@ class Fitting extends ChangeNotifier {
       for (final c in offered)
         if (free.contains(c.id)) c,
     ];
+    final task = this.task;
     final outcome = await _run(
       FitJob.recovery,
       RecoveryJob(
@@ -469,9 +516,25 @@ class Fitting extends ChangeNotifier {
         gpu: recoveryWantsGpu,
         params: params,
         model: _model(params),
-        base: _subject(includeResponses: false),
+        // A task's agents play it on every option's outcomes: the
+        // simulated ones, or (for recorded choices, whose unchosen
+        // outcomes are unknown) a simulated table as long.
+        base: task == null
+            ? _subject(includeResponses: false)
+            : Subject(
+                inputs: pg.source == DataSource.simulated
+                    ? pg.networkInput
+                    : simulateOutcomes(
+                        pg.preset.data,
+                        DataSettings(
+                          nTrials: pg.observations.length,
+                          seed: pg.data.seed,
+                        ),
+                      ).table,
+              ),
         agents: recoveryAgents,
         seed: seed ?? math.Random().nextInt(1 << 30),
+        reveals: task?.reveals,
       ),
       () => recovery = null,
     );
@@ -513,7 +576,8 @@ class Fitting extends ChangeNotifier {
     if (_data != null) _cancel();
     result = null;
     recovery = null;
-    if (!identical(_data, pg.observations) && responses != null) {
+    final newData = !identical(_data, pg.observations);
+    if (newData && responses != null) {
       responses = null;
       responsesSource = null;
       truth = null;
@@ -524,11 +588,31 @@ class Fitting extends ChangeNotifier {
     if (_presetId != pg.preset.id) {
       _presetId = pg.preset.id;
       _buildCandidates();
+      if (task != null) target = FitTarget.responses;
       _defaultFree();
+    }
+    // A choice task's responses are its agent's choices.
+    if (task != null && (newData || responses == null)) {
+      final simulated = pg.source == DataSource.simulated;
+      responses = pg.choices;
+      responsesSource = simulated
+          ? 'the simulated agent (β = ${_n(pg.agentBeta)})'
+          : pg.loadedName;
+      truth = simulated
+          ? {
+              for (final c in candidates)
+                c.id: c.isResponse ? pg.agentBeta : _current(c.target!),
+            }
+          : null;
+      revision++;
     }
   }
 
   void _buildCandidates() {
+    if (task != null) {
+      _buildTaskCandidates(task!);
+      return;
+    }
     final net = pg.network;
     final kinds = {for (var i = 0; i < net.nNodes; i++) net.kindOf(i)};
     if (kinds.contains(NodeKind.dpState)) {
@@ -673,6 +757,82 @@ class Fitting extends ChangeNotifier {
     candidates = out;
   }
 
+  /// A choice task: the options' ω (shared, or one per option), the
+  /// sensory precision of continuous outcomes (shared), and β.
+  void _buildTaskCandidates(ChoiceTask task) {
+    unsupported = null;
+    target = FitTarget.responses;
+    final net = pg.network;
+    final base = pg.preset.build()..build();
+    final nodes = task.valueNodes;
+    final w = base.getInitial(nodes.first, NodeField.tonicVolatility);
+    NodeTarget omega(int i) => NodeTarget(i, NodeField.tonicVolatility);
+    final omegaPrior = TruncatedNormal(w, 2, lower: -16, upper: 4);
+    final omegaText = 'N(${_n(w)}, 2²) on [−16, 4]';
+    final inputs = net.inputIdxs;
+    final continuous = [
+      for (final i in inputs)
+        if (net.kindOf(i) == NodeKind.continuousState) i,
+    ];
+    final b = math.log(task.beta);
+    candidates = [
+      FreeParam(
+        id: 'omega',
+        symbol: 'ω (shared)',
+        help:
+            'Tonic volatility of every option\'s value '
+            '(${nodes.map(defaultNodeLabel).join(', ')}): how fast the '
+            'agent expects them to drift.',
+        target: omega(nodes.first),
+        alsoTargets: [for (final i in nodes.skip(1)) omega(i)],
+        prior: omegaPrior,
+        priorText: omegaText,
+        defaultFree: true,
+      ),
+      for (final i in nodes)
+        FreeParam(
+          id: 'omega_$i',
+          symbol: 'ω ${defaultNodeLabel(i)}',
+          help: 'Tonic volatility of ${defaultNodeLabel(i)} alone.',
+          target: omega(i),
+          prior: omegaPrior,
+          priorText: omegaText,
+        ),
+      if (continuous.isNotEmpty)
+        FreeParam(
+          id: 'pi_u',
+          symbol: 'π_u (shared)',
+          help:
+              'Sensory precision of every outcome: how reliable one '
+              'payoff is taken to be.',
+          target: NodeTarget(continuous.first, NodeField.precision),
+          alsoTargets: [
+            for (final i in continuous.skip(1))
+              NodeTarget(i, NodeField.precision),
+          ],
+          prior: LogNormal(
+            math.log(base.getInitial(continuous.first, NodeField.precision)),
+            2,
+          ),
+          priorText: _logNormalText(
+            math.log(base.getInitial(continuous.first, NodeField.precision)),
+            2,
+          ),
+        ),
+      FreeParam(
+        id: 'beta',
+        symbol: 'β',
+        help:
+            'Inverse temperature: how deterministically the agent picks '
+            'the option it values most (0: at random).',
+        target: null,
+        prior: LogNormal(b, 1),
+        priorText: _logNormalText(b, 1),
+        defaultFree: true,
+      ),
+    ];
+  }
+
   void _defaultFree() {
     free
       ..clear()
@@ -687,6 +847,7 @@ class Fitting extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   ResponseModel _responseModel({bool agent = false}) {
+    if (task case final task?) return task.readout(pg.agentBeta);
     if (target == FitTarget.observations && !agent) {
       return ObservationSurprise(
         binary
@@ -722,7 +883,7 @@ class Fitting extends ChangeNotifier {
                   responseName: response.parameters.keys.single,
                   prior: p.prior,
                 )
-              : Parameter(p.id, targets: [p.target!], prior: p.prior),
+              : Parameter(p.id, targets: p.targets, prior: p.prior),
       ],
     );
   }
@@ -748,7 +909,7 @@ class Fitting extends ChangeNotifier {
       child,
       EdgeKind.value,
     ).strength,
-    ResponseTarget() => double.nan,
+    ResponseTarget() => task != null ? pg.agentBeta : double.nan,
   };
 
   GraphEdge _edge(int parent, int child, EdgeKind kind) =>

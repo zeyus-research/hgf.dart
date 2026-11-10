@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:hgf/hgf.dart';
+import 'package:hgf_fit/hgf_fit.dart';
 import 'package:hgf_widgets/hgf_widgets.dart';
 
 import 'data.dart';
@@ -28,6 +29,7 @@ class Playground extends ChangeNotifier {
       _preset.maxTrials,
     );
     _volatilityUpdates = _preset.volatilityUpdates ?? _volatilityUpdates;
+    agentBeta = _preset.task?.beta ?? agentBeta;
     _rebuild();
     _simulate();
     _rerun();
@@ -47,6 +49,9 @@ class Playground extends ChangeNotifier {
 
   late Preset _preset;
   Preset get preset => _preset;
+
+  /// The preset's choice task (null if the network just observes).
+  ChoiceTask? get task => _preset.task;
 
   // Parameter and coupling edits on top of the preset, re-applied whenever
   // the network is rebuilt.
@@ -81,8 +86,23 @@ class Playground extends ChangeNotifier {
   /// [observations], or their one-hot rows for a categorical input.
   Float64List get networkInput => _input;
 
-  /// `1` observed / `0` missing, per trial (null: all observed).
+  /// `1` observed / `0` missing, row-major `nTrials × nInputs` (one flag
+  /// per trial with one input; null: all observed). In a choice task, the
+  /// inputs the agent's choices revealed.
   Float64List? observed;
+
+  /// Choice tasks: the agent's choice per trial (an option index; NaN:
+  /// none). Simulated choices follow the beliefs: every edit plays the
+  /// task again (with the same random draws), so they change only where
+  /// the edited agent would choose differently.
+  Float64List? choices;
+
+  /// Choice tasks: the simulated agent's inverse temperature β (also what
+  /// the plotted choice probabilities use).
+  double agentBeta = 4;
+
+  /// Whether [choices] must be simulated again before the next filter.
+  bool _choicesStale = false;
 
   /// What generated simulated data: one series (P(u = 1), the hidden
   /// value or the source mean), or one per category.
@@ -118,6 +138,7 @@ class Playground extends ChangeNotifier {
         ? p.defaultTrials
         : math.min(data.nTrials, p.maxTrials);
     _volatilityUpdates = p.volatilityUpdates ?? _volatilityUpdates;
+    agentBeta = p.task?.beta ?? agentBeta;
     _rebuild();
     if (source == DataSource.loaded && !_loadedFits()) {
       source = DataSource.simulated;
@@ -136,6 +157,7 @@ class Playground extends ChangeNotifier {
     _couplingEdits.clear();
     _volatilityUpdates =
         _preset.volatilityUpdates ?? VolatilityUpdates.unbounded;
+    agentBeta = _preset.task?.beta ?? 4;
     final d = DataSettings();
     data
       ..nTrials = _preset.defaultTrials
@@ -158,6 +180,7 @@ class Playground extends ChangeNotifier {
     if (v == _volatilityUpdates) return;
     player = null;
     _volatilityUpdates = v;
+    _choicesStale = task != null;
     _rebuild();
     _rerun();
   }
@@ -217,8 +240,17 @@ class Playground extends ChangeNotifier {
     _afterEdit();
   }
 
+  /// Choice tasks: set the agent's inverse temperature (simulated choices
+  /// follow).
+  void setAgentBeta(double beta) {
+    agentBeta = beta;
+    _afterEdit();
+  }
+
   void _afterEdit() {
     player = null; // edits show the whole series again
+    // The agent plays the task again with its new beliefs.
+    if (task != null) _choicesStale = true;
     _requestRerun();
   }
 
@@ -264,7 +296,36 @@ class Playground extends ChangeNotifier {
     _rerun();
   }
 
-  bool _loadedFits() => loadedFits(_preset, observations, nCategories);
+  /// Choice tasks: use recorded [choices] (option indices, NaN: none) and
+  /// what each revealed ([revealed]: one series per
+  /// [ChoiceTask.revealedNames], in recorded units).
+  void loadChoices(
+    Float64List choices,
+    List<Float64List> revealed,
+    String name,
+  ) {
+    final task = this.task!;
+    final nIn = network.inputIdxs.length;
+    final d = task.data(choices, revealed, nIn);
+    player = null;
+    source = DataSource.loaded;
+    loadedName = name;
+    hidden = null;
+    _input = d.inputs;
+    observed = d.observed;
+    this.choices = choices;
+    observations = _payoffs(choices);
+    _choicesStale = false;
+    trajectories = null;
+    _rerun();
+  }
+
+  // Loaded data suits only a preset that observes the same way (choice
+  // data only the task it was loaded for, which is left by a preset change).
+  bool _loadedFits() =>
+      task == null &&
+      choices == null &&
+      loadedFits(_preset, observations, nCategories);
 
   /// Whether [values] suit [preset]'s input: anything for a continuous
   /// one, 0/1 for a binary one, category indices for a categorical one
@@ -283,6 +344,16 @@ class Playground extends ChangeNotifier {
   };
 
   void _simulate() {
+    if (task != null) {
+      final o = simulateOutcomes(_preset.data, data);
+      hidden = o.hidden;
+      _input = o.table;
+      choices = null;
+      _choicesStale = true; // played in the next _rerun
+      trajectories = null;
+      return;
+    }
+    choices = null;
     final sim = simulate(_preset.data, data, nCategories: nCategories);
     hidden = sim.hidden;
     _setObservations(sim.observations);
@@ -290,6 +361,7 @@ class Playground extends ChangeNotifier {
   }
 
   void _setObservations(Float64List values) {
+    choices = null;
     final missing = values.any((v) => !v.isFinite);
     final n = nCategories;
     if (!missing) {
@@ -312,7 +384,144 @@ class Playground extends ChangeNotifier {
   // Filtering
   // ---------------------------------------------------------------------------
 
+  /// The agent plays the task on the full outcomes ([_input]) with the
+  /// current network and β: `HgfModel.simulateChoices` with a fixed seed.
+  /// Keeps the old [choices], [observed] and [observations] (their
+  /// identity too) when nothing changed.
+  void _simulateChoices() {
+    _choicesStale = false;
+    final task = this.task!;
+    final model = HgfModel(
+      network: Network.fromJson(network.toJson()),
+      response: task.readout(agentBeta),
+      parameters: [
+        Parameter.response(
+          'beta',
+          responseName: 'inverseTemperature',
+          prior: const LogNormal(0, 1),
+        ),
+      ],
+    );
+    final sim = model
+        .simulateChoices(
+          [Subject(inputs: _input)],
+          [
+            [agentBeta],
+          ],
+          math.Random(data.seed ^ _choiceSeed),
+          reveals: task.reveals,
+        )
+        .single;
+    final c = sim.responses!, mask = sim.observed!;
+    if (choices case final old? when _same(old, c) && _same(observed, mask)) {
+      return;
+    }
+    choices = c;
+    observed = mask;
+    observations = _payoffs(c);
+  }
+
+  /// Mixed into the data seed for the agent's choices.
+  static const _choiceSeed = 0x2545F491;
+
+  static bool _same(Float64List? a, Float64List? b) {
+    if (a == null || b == null || a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i] && !(a[i].isNaN && b[i].isNaN)) return false;
+    }
+    return true;
+  }
+
+  /// What each choice paid (NaN: no choice).
+  Float64List _payoffs(Float64List choices) {
+    final task = this.task!;
+    final inputs = network.inputIdxs;
+    final nIn = inputs.length;
+    final out = Float64List(choices.length);
+    for (var t = 0; t < choices.length; t++) {
+      final c = choices[t];
+      out[t] = c.isNaN
+          ? double.nan
+          : task.payoff(_input, nIn, t, c.toInt(), inputs.indexOf);
+    }
+    return out;
+  }
+
+  /// Choice tasks: each option's value (the readout's weighted
+  /// predictions) and choice probability (softmax with [agentBeta]) per
+  /// trial, and the cumulative payoff; NaN where not filtered yet.
+  ({
+    List<Float64List> values,
+    List<Float64List> probabilities,
+    Float64List cumulative,
+  })?
+  choiceSeries() {
+    final task = this.task, traj = trajectories;
+    if (task == null || traj == null) return null;
+    final key = (traj, revision, agentBeta);
+    if (_choiceSeriesKey == key) return _choiceSeries;
+    final n = traj.nTime, k = task.options.length;
+    final values = [for (var j = 0; j < k; j++) Float64List(n)];
+    final probs = [for (var j = 0; j < k; j++) Float64List(n)];
+    final cum = Float64List(n);
+    final end = player?.t ?? n;
+    var total = 0.0;
+    for (var t = 0; t < n; t++) {
+      if (t >= end) {
+        for (var j = 0; j < k; j++) {
+          values[j][t] = probs[j][t] = double.nan;
+        }
+        cum[t] = double.nan;
+        continue;
+      }
+      var top = double.negativeInfinity;
+      for (var j = 0; j < k; j++) {
+        var v = 0.0;
+        for (final MapEntry(:key, :value) in task.weights[j].entries) {
+          v += value * traj.at(key, NodeField.expectedMean, t);
+        }
+        values[j][t] = v;
+        top = math.max(top, agentBeta * v);
+      }
+      var sum = 0.0;
+      for (var j = 0; j < k; j++) {
+        sum += probs[j][t] = math.exp(agentBeta * values[j][t] - top);
+      }
+      for (var j = 0; j < k; j++) {
+        probs[j][t] /= sum;
+      }
+      final p = observations[t];
+      if (p.isFinite) total += p;
+      cum[t] = total;
+    }
+    _choiceSeriesKey = key;
+    return _choiceSeries = (
+      values: values,
+      probabilities: probs,
+      cumulative: cum,
+    );
+  }
+
+  Object? _choiceSeriesKey;
+  ({
+    List<Float64List> values,
+    List<Float64List> probabilities,
+    Float64List cumulative,
+  })?
+  _choiceSeries;
+
   void _rerun() {
+    if (task != null && source == DataSource.simulated && _choicesStale) {
+      try {
+        _simulateChoices();
+      } catch (e) {
+        trajectories = null;
+        error = '$e';
+        revision++;
+        notifyListeners();
+        return;
+      }
+    }
     if (observations.isEmpty) {
       trajectories = null;
       notifyListeners();
@@ -490,7 +699,7 @@ class Player {
   double carry = 0;
 
   late final Float64List _obs = Float64List(owner.network.nInputColumns);
-  final Float64List _flag = Float64List(1);
+  late final Float64List _flag = Float64List(owner.network.inputIdxs.length);
 
   void restart() {
     owner.network.reset();
@@ -513,7 +722,8 @@ class Player {
       final w = _obs.length;
       _obs.setRange(0, w, owner._input, t * w);
       if (observed != null) {
-        _flag[0] = observed[t];
+        final k = _flag.length;
+        _flag.setRange(0, k, observed, t * k);
         net.step(_obs, observed: _flag);
       } else {
         net.step(_obs);

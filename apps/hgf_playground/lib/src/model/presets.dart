@@ -1,4 +1,7 @@
+import 'dart:typed_data';
+
 import 'package:hgf/hgf.dart';
+import 'package:hgf_fit/hgf_fit.dart';
 
 /// What kind of observations a preset's input node takes.
 enum InputKind {
@@ -26,6 +29,118 @@ enum DataModel {
 
   /// Draws from a few Gaussian sources, switching source every block.
   mixture,
+
+  /// The Iowa Gambling Task's four decks ([IowaGamblingTask.outcomes]).
+  igt,
+
+  /// Two arms, each with a chance of a win and of a loss; which arm is the
+  /// good one swaps every block.
+  bandit,
+}
+
+/// A task where an agent chooses among options and sees only what its
+/// choice reveals (bandits, the Iowa Gambling Task). The network learns
+/// each option's outcomes; a softmax over the options' predicted values
+/// ([SoftmaxReadout]) picks one each trial, and only the inputs in
+/// `reveals[choice]` are observed.
+class ChoiceTask {
+  const ChoiceTask({
+    required this.options,
+    required this.weights,
+    required this.reveals,
+    required this.valueNodes,
+    required this.revealedNames,
+    this.scale = 1,
+    this.unit = '',
+    this.recordedUnit = '',
+    this.beta = 4,
+  });
+
+  /// The options' names, e.g. the decks.
+  final List<String> options;
+
+  /// Each option's value as weights on input nodes' predictions (see
+  /// [SoftmaxReadout.options]); also what a choice pays: the same weights
+  /// on the outcomes it reveals.
+  final List<Map<int, double>> weights;
+
+  /// The inputs choosing each option reveals (by input position).
+  final List<List<int>> reveals;
+
+  /// The nodes whose tonic volatility sets how fast the options' values
+  /// drift (the fitted ω, shared or one each).
+  final List<int> valueNodes;
+
+  /// What a recorded choice reveals, one name per input in `reveals[k]`
+  /// (the CSV columns besides the choice), e.g. `['payoff']`.
+  final List<String> revealedNames;
+
+  /// Recorded outcomes are divided by this (e.g. dollars to units of
+  /// \$100).
+  final double scale;
+
+  /// The unit of a payoff, for labels (e.g. `\$100`).
+  final String unit;
+
+  /// The unit of recorded outcomes ([scale] of them make one [unit]).
+  final String recordedUnit;
+
+  /// The agent's default inverse temperature.
+  final double beta;
+
+  SoftmaxReadout readout(double inverseTemperature) =>
+      SoftmaxReadout(options: weights, inverseTemperature: inverseTemperature);
+
+  /// What choosing [k] pays on trial [t] of [table] (`nTime × nInputs`),
+  /// with [column] mapping a node to its input column.
+  double payoff(
+    Float64List table,
+    int nInputs,
+    int t,
+    int k,
+    int Function(int) column,
+  ) {
+    var v = 0.0;
+    for (final MapEntry(:key, :value) in weights[k].entries) {
+      v += value * table[t * nInputs + column(key)];
+    }
+    return v;
+  }
+
+  /// Inputs and observed flags for recorded data: per trial a [choices]
+  /// index (NaN: none) and, in [revealed], the values of the inputs that
+  /// choice reveals (one series per [revealedNames], in `reveals[choice]`
+  /// order, in recorded units: divided by [scale]).
+  ({Float64List inputs, Float64List observed}) data(
+    Float64List choices,
+    List<Float64List> revealed,
+    int nInputs,
+  ) {
+    if (revealed.length != revealedNames.length) {
+      throw ArgumentError('One series per ${revealedNames.join(', ')}');
+    }
+    final n = choices.length;
+    final inputs = Float64List(n * nInputs),
+        observed = Float64List(n * nInputs);
+    for (var t = 0; t < n; t++) {
+      final c = choices[t];
+      if (c.isNaN) continue;
+      final k = c.toInt();
+      if (k != c || k < 0 || k >= options.length) {
+        throw FormatException(
+          'Choice $c on trial ${t + 1} is not an option index '
+          '(0 to ${options.length - 1})',
+        );
+      }
+      for (final (j, i) in reveals[k].indexed) {
+        final v = revealed[j][t];
+        if (!v.isFinite) continue;
+        inputs[t * nInputs + i] = v / scale;
+        observed[t * nInputs + i] = 1;
+      }
+    }
+    return (inputs: inputs, observed: observed);
+  }
 }
 
 /// An editable node description; the network is rebuilt from these when its
@@ -69,6 +184,7 @@ class Preset {
     this.defaultTrials = 400,
     this.maxTrials = 10000,
     this.volatilityUpdates,
+    this.task,
   }) : assert((nodes == null) != (addTo == null));
 
   final String id;
@@ -87,6 +203,10 @@ class Preset {
 
   /// The volatility update to switch to with this preset (null: keep).
   final VolatilityUpdates? volatilityUpdates;
+
+  /// The choice task an agent plays on this network (null: the network
+  /// just observes [data]).
+  final ChoiceTask? task;
 
   Network build({
     VolatilityUpdates volatilityUpdates = VolatilityUpdates.unbounded,
@@ -229,6 +349,81 @@ final presets = <Preset>[
     input: InputKind.continuous,
     data: DataModel.randomWalk,
     addTo: (net) => net.addEfState(nus: 10.0),
+  ),
+  Preset(
+    id: 'igt',
+    name: 'Iowa Gambling Task (choices)',
+    summary:
+        'An agent picks one of four decks per trial and sees only that '
+        'card\'s payoff. A two-level HGF per deck (x₀–x₃, the payoffs; '
+        'x₄–x₇, their drifting means) learns the decks; a softmax with '
+        'inverse temperature β over the predicted payoffs chooses. A and B '
+        'pay more per card but lose in the long run.',
+    input: InputKind.continuous,
+    data: DataModel.igt,
+    // IowaGamblingTask.network(): payoffs observed with precision 1, means
+    // drifting with ω = −2 from a prior N(0, 1).
+    nodes: () => [
+      for (var d = 0; d < 4; d++)
+        NodeSpec(NodeKind.continuousState, params: {NodeField.precision: 1.0}),
+      for (var d = 0; d < 4; d++)
+        NodeSpec(
+          NodeKind.continuousState,
+          valueChildren: [d],
+          params: {NodeField.tonicVolatility: -2.0, NodeField.precision: 1.0},
+        ),
+    ],
+    defaultTrials: 100,
+    maxTrials: 2000,
+    task: ChoiceTask(
+      options: IowaGamblingTask.decks,
+      weights: [
+        for (var d = 0; d < 4; d++) {d: 1.0},
+      ],
+      reveals: IowaGamblingTask.reveals,
+      valueNodes: IowaGamblingTask.valueNodes,
+      revealedNames: ['payoff'],
+      scale: 100,
+      unit: r'$100',
+      recordedUnit: 'dollars',
+    ),
+  ),
+  Preset(
+    id: 'bandit',
+    name: 'Two-armed bandit (choices)',
+    summary:
+        'As in pyhgf\'s example: each arm may win and may lose on a trial, '
+        'and an agent sees both outcomes of the arm it pulls only. A '
+        'binary HGF each learns P(win) and P(loss) per arm (x₀–x₃; '
+        'logits x₄–x₇); an arm is worth P(win) − P(loss), and a softmax '
+        'with inverse temperature β chooses. The good arm swaps every few '
+        'trials.',
+    input: InputKind.binary,
+    data: DataModel.bandit,
+    nodes: () => [
+      for (var i = 0; i < 4; i++) NodeSpec(NodeKind.binaryState),
+      for (var i = 0; i < 4; i++)
+        NodeSpec(
+          NodeKind.continuousState,
+          valueChildren: [i],
+          params: {NodeField.tonicVolatility: -2.5},
+        ),
+    ],
+    defaultTrials: 200,
+    maxTrials: 5000,
+    task: ChoiceTask(
+      options: ['A', 'B'],
+      weights: [
+        {0: 1.0, 1: -1.0},
+        {2: 1.0, 3: -1.0},
+      ],
+      reveals: [
+        [0, 1],
+        [2, 3],
+      ],
+      valueNodes: [4, 5, 6, 7],
+      revealedNames: ['win', 'loss'],
+    ),
   ),
 ];
 

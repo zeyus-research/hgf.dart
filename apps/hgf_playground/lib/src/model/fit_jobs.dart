@@ -41,6 +41,7 @@ class FreeParam {
     required this.prior,
     required this.priorText,
     this.defaultFree = false,
+    this.alsoTargets = const [],
   });
 
   /// Stable id (also the parameter's name in the `HgfModel`).
@@ -52,6 +53,13 @@ class FreeParam {
 
   /// What it sets; null for the response model's parameter.
   final ParameterTarget? target;
+
+  /// More values it sets to the same value (a parameter shared across
+  /// nodes, e.g. one ω for all of a task's options).
+  final List<ParameterTarget> alsoTargets;
+
+  /// Everything it sets ([target] and [alsoTargets]).
+  List<ParameterTarget> get targets => [?target, ...alsoTargets];
   final Prior prior;
 
   /// The prior in words, e.g. `N(−4, 2²)`.
@@ -483,15 +491,22 @@ final class RecoveryJob extends FitJobSpec<RecoveryOutcome> {
     required this.base,
     required this.agents,
     required this.seed,
+    this.reveals,
   });
 
   final List<FreeParam> params;
   final HgfModel model;
 
-  /// The inputs (and which were observed) every agent sees.
+  /// The inputs (and which were observed) every agent sees. In a choice
+  /// task ([reveals]), every option's outcomes: each agent sees only what
+  /// its choices reveal.
   final Subject base;
   final int agents;
   final int seed;
+
+  /// A choice task's inputs revealed per option: the agents are simulated
+  /// in the closed loop (`HgfModel.simulateChoices`).
+  final List<List<int>>? reveals;
 
   @override
   Future<RecoveryOutcome> execute(JobContext ctx) async {
@@ -504,6 +519,9 @@ final class RecoveryJob extends FitJobSpec<RecoveryOutcome> {
 
     final truth = List<Float64List>.generate(n, (_) => Float64List(k));
     final responses = List<Float64List?>.filled(n, null);
+    // Per agent in a choice task: what its choices revealed.
+    final seen = List<Float64List?>.filled(n, null);
+    final reveals = this.reveals;
     // Agents still to draw; after each round, those that diverged.
     var pending = [for (var s = 0; s < n; s++) s];
     var redrawn = 0;
@@ -523,6 +541,22 @@ final class RecoveryJob extends FitJobSpec<RecoveryOutcome> {
       for (var i = 0; i < pending.length; i += chunk) {
         final ids = pending.sublist(i, math.min(i + chunk, pending.length));
         final xs = [for (final _ in ids) model.samplePrior(rng)];
+        if (reveals != null) {
+          final sims = model.simulateChoices(
+            [for (final _ in ids) base],
+            xs,
+            rng,
+            reveals: reveals,
+          );
+          for (var j = 0; j < ids.length; j++) {
+            truth[ids[j]] = xs[j];
+            responses[ids[j]] = sims[j].responses;
+            seen[ids[j]] = sims[j].observed;
+          }
+          await Future<void>.delayed(Duration.zero);
+          ctx.check();
+          continue;
+        }
         final sims = model.simulate([for (final _ in ids) base], xs, rng);
         for (var j = 0; j < ids.length; j++) {
           truth[ids[j]] = xs[j];
@@ -539,7 +573,7 @@ final class RecoveryJob extends FitJobSpec<RecoveryOutcome> {
       }
       final finite = await _finiteAt(
         runner,
-        [for (final s in pending) _agent(responses[s]!, s)],
+        [for (final s in pending) _agent(responses[s]!, seen[s], s)],
         [for (final s in pending) truth[s]],
       );
       ctx.check();
@@ -553,7 +587,7 @@ final class RecoveryJob extends FitJobSpec<RecoveryOutcome> {
       for (var s = 0; s < n; s++)
         if (!dropped.contains(s)) s,
     ];
-    final subjects = [for (final s in kept) _agent(responses[s]!, s)];
+    final subjects = [for (final s in kept) _agent(responses[s]!, seen[s], s)];
     final runs = subjects.length * (config.restarts + 1);
     ctx.report(
       JobStage(
@@ -597,9 +631,9 @@ final class RecoveryJob extends FitJobSpec<RecoveryOutcome> {
     );
   }
 
-  Subject _agent(Float64List responses, int id) => Subject(
+  Subject _agent(Float64List responses, Float64List? seen, int id) => Subject(
     inputs: base.inputs,
-    observed: base.observed,
+    observed: seen ?? base.observed,
     responses: responses,
     id: id,
   );

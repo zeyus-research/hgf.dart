@@ -92,6 +92,7 @@ JsonMap _encodeParam(FreeParam p) => {
   'prior': _codec.encodePrior(p.prior),
   'priorText': p.priorText,
   'defaultFree': p.defaultFree,
+  'also': [for (final t in p.alsoTargets) FitCodec.encodeTarget(t)],
 };
 
 FreeParam _decodeParam(JsonMap j) => FreeParam(
@@ -104,6 +105,10 @@ FreeParam _decodeParam(JsonMap j) => FreeParam(
   prior: _codec.decodePrior(j['prior']! as JsonMap),
   priorText: j['priorText']! as String,
   defaultFree: j['defaultFree']! as bool,
+  alsoTargets: [
+    for (final t in j['also'] as List<Object?>? ?? const [])
+      FitCodec.decodeTarget(t! as JsonMap),
+  ],
 );
 
 JsonMap _encodeSubject(Subject s) => {
@@ -143,6 +148,7 @@ Packed encodeJob(FitJobSpec<Object?> job) => pack({
       'base': _encodeSubject(job.base),
       'agents': job.agents,
       'seed': job.seed,
+      'reveals': job.reveals,
     },
   },
 });
@@ -174,6 +180,12 @@ FitJobSpec<Object?> decodeJob(String json, List<Float64List> arrays) {
       base: _decodeSubject(j['base']! as JsonMap),
       agents: _i(j['agents']),
       seed: _i(j['seed']),
+      reveals: switch (j['reveals']) {
+        final List<Object?> rs => [
+          for (final r in rs) [for (final i in r! as List<Object?>) _i(i)],
+        ],
+        _ => null,
+      },
     ),
     final kind => throw FormatException('Bad fit job kind: $kind'),
   };

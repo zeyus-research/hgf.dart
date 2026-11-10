@@ -64,10 +64,17 @@ class RecoveryCard extends StatelessWidget {
       title: 'Parameter recovery',
       children: [
         Text(
-          'Simulates agents on these observations, each with its free '
-          'parameters drawn from their priors (the others at the sliders\' '
-          'values), fits every agent by MAP, and plots the estimates '
-          'against the truth: recovered parameters lie on the diagonal.',
+          f.task != null
+              ? 'Simulates agents playing the task (each sees only what its '
+                    'own choices reveal), each with its free parameters '
+                    'drawn from their priors (the others at the sliders\' '
+                    'values), fits every agent\'s choices by MAP, and plots '
+                    'the estimates against the truth: recovered parameters '
+                    'lie on the diagonal.'
+              : 'Simulates agents on these observations, each with its free '
+                    'parameters drawn from their priors (the others at the sliders\' '
+                    'values), fits every agent by MAP, and plots the estimates '
+                    'against the truth: recovered parameters lie on the diagonal.',
           style: small,
         ),
         const SizedBox(height: 8),
