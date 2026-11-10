@@ -26,6 +26,7 @@ final class LayerState {
     this.expectedPrecisionVol,
     this.effectivePrecisionVol,
     this.volatilityPredictionError,
+    this.knownVariance,
   );
 
   /// pyhgf's defaults: means 0, precisions 1, effective precisions and
@@ -48,6 +49,7 @@ final class LayerState {
       volatility ? filled(1) : null,
       volatility ? filled(0) : null,
       volatility ? filled(0) : null,
+      volatility ? filled(1) : null,
     );
   }
 
@@ -79,6 +81,7 @@ final class LayerState {
       tn(expectedPrecisionVol),
       tn(effectivePrecisionVol),
       tn(volatilityPredictionError),
+      tn(knownVariance),
     );
   }
 
@@ -95,6 +98,7 @@ final class LayerState {
       final dst = field(f);
       if (dst != null) t(dst, template.field(f)!);
     }
+    if (knownVariance != null) t(knownVariance!, template.knownVariance!);
   }
 
   /// A deep copy.
@@ -117,6 +121,7 @@ final class LayerState {
       cn(expectedPrecisionVol),
       cn(effectivePrecisionVol),
       cn(volatilityPredictionError),
+      cn(knownVariance),
     );
   }
 
@@ -127,6 +132,7 @@ final class LayerState {
       final dst = field(f);
       if (dst != null) dst.setAll(0, other.field(f)!);
     }
+    knownVariance?.setAll(0, other.knownVariance!);
   }
 
   /// Number of nodes.
@@ -160,6 +166,12 @@ final class LayerState {
   final Float64List? expectedPrecisionVol;
   final Float64List? effectivePrecisionVol;
   final Float64List? volatilityPredictionError;
+
+  /// The variance of the value-level prediction that does not depend on the
+  /// volatility level (the carried `1/π`), stored at prediction time for
+  /// the eHGF and unbounded volatility posteriors under
+  /// [DeepFixes.logSpaceVolatility]. Internal: not a [LayerField].
+  final Float64List? knownVariance;
 
   /// The field's values (`null` for a volatility field the layer lacks).
   Float64List? field(LayerField f) => switch (f) {

@@ -14,7 +14,8 @@ cd tool/parity && uv run python ../../docs/upstream/pyhgf/<script>.py
 Run the dart2wasm repros with `docs/upstream/dart2wasm/run.sh` (needs `dart`
 and `node`; `taskset -c 2 ./run.sh` gives steadier timings).
 
-Checked against pyhgf `6be12eb4` (0.3.2) and Dart 3.13.7.
+Checked against pyhgf `6be12eb4` (0.3.2) and Dart 3.13.7; `hgf_deep` (P18,
+P19) against pyhgf `1e6e98d7` (after #475–#477).
 
 | id | where | issue | severity | reported |
 |---|---|---|---|---|
@@ -35,7 +36,8 @@ Checked against pyhgf `6be12eb4` (0.3.2) and Dart 3.13.7.
 | [P15](#p15) | pyhgf JAX | dp-state results depend on JAX's PRNG mode and precision; the tests pin the legacy mode | low | [ ] |
 | [P16](#p16) | pyhgf JAX | dp-state `batch_size` ≠ number of clusters fails inside the scan | low | [ ] |
 | [P17](#p17) | pyhgf JAX + rshgf | unbounded volatility update (the default) runs away on 3-level binary HGFs | **high**: runaway beliefs | [ ] |
-| [P18](#p18) | pyhgf JAX + rshgf | `DeepNetwork`'s volatility levels run away (all three updates), then NaN | **high**: NaN | [ ] |
+| [P18](#p18) | pyhgf JAX + rshgf | `DeepNetwork`'s volatility levels run away (all three updates), then NaN: the value posterior's precision floor lets the curvature term cancel the evidence | **high**: NaN | [ ] |
+| [P19](#p19) | pyhgf JAX | `DeepNetwork`: exp overflow and a cancelling reconstruction turn a runaway volatility level into NaN; an improper 0/0 posterior after it | medium: NaN | [ ] |
 | [R1](#r1) | rshgf | ef-state ignores `observed`; univariate fixed rate only | medium | [ ] |
 | [R2](#r2) | rshgf | hot-path costs (string compares, allocations, clones) | perf | [ ] |
 | [R3](#r3) | rshgf | GELU coupling uses a 1.5e-7 `erfc` approximation (called exact) | low | [ ] |
@@ -409,15 +411,51 @@ The hidden layer's `mean_vol` ratchets up in steps (in one run 17 → 56 →
 106 → 204 within 27 samples), its predicted precision collapses
 (π̂ ≈ e^−μ_vol, down to 1e−185), one posterior mean step `msg·g′/π` then
 moves the node by orders of magnitude (to −4e183), and the volatility
-posterior goes NaN. Weight learning is not the driver: frozen weights run
-away sooner. Not diagnosed further.
+posterior goes NaN. Weight learning is not the driver: frozen weights run away sooner.
 
-Ruled out: the reconstruction `previous_variance = max(1/π̄ − Ω, 1e-128)`
-in the eHGF and unbounded posteriors cancels catastrophically once Ω ≫
-1/π (it returns 32 instead of 3.33 at μ̂_vol = 40, and the 1e-128 floor from
-55), but there the weight σ(γ − log prev) is ≈ 1 either way and the posterior
-barely moves (checked in isolation). Storing the prior variance at prediction
-time would still be the cleaner computation.
+**Cause.** A hidden layer's value posterior precision is
+`π = clip(π̂ + Σ w²·γ_a·g′² − g″·Σ w·g_a·δ_a, π̂, max)`
+(`vectorised_layer_posterior_update`): the information term plus a
+second-order curvature term, floored at the prior precision π̂. The
+curvature term is often negative and larger than the information (tanh
+nodes away from 0), so π falls back to π̂, while the mean still moves by
+the full message, `Δμ = g′·Σ w·g_a·δ_a / π`. Once π̂ is small (Ω ≥ 1 per
+sample with pyhgf's default ω), that step is 10³–10¹⁵: in one hgf_deep trace
+of the moons task π̂ = 6e−4, information 0.02, curvature −0.40, and the node
+moves by 2.2e3 where the information alone would give 69. The volatility
+prediction error `π̂/π + π̂·(μ − μ̂)² − 1` then takes values of 10³–10⁴,
+μ_vol jumps, π̂ = e^−μ_vol collapses further, and the loop closes.
+
+**Fix (proposed):** floor π at `π̂ + Σ w²·γ_a·g′²` instead of π̂, i.e. drop
+a negative curvature term (a Gauss–Newton step when the curvature would cut
+the evidence). The step can then never exceed the one the information alone
+makes. With it, the repro's three schemes stay finite (JAX, patched):
+
+```
+floor unbounded hidden mean_vol max at t=0,10,20,30: 0.031, 0.229, 0.46, 0.461   first NaN at sample: None
+floor eHGF      hidden mean_vol max at t=0,10,20,30: -0.0112, 0.105, 0.363, 0.189   first NaN at sample: None
+floor standard  hidden mean_vol max at t=0,10,20,30: -0.00938, 0.0881, 0.301, 0.208   first NaN at sample: None
+```
+
+and in hgf_deep, 500 samples on five seeds of the same setting stay finite
+under every scheme (μ_vol ≤ 1.7; pyhgf goes NaN at samples 5–270).
+**hgf.dart:** `DeepFixes.curvatureFloor`, on by default
+(`DeepFixes.recommended`; `DeepFixes.none`, `DeepNetwork.defaultFixes` or
+`-DHGF_DEEP_UPSTREAM=true` give pyhgf). The `floor_*` fixtures check it
+against the patched JAX (`_CurvatureFloor` in
+[`tool/parity/gen_deep_fixtures.py`](../../tool/parity/gen_deep_fixtures.py)).
+
+**Still open: learning.** With weight learning on 2-D classification (moons,
+circles; 2-16-16-1 tanh, Adam 0.01) the floor removes most NaN (moons
+0.91 → 0.99 test accuracy with the standard update) but not all: hidden
+nodes still drift to μ_vol ≈ 10–15 (Ω ≈ 10⁵ per sample), where their
+pseudo-observations are effectively ignored, and the standard update's
+volatility precision `π̂_v + ½γ² + γ²δ − ½γδ` goes negative once γ ≈ ½ and δ
+is large (the scheme's known limitation). Networks without a volatility
+level, or with a value-level tonic volatility, learn every toy task to
+0.99–1.00. This is the model's own feedback (large steps read as
+volatility), not a numerical fault; a principled damping would be a
+modelling change.
 
 **rshgf diverges from JAX silently after the first NaN:** Rust's
 `f64::max`/`min` return the other operand when one is NaN, where
@@ -437,6 +475,37 @@ did, depending on update and data scale. Without carried
 precision (`carryPrecision: false`, no volatility levels) none did over 400
 samples. This bounds any sequential `fit` comparison, and what an ensemble of
 deep HGF networks can be trained for, until it is fixed.
+
+
+### P19
+
+**`DeepNetwork`: a runaway volatility level becomes NaN through overflow
+and cancellation** (JAX), after P18 has let μ_vol grow past ~700.
+
+- The value-level prediction's effective precision is `γ = Ω·π̂` with
+  `Ω = t·exp(μ_vol + …)`: `∞·0 = NaN` once Ω overflows, where its value
+  `Ω/(a + Ω)` tends to 1.
+- The eHGF and unbounded volatility posteriors rebuild the known variance
+  as `max(1/π̄ − Ω, 1e-128)`, which cancels catastrophically once Ω ≫ 1/π
+  (P18's "ruled out" note) and is `∞ − ∞` once Ω overflows.
+- The eHGF re-prediction `r = t·exp(ω + μ_vol)` overflows the same way:
+  `r/(p + r) = ∞/∞`.
+
+**Fix (proposed):** store the known variance (the carried `1/π`) at
+prediction time; write `γ = 1/(1 + a/Ω)`; and evaluate the eHGF terms as
+`σ(ln r − ln p)`, `2σ(ln r − ln p) − 1` and
+`exp(−logaddexp(ln p, ln r))`. These are the same values wherever pyhgf is
+finite (hgf_deep checks every fixture to 1e-7 relative up to pyhgf's first
+NaN), and a runaway node keeps finite beliefs with π̂ → 0, so it drops out
+of its parents' updates instead of turning the layers above it NaN.
+**hgf.dart:** `DeepFixes.logSpaceVolatility`, on by default.
+
+**Open: the improper posterior.** A node whose volatility has run away has
+π̂ = 0 exactly; if its tanh is also saturated (g′ = 0 in double), its
+posterior is `π = 0 + 0` and its mean step `msg·g′/π = 0/0`. A flat prior
+meeting no evidence has no posterior, so this is a modelling question,
+not a numerical one (hgf_deep leaves the NaN). One option: no update when
+π = 0 (the limit of a fixed prior as the information vanishes).
 
 ## rshgf
 

@@ -19,6 +19,10 @@ sealed class Optimiser {
 
   /// Forget the state (the next step starts afresh).
   void reset();
+
+  /// An independent copy, state included (a step on the copy leaves this
+  /// one unchanged).
+  Optimiser copy();
 }
 
 /// Plain SGD: `w ← w + (−lr · g)` (`optax.sgd(lr)`).
@@ -43,6 +47,9 @@ final class Sgd extends Optimiser {
 
   @override
   void reset() {}
+
+  @override
+  Sgd copy() => this;
 }
 
 /// Adam (Kingma & Ba, 2015), as `optax.adam(lr, b1, b2, eps, eps_root)`.
@@ -132,5 +139,15 @@ final class Adam extends Optimiser {
     _mu = const [];
     _nu = const [];
     _count = 0;
+  }
+
+  @override
+  Adam copy() {
+    Float64List? c(Float64List? v) =>
+        v == null ? null : Float64List.fromList(v);
+    return Adam(learningRate, b1: b1, b2: b2, eps: eps, epsRoot: epsRoot)
+      .._count = _count
+      .._mu = [for (final m in _mu) c(m)]
+      .._nu = [for (final v in _nu) c(v)];
   }
 }

@@ -17,6 +17,7 @@ export 'src/math.dart'
         gaussianDensity,
         gaussianSurprise,
         lambertW0,
+        lambertW0Log,
         logGamma,
         logAddExp,
         sigmoid,

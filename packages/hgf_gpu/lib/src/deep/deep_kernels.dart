@@ -73,6 +73,9 @@ final class _LayerLayout {
   final template = <LayerField, int>{};
   int? coupled, perParent, effc, gain, u, h, predicted;
 
+  /// The known variance of the value-level prediction (DeepFixes.logSpaceVolatility).
+  int? known;
+
   /// Weight-gradient partial sums (split-K over samples), and how many.
   int? partial;
   int splits = 1;
@@ -195,6 +198,10 @@ final class DeepKernels {
           ll.perParent = s;
           s += rows * bm;
         }
+      }
+      if (_storesKnownVariance(i)) {
+        ll.known = s;
+        s += n * bm;
       }
       if (!isTop) {
         ll.gain = s;
@@ -650,6 +657,15 @@ $body
     );
   }
 
+  /// Whether layer [l]'s prediction stores its known variance (the carried
+  /// `1/π`) for the volatility posterior ([DeepFixes.logSpaceVolatility]).
+  bool _storesKnownVariance(int l) =>
+      settings.fixes.logSpaceVolatility &&
+      settings.predictPrecision &&
+      layers[l].kind == LayerKind.volatile &&
+      layers[l].hasVolatility &&
+      !layers[l].isInputLayer;
+
   /// Whether layer [l]'s prediction adds the feedforward uncertainty
   /// `Σ W²·g'²/π̂` of its parents (the second accumulator `acc1`).
   bool _feedforward(int l) =>
@@ -724,8 +740,21 @@ $body
               '${ffu ? 'acc1' : '0.0f'}, MINV);',
             )
             ..writeln('  ${S(LayerField.conditionalExpectedPrecision)} = cond;')
-            ..writeln('  ${S(LayerField.expectedPrecision)} = ep;')
-            ..writeln('  ${S(LayerField.effectivePrecision)} = predVol * ep;');
+            ..writeln('  ${S(LayerField.expectedPrecision)} = ep;');
+          if (settings.fixes.logSpaceVolatility) {
+            // γ = Ω/(a + Ω) = 1/(1 + a/Ω): the limit 1, not ∞·0, once Ω
+            // overflows (DeepFixes.logSpaceVolatility).
+            e.writeln(
+              '  ${S(LayerField.effectivePrecision)} = select(predVol * ep, '
+              '1.0f / (1.0f + (1.0f / pi + ${ffu ? 'acc1' : '0.0f'}) / predVol), '
+              '1.0f / pi + predVol >= MINV);',
+            );
+          } else {
+            e.writeln('  ${S(LayerField.effectivePrecision)} = predVol * ep;');
+          }
+          if (_l[l].known != null) {
+            e.writeln('  ${_at(_l[l].known!, 'k')} = 1.0f / pi;');
+          }
         }
         _coupledOut(e, l, 'mu');
       case LayerKind.binary:
@@ -841,9 +870,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       ..writeln('  let g1 = ${_dg(fn, 'x')};')
       ..writeln('  let g2 = ${_d2g(fn, 'x')};')
       ..writeln('  let epx = ${_s(l, LayerField.expectedPrecision, 'k')};')
-      ..writeln('  let raw = epx + pc1 * (g1 * g1) + (-g2 * msg);')
+      ..writeln('  let info = pc1 * (g1 * g1);')
+      ..writeln('  let raw = epx + info + (-g2 * msg);')
       ..writeln(
-        '  let prec = minN(maxN(raw, epx), '
+        // DeepFixes.curvatureFloor: floor at π̂ + information, not π̂.
+        '  let prec = minN(maxN(raw, '
+        '${settings.fixes.curvatureFloor ? 'epx + info' : 'epx'}), '
         '${_f(settings.maxPosteriorPrecision)});',
       )
       ..writeln('  ${_s(l, LayerField.precision, 'k')} = prec;')
@@ -951,20 +983,37 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!settings.meanFieldUpdates) {
       e.writeln('  logVol = logVol + 1.0f / (2.0f * evp);');
     }
-    e
-      ..writeln('  let predicted = U.t * exp(logVol);')
-      ..writeln('  let cepv = ${S(LayerField.conditionalExpectedPrecision)};')
-      ..writeln('  var previous = floorV(1.0f / cepv - predicted, MINV);');
+    e.writeln('  let cepv = ${S(LayerField.conditionalExpectedPrecision)};');
+    if (ll.known != null) {
+      // The stored known variance, not 1/π̄ − Ω (which cancels).
+      e.writeln('  var previous = ${_at(ll.known!, 'k')};');
+    } else {
+      e
+        ..writeln('  let predicted = U.t * exp(logVol);')
+        ..writeln('  var previous = floorV(1.0f / cepv - predicted, MINV);');
+    }
     if (settings.feedforwardUncertainty) {
       e.writeln('  previous = previous + maxN(1.0f / ep - 1.0f / cepv, 0.0f);');
     }
     if (settings.volatilityUpdates == DeepVolatilityUpdate.ehgf) {
+      e.writeln('  let postMean = evm + effv0 * dpe / (2.0f * evp);');
+      if (settings.fixes.logSpaceVolatility) {
+        e
+          ..writeln(
+            '  let logRep = select(log(U.t), 0.0f, U.t == 1.0f) + omega + postMean;',
+          )
+          ..writeln('  let logPrevE = log(previous);')
+          ..writeln('  let eff2 = sigm(logRep - logPrevE);')
+          ..writeln('  let expected = exp(-logAddExp(logPrevE, logRep));')
+          ..writeln('  let weight = 2.0f * eff2 - 1.0f;');
+      } else {
+        e
+          ..writeln('  let repredicted = U.t * exp(omega + postMean);')
+          ..writeln('  let expected = 1.0f / (previous + repredicted);')
+          ..writeln('  let eff2 = repredicted * expected;')
+          ..writeln('  let weight = (repredicted - previous) * expected;');
+      }
       e
-        ..writeln('  let postMean = evm + effv0 * dpe / (2.0f * evp);')
-        ..writeln('  let repredicted = U.t * exp(omega + postMean);')
-        ..writeln('  let expected = 1.0f / (previous + repredicted);')
-        ..writeln('  let eff2 = repredicted * expected;')
-        ..writeln('  let weight = (repredicted - previous) * expected;')
         ..writeln('  let dd = mean - em;')
         ..writeln('  let vpe2 = (1.0f / prec + dd * dd) * expected - 1.0f;')
         ..writeln(
@@ -1080,7 +1129,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       epilogue: splits > 1
           ? '  ${_at(ll.partial!, 'split * ${nc * cols}u + r * ${cols}u + c')}'
                 ' = acc0;'
-          : '  let g = acc0 / f32(U.b);\n'
+          : '  let g = ${_edge(l, 'acc0 / f32(U.b)')};\n'
                 '  let wi = r * ${cols}u + c;\n$step',
       grid: (tm, tn) =>
           (_) => ((cols + tn - 1) ~/ tn, (nc + tm - 1) ~/ tm),
@@ -1099,12 +1148,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   for (var sp = 0u; sp < ${splits}u; sp++) {
     sum += ${_at(ll.partial!, 'sp * ${n}u + wi')};
   }
-  let g = sum / f32(U.b);
+  let r = wi / ${cols}u; let c = wi % ${cols}u;
+  let g = ${_edge(l, 'sum / f32(U.b)')};
 $step
 }
 ''', (_) => ((n + 63) ~/ 64, 1)),
     ];
   }
+
+  /// Gradient [g] of weight `(r, c)` of layer [l]: zero off the diagonal
+  /// of a one-to-one layer, whose only edges are the diagonal (pyhgf #476).
+  String _edge(int l, String g) =>
+      layers[l].config.fullyConnected ? g : 'select(0.0f, $g, r == c)';
 
   /// The optimiser's update of weight `wi` of layer [l] from gradient `g`.
   /// [bc1] and [bc2] are Adam's bias corrections (WGSL expressions).

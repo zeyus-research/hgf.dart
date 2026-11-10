@@ -9,6 +9,7 @@ import 'kernels.dart';
 import 'matrix.dart';
 import 'optimiser.dart';
 import 'state.dart';
+import 'trace.dart';
 
 /// A deep predictive-coding network of HGF layers with learned weights: a
 /// port of pyhgf's vectorised `DeepNetwork`.
@@ -42,6 +43,7 @@ final class DeepNetwork {
     this.tonicVolatility = false,
     bool meanFieldUpdates = false,
     bool carryPrecision = true,
+    DeepFixes? fixes,
   }) : settings = DeepSettings(
          volatilityUpdates: volatilityUpdates,
          maxPosteriorPrecision: maxPosteriorPrecision,
@@ -50,6 +52,7 @@ final class DeepNetwork {
          feedforwardUncertainty: feedforwardUncertainty,
          carryPrecision: carryPrecision,
          meanFieldUpdates: meanFieldUpdates,
+         fixes: fixes ?? defaultFixes,
        ) {
     if (meanFieldUpdates && feedforwardUncertainty) {
       throw ArgumentError(
@@ -66,6 +69,15 @@ final class DeepNetwork {
       );
     }
   }
+
+  /// The corrections a network built without `fixes:` uses
+  /// ([DeepFixes.recommended]). Set it to [DeepFixes.none] to reproduce
+  /// pyhgf everywhere (the parity tests do), or start the program with
+  /// `-DHGF_DEEP_UPSTREAM=true`.
+  static DeepFixes defaultFixes =
+      const bool.fromEnvironment('HGF_DEEP_UPSTREAM')
+      ? DeepFixes.none
+      : DeepFixes.recommended;
 
   /// The default coupling function of layers added without one.
   final Coupling coupling;
@@ -263,7 +275,8 @@ final class DeepNetwork {
     }
   }
 
-  /// Draw every weight matrix from [strategy]. The bias column is set to
+  /// Draw every dense weight matrix from [strategy] (one-to-one layers keep
+  /// the identity). The bias column is set to
   /// zero and left out of the fan-in. Each layer draws from its own stream,
   /// seeded from [seed] and its index, so adding layers above leaves the
   /// lower layers' draws unchanged. The same [seed] gives the same weights
@@ -271,6 +284,9 @@ final class DeepNetwork {
   DeepNetwork weightInitialisation(WeightInit strategy, {int seed = 0}) {
     for (var l = 1; l < _layers.length; l++) {
       final layer = _layers[l];
+      // One-to-one layers keep their identity weights: every strategy draws
+      // at the scale of a dense fan-in (pyhgf #476).
+      if (!layer.config.fullyConnected) continue;
       final w = layer.weights!;
       final nParents = w.cols - (layer.hasConstant ? 1 : 0);
       // Not Object.hash: its seed is randomised per process.
@@ -337,22 +353,152 @@ final class DeepNetwork {
     final grads = _gradBuffers();
     final weights = this.weights;
     for (var t = 0; t < n; t++) {
-      predictionSweep(_layers, _state, x, t, _ws1, timeStep, settings);
-      updateSweep(_layers, _state, y, t, _ws1, timeStep, settings);
-      if (weightUpdate) {
-        for (final g in grads) {
-          g?.fillRange(0, g.length, 0.0);
-        }
-        accumulateGradients(_layers, _state, _ws1, learningKind, grads);
-        optimiser!.step(weights, grads);
-      }
-      out.data.setAll(t * out.cols, _state.first.expectedMean);
-      if (template != null) _restoreCarried(template);
-      traj?._record(t, _state);
-      if (updatePrecisions) carryPrecisions(_layers, _state, settings);
+      _stepRow(
+        x,
+        y,
+        t,
+        weightUpdate ? optimiser : null,
+        learningKind,
+        timeStep,
+        template,
+        updatePrecisions,
+        grads,
+        weights,
+        out,
+        traj,
+        null,
+      );
     }
     trajectories = traj;
     return out;
+  }
+
+  /// One row of [fit]; shared with [trace] so both run the same arithmetic.
+  void _stepRow(
+    Matrix x,
+    Matrix y,
+    int t,
+    Optimiser? optimiser,
+    LearningKind learningKind,
+    double timeStep,
+    List<LayerState>? template,
+    bool updatePrecisions,
+    List<Float64List?> grads,
+    List<Matrix?> weights,
+    Matrix out,
+    DeepTrajectories? traj,
+    TraceRecorder? rec,
+  ) {
+    final hook = rec == null
+        ? null
+        : (TracePhase phase, int layer) => rec.record(phase, layer, _state);
+    predictionSweep(_layers, _state, x, t, _ws1, timeStep, settings, hook);
+    updateSweep(_layers, _state, y, t, _ws1, timeStep, settings, hook);
+    if (optimiser != null || rec != null) {
+      for (final g in grads) {
+        g?.fillRange(0, g.length, 0.0);
+      }
+      accumulateGradients(_layers, _state, _ws1, learningKind, grads);
+      optimiser?.step(weights, grads);
+      rec?.record(
+        TracePhase.weightUpdate,
+        -1,
+        _state,
+        weights: weights,
+        gradients: [
+          for (var l = 0; l < grads.length; l++)
+            grads[l] == null
+                ? null
+                : Matrix(
+                    weights[l]!.rows,
+                    weights[l]!.cols,
+                    Float64List.fromList(grads[l]!),
+                  ),
+        ],
+      );
+    }
+    out.data.setAll(t * out.cols, _state.first.expectedMean);
+    if (template != null) _restoreCarried(template);
+    traj?._record(t, _state);
+    if (updatePrecisions) carryPrecisions(_layers, _state, settings);
+    rec?.record(TracePhase.carry, -1, _state);
+  }
+
+  /// Run one sample exactly as one row of [fit] and record the network
+  /// after every phase: the input clamp, each layer's top-down prediction,
+  /// the observation, the leaf error, each interior layer's posterior and
+  /// error, the weight step and the carry. For teaching and inspection:
+  /// the arithmetic is [fit]'s, so tracing rows one by one leaves the
+  /// network exactly where [fit] would.
+  ///
+  /// With [y] `null` only the prediction sweep runs and nothing is learned
+  /// (the beliefs still hold the predictions; [snapshot] and [restore] undo
+  /// that). The descent gradients are recorded even when [optimiser] is
+  /// `null` (no step is taken then).
+  DeepTrace trace(
+    List<double> x, {
+    List<double>? y,
+    Optimiser? optimiser,
+    LearningKind learningKind = LearningKind.precisionWeighted,
+    double timeStep = 1.0,
+    bool updatePrecisions = true,
+  }) {
+    _requireLayers(2);
+    final xm = Matrix.row(x);
+    _checkColumns(xm, _configs.last.size, 'x');
+    final weights = this.weights;
+    final rec = TraceRecorder(weights);
+    if (y == null) {
+      predictionSweep(
+        _layers,
+        _state,
+        xm,
+        0,
+        _ws1,
+        timeStep,
+        settings,
+        (phase, layer) => rec.record(phase, layer, _state),
+      );
+      return rec.finish(List.of(_state.first.expectedMean));
+    }
+    final ym = Matrix.row(y);
+    _checkColumns(ym, _configs.first.size, 'y');
+    final out = Matrix(1, _configs.first.size);
+    _stepRow(
+      xm,
+      ym,
+      0,
+      optimiser,
+      learningKind,
+      timeStep,
+      updatePrecisions ? null : [for (final s in _state) s.copy()],
+      updatePrecisions,
+      _gradBuffers(),
+      weights,
+      out,
+      null,
+      rec,
+    );
+    return rec.finish(List.of(out.data));
+  }
+
+  /// A copy of the weights and beliefs, for [restore].
+  DeepSnapshot snapshot() => DeepSnapshot._(
+    [for (final l in _layers) l.weights?.copy()],
+    [for (final s in _state) s.copy()],
+  );
+
+  /// Put the weights and beliefs back to [snap] (taken from this network,
+  /// with the same layers).
+  void restore(DeepSnapshot snap) {
+    if (snap._states.length != _state.length) {
+      throw ArgumentError('The snapshot is of a different network.');
+    }
+    for (var l = 0; l < _layers.length; l++) {
+      final w = snap._weights[l];
+      if (w != null) _layers[l].weights!.data.setAll(0, w.data);
+      _state[l].setFrom(snap._states[l]);
+    }
   }
 
   List<Float64List?> _gradBuffers() => [
@@ -569,4 +715,13 @@ final class DeepTrajectories {
       }
     });
   }
+}
+
+/// A copy of a [DeepNetwork]'s weights and beliefs ([DeepNetwork.snapshot]).
+/// Optimiser state is not included (see [Optimiser.copy]).
+final class DeepSnapshot {
+  DeepSnapshot._(this._weights, this._states);
+
+  final List<Matrix?> _weights;
+  final List<LayerState> _states;
 }

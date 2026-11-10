@@ -53,8 +53,20 @@ String? firstMismatch(
       '(max rel err ${maxRel.toStringAsExponential(2)})';
 }
 
-/// Build the fixture's network with its starting weights.
-DeepNetwork buildNetwork(Map<String, Object?> fixture) {
+/// The corrections a fixture was generated with: none (released pyhgf)
+/// unless its settings name some (a patched reference, see
+/// `tool/parity/gen_deep_fixtures.py`).
+DeepFixes fixesOf(Map<String, Object?> settings) {
+  final f = settings['fixes'] as Map<String, Object?>? ?? const {};
+  return DeepFixes(
+    curvatureFloor: f['curvature_floor'] as bool? ?? false,
+    logSpaceVolatility: f['log_space_volatility'] as bool? ?? false,
+  );
+}
+
+/// Build the fixture's network with its starting weights ([fixes] overrides
+/// the fixture's own).
+DeepNetwork buildNetwork(Map<String, Object?> fixture, {DeepFixes? fixes}) {
   final s = fixture['settings'] as Map<String, Object?>;
   final net = DeepNetwork(
     coupling: CouplingFn.parse(s['coupling'] as String? ?? 'linear'),
@@ -70,6 +82,7 @@ DeepNetwork buildNetwork(Map<String, Object?> fixture) {
     tonicVolatility: s['tonic_volatility'] as bool? ?? false,
     meanFieldUpdates: s['mean_field_updates'] as bool? ?? false,
     carryPrecision: s['carry_precision'] as bool? ?? true,
+    fixes: fixes ?? fixesOf(s),
   );
   for (final raw in fixture['layers'] as List<Object?>) {
     final layer = raw as Map<String, Object?>;
@@ -111,20 +124,64 @@ Optimiser? _optimiser(Map<int, Optimiser> cache, Object? spec) {
   });
 }
 
+/// Whether any value in [v] (nested lists of decoded numbers) is not finite.
+bool _anyNonFinite(Object? v) => switch (v) {
+  null => false,
+  List<Object?>() => v.any(_anyNonFinite),
+  Map<String, Object?>() => v.values.any(_anyNonFinite),
+  num() => !v.isFinite,
+  'NaN' || 'Infinity' || '-Infinity' => true,
+  _ => false,
+};
+
+/// The first sample at which any recorded reference trajectory is not
+/// finite (`null` if none is).
+int? _firstNonFiniteRow(Map<String, Object?>? traj) {
+  int? first;
+  traj?.forEach((_, perLayer) {
+    for (final layer in perLayer as List<Object?>) {
+      if (layer == null) continue;
+      final rows = layer as List<Object?>;
+      for (var t = 0; t < rows.length; t++) {
+        if (_anyNonFinite(rows[t])) {
+          if (first == null || t < first!) first = t;
+          break;
+        }
+      }
+    }
+  });
+  return first;
+}
+
+int _currentSamples = 1;
+
 /// Run every operation of [fixture] and compare against the reference.
 /// Returns the mismatches (empty when everything agrees).
+///
+/// With [finiteOnly] the comparison stops where the reference first holds a
+/// non-finite value: within a `fit` it covers the samples before it, and no
+/// later operation is compared (for corrections that change only what
+/// pyhgf cannot represent).
 List<String> checkDeepFixture(
   Map<String, Object?> fixture, {
   double rel = relTol,
   double abs = absTol,
+  DeepFixes? fixes,
+  bool finiteOnly = false,
 }) {
   final failures = <String>[];
+  var rows = -1; // compare only the first `rows` samples (−1: all)
   void cmp(String what, List<double> expected, List<double> actual) {
+    if (rows >= 0 && expected.isNotEmpty) {
+      final width = expected.length ~/ _currentSamples;
+      expected = expected.sublist(0, rows * width);
+      actual = actual.sublist(0, rows * width);
+    }
     final m = firstMismatch(expected, actual, rel: rel, abs: abs);
     if (m != null) failures.add('$what: $m');
   }
 
-  final net = buildNetwork(fixture);
+  final net = buildNetwork(fixture, fixes: fixes);
   final optimisers = <int, Optimiser>{};
   final ops = fixture['ops'] as List<Object?>;
   for (var i = 0; i < ops.length; i++) {
@@ -135,6 +192,19 @@ List<String> checkDeepFixture(
     final learningKind = LearningKind.parse(
       op['learning_kind'] as String? ?? 'precision_weighted',
     );
+    if (finiteOnly) {
+      _currentSamples = (op['x'] as List<Object?>).length;
+      final bad = kind == 'fit'
+          ? (_firstNonFiniteRow(op['trajectories'] as Map<String, Object?>?) ??
+                (_anyNonFinite(op['predictions']) || _anyNonFinite(op['after'])
+                    ? 0
+                    : null))
+          : (_anyNonFinite(op) ? 0 : null);
+      if (bad != null) {
+        if (kind != 'fit' || bad == 0) break;
+        rows = bad;
+      }
+    }
     switch (kind) {
       case 'fit':
         final record = {
@@ -187,6 +257,7 @@ List<String> checkDeepFixture(
       default:
         throw FormatException('Unknown op $kind');
     }
+    if (rows >= 0) break; // the reference went non-finite in this fit
     final after = op['after'] as Map<String, Object?>;
     final weights = after['weights'] as List<Object?>;
     for (var l = 0; l < weights.length; l++) {

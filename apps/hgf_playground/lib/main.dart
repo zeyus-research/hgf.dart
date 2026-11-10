@@ -9,6 +9,7 @@ import 'src/model/fit_host.dart';
 import 'src/model/fitting.dart';
 import 'src/model/playground.dart';
 import 'src/settings.dart';
+import 'src/ui/shell.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -58,8 +59,16 @@ Future<void> main() async {
             ..yieldInterval = const Duration(milliseconds: 12)
         : null,
   );
+  // `?page=deep` (or the dart-define HGF_PAGE=deep) opens the deep network
+  // page.
+  final page = query['page'] ?? const String.fromEnvironment('HGF_PAGE');
   runApp(
-    PlaygroundApp(settings: settings, playground: playground, fitting: fitting),
+    PlaygroundApp(
+      settings: settings,
+      playground: playground,
+      fitting: fitting,
+      initialPage: page == 'deep' ? ShellPage.deep : ShellPage.hgf,
+    ),
   );
   if (fitBench) {
     WidgetsBinding.instance.addPostFrameCallback(

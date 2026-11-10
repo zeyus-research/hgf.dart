@@ -162,6 +162,23 @@ double lambertW0(double z) {
   return w;
 }
 
+/// Principal branch of the Lambert W function of `z = exp(logZ)`, evaluated
+/// from `ln z` without forming `z` (so it stays finite where `z` overflows).
+///
+/// The six Halley iterations of `pyhgf.math.lambert_w0_log` (pyhgf #475):
+/// from `w = ln(1 + z)`, `f = w − exp(ln z − w)` (`w·eʷ − z` divided by
+/// `eʷ`, whose common factor cancels from the Halley ratio),
+/// `w ← w − 2f(w + 1) / (2(w + 1)² − f(w + 2))`. `logZ = −∞` gives 0.
+double lambertW0Log(double logZ) {
+  var w = logAddExp(0.0, logZ);
+  for (var i = 0; i < 6; i++) {
+    final f = w - fastExp(logZ - w);
+    final w1 = w + 1.0;
+    w = w - 2.0 * f * w1 / (2.0 * w1 * w1 - f * (w + 2.0));
+  }
+  return w;
+}
+
 /// `max(variance, minPredictedVariance)` that propagates NaN (like
 /// `jnp.maximum`), so the volatility underflow guard stays visible.
 @pragma('vm:prefer-inline')

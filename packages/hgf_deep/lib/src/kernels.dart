@@ -16,6 +16,7 @@ import 'package:hgf/hgf.dart';
 import 'config.dart';
 import 'matrix.dart';
 import 'state.dart';
+import 'trace.dart';
 
 /// Predicted variances are floored here (pyhgf's `MIN_PREDICTED_VARIANCE`).
 const double minPredictedVariance = 1e-128;
@@ -37,6 +38,7 @@ final class DeepSettings {
     required this.feedforwardUncertainty,
     required this.carryPrecision,
     required this.meanFieldUpdates,
+    this.fixes = DeepFixes.none,
   });
 
   final DeepVolatilityUpdate volatilityUpdates;
@@ -46,6 +48,9 @@ final class DeepSettings {
   final bool feedforwardUncertainty;
   final bool carryPrecision;
   final bool meanFieldUpdates;
+
+  /// Corrections to upstream (pyhgf) behaviour in force.
+  final DeepFixes fixes;
 }
 
 /// One built layer: its description, per-node parameters and incoming
@@ -548,15 +553,25 @@ void _predictVolatile(
     vcv = ws.take(_sVcv, n);
     _gemm(vcv, _squared(ws, w), n, np, cols, perParent, b);
   }
+  final logSpace = settings.fixes.logSpaceVolatility;
+  final known = c.knownVariance;
   for (var k = 0; k < n * b; k++) {
     final pv = predVol[k];
-    final cond = 1.0 / _floor(1.0 / pi[k] + pv, minPredictedVariance);
-    final e =
-        1.0 /
-        _floor(1.0 / cond + (vcv == null ? 0.0 : vcv[k]), minPredictedVariance);
+    final carried = 1.0 / pi[k];
+    final cond = 1.0 / _floor(carried + pv, minPredictedVariance);
+    final added = vcv == null ? 0.0 : vcv[k];
+    final e = 1.0 / _floor(1.0 / cond + added, minPredictedVariance);
     cep[k] = cond;
     ep[k] = e;
-    eff[k] = pv * e;
+    known?[k] = carried;
+    if (logSpace && carried + pv >= minPredictedVariance) {
+      // γ = Ω/(a + Ω) = 1/(1 + a/Ω) with a = 1/π + the value-coupling
+      // variance: the same value, but the limit 1 (not ∞·0) once Ω
+      // overflows.
+      eff[k] = 1.0 / (1.0 + (carried + added) / pv);
+    } else {
+      eff[k] = pv * e;
+    }
   }
 }
 
@@ -708,6 +723,17 @@ void _volatilityStandard(LayerState s, DeepSettings settings) {
   }
 }
 
+/// Whether the prediction stored the layer's known variance (the carried
+/// `1/π`) for its volatility posterior, which then reads it instead of
+/// reconstructing it as `max(1/π̄ − Ω, 1e-128)`: that difference cancels
+/// catastrophically once Ω ≫ 1/π, and is ∞ − ∞ once Ω overflows. Layers
+/// whose prediction adds no Ω (the bottom layer, or no precision
+/// prediction) keep the reconstruction.
+bool _knownVarianceStored(Layer layer, DeepSettings settings) =>
+    settings.fixes.logSpaceVolatility &&
+    settings.predictPrecision &&
+    !layer.isInputLayer;
+
 /// `max(1/π̂ − 1/π̄, 0)`: the variance the value parents add.
 double _valueCouplingVariance(double ep, double cep) =>
     math.max(1.0 / ep - 1.0 / cep, 0.0);
@@ -731,6 +757,9 @@ void _volatilityEhgf(
   final emv = s.expectedMeanVol!;
   final pv = s.precisionVol!;
   final mv = s.meanVol!;
+  final logSpace = settings.fixes.logSpaceVolatility;
+  final stored = _knownVarianceStored(layer, settings);
+  final logT = math.log(t);
   for (var i = 0; i < n; i++) {
     final omega = tonic == null ? 0.0 : tonic[i];
     for (var j = 0; j < b; j++) {
@@ -739,11 +768,12 @@ void _volatilityEhgf(
       final postMean = emv[k] + eff[k] * dpe[k] / (2.0 * e);
       var logVol = omega + emv[k];
       if (!meanField) logVol = logVol + 1.0 / (2.0 * e);
-      final predicted = t * math.exp(logVol);
-      var previous = _floor(
-        1.0 / s.conditionalExpectedPrecision[k] - predicted,
-        1e-128,
-      );
+      var previous = stored
+          ? s.knownVariance![k]
+          : _floor(
+              1.0 / s.conditionalExpectedPrecision[k] - t * math.exp(logVol),
+              1e-128,
+            );
       if (ffu) {
         previous =
             previous +
@@ -752,10 +782,24 @@ void _volatilityEhgf(
               s.conditionalExpectedPrecision[k],
             );
       }
-      final repredicted = t * math.exp(omega + postMean);
-      final expected = 1.0 / (previous + repredicted);
-      final eff2 = repredicted * expected;
-      final weight = (repredicted - previous) * expected;
+      final double expected, eff2, weight;
+      if (logSpace) {
+        // With r the re-predicted volatility and p the known variance:
+        // r/(p + r) = σ(ln r − ln p), (r − p)/(p + r) = 2σ(ln r − ln p) − 1
+        // and 1/(p + r) = exp(−logaddexp(ln p, ln r)), finite where r
+        // overflows.
+        final logRep = logT + omega + postMean;
+        final logPrev = math.log(previous);
+        final share = sigmoid(logRep - logPrev);
+        expected = math.exp(-logAddExp(logPrev, logRep));
+        eff2 = share;
+        weight = 2.0 * share - 1.0;
+      } else {
+        final repredicted = t * math.exp(omega + postMean);
+        expected = 1.0 / (previous + repredicted);
+        eff2 = repredicted * expected;
+        weight = (repredicted - previous) * expected;
+      }
       final d = s.mean[k] - s.expectedMean[k];
       final vpe2 = (1.0 / s.precision[k] + d * d) * expected - 1.0;
       final contrib = math.max(0.0, 0.5 * eff2 * (eff2 + weight * vpe2));
@@ -783,6 +827,7 @@ void _volatilityUnbounded(
   final pv = s.precisionVol!;
   final mv = s.meanVol!;
   final logT = math.log(t);
+  final stored = _knownVarianceStored(layer, settings);
   for (var i = 0; i < n; i++) {
     final omega = tonic == null ? 0.0 : tonic[i];
     for (var j = 0; j < b; j++) {
@@ -791,11 +836,12 @@ void _volatilityUnbounded(
       final e = epv[k];
       var logVol = omega + em;
       if (!meanField) logVol = logVol + 1.0 / (2.0 * e);
-      final predicted = t * math.exp(logVol);
-      var previous = _floor(
-        1.0 / s.conditionalExpectedPrecision[k] - predicted,
-        1e-128,
-      );
+      var previous = stored
+          ? s.knownVariance![k]
+          : _floor(
+              1.0 / s.conditionalExpectedPrecision[k] - t * math.exp(logVol),
+              1e-128,
+            );
       if (ffu) {
         previous =
             previous +
@@ -817,8 +863,7 @@ void _volatilityUnbounded(
 
       // Expansion 2: quadratic at the Lambert-W approximate mode.
       final logWArg = math.log(beAux) - math.log(2.0 * e) + 0.5 / e - gammaC;
-      final wArg = math.exp(math.min(logWArg, _logFloatMax));
-      final vW = lambertW0(wArg);
+      final vW = lambertW0Log(math.min(logWArg, _logFloatMax));
       final yStar = gammaC + vW - 0.5 / e;
       final xStar = yStar - logT - omega;
       final logS2 = logT + xStar + omega;
@@ -949,13 +994,15 @@ void posteriorUpdate(
 
   final g = parentLayer.coupling;
   final maxPp = settings.maxPosteriorPrecision;
+  final curvatureFloor = settings.fixes.curvatureFloor;
   for (var k = 0; k < np * b; k++) {
     final x = parent.expectedMean[k];
     final g1 = g.df(x);
     final g2 = g.d2f(x);
     final ep = parent.expectedPrecision[k];
-    final raw = ep + pc1[k] * (g1 * g1) + (-g2 * msg[k]);
-    final p = _clip(raw, ep, maxPp);
+    final info = pc1[k] * (g1 * g1);
+    final raw = ep + info + (-g2 * msg[k]);
+    final p = _clip(raw, curvatureFloor ? ep + info : ep, maxPp);
     parent.precision[k] = p;
     parent.mean[k] = x + msg[k] * g1 / p;
   }
@@ -965,8 +1012,12 @@ void posteriorUpdate(
 // Sweeps
 // ---------------------------------------------------------------------------
 
+/// Called after each phase of a sweep (see [TracePhase]).
+typedef SweepHook = void Function(TracePhase phase, int layer);
+
 /// Top-down prediction sweep: clamp rows `[start, start + width)` of [x] on
-/// the top layer, then predict every layer from the one above.
+/// the top layer, then predict every layer from the one above. [onStep] is
+/// called after the clamp and after each layer's prediction.
 void predictionSweep(
   List<Layer> layers,
   List<LayerState> states,
@@ -974,8 +1025,9 @@ void predictionSweep(
   int start,
   Workspace ws,
   double timeStep,
-  DeepSettings settings,
-) {
+  DeepSettings settings, [
+  SweepHook? onStep,
+]) {
   final top = states.last;
   final b = top.width;
   for (var i = 0; i < top.nodes; i++) {
@@ -985,6 +1037,7 @@ void predictionSweep(
       top.mean[i * b + s] = v;
     }
   }
+  onStep?.call(TracePhase.clampInput, layers.length - 1);
   for (var i = layers.length - 1; i > 0; i--) {
     predictLayer(
       states[i - 1],
@@ -995,13 +1048,14 @@ void predictionSweep(
       timeStep,
       settings,
     );
+    onStep?.call(TracePhase.predict, i - 1);
   }
 }
 
 /// Bottom-up sweep: clamp rows `[start, start + width)` of [y] on the
 /// bottom layer, then the leaf prediction error and, on every interior
 /// layer, the posterior update and its prediction error. The top layer
-/// stays clamped.
+/// stays clamped. [onStep] is called after each phase.
 void updateSweep(
   List<Layer> layers,
   List<LayerState> states,
@@ -1009,8 +1063,9 @@ void updateSweep(
   int start,
   Workspace ws,
   double timeStep,
-  DeepSettings settings,
-) {
+  DeepSettings settings, [
+  SweepHook? onStep,
+]) {
   final bottom = states.first;
   final b = bottom.width;
   for (var i = 0; i < bottom.nodes; i++) {
@@ -1018,7 +1073,9 @@ void updateSweep(
       bottom.mean[i * b + s] = y.data[(start + s) * y.cols + i];
     }
   }
+  onStep?.call(TracePhase.observe, 0);
   predictionError(bottom, layers.first, timeStep, settings);
+  onStep?.call(TracePhase.leafError, 0);
   for (var i = 1; i < layers.length - 1; i++) {
     posteriorUpdate(
       states[i],
@@ -1028,7 +1085,9 @@ void updateSweep(
       ws,
       settings,
     );
+    onStep?.call(TracePhase.posterior, i);
     predictionError(states[i], layers[i], timeStep, settings);
+    onStep?.call(TracePhase.layerError, i);
   }
 }
 
@@ -1096,6 +1155,15 @@ void accumulateGradients(
       sanitize: true,
     );
     _addOuter(grads[l]!, u, h, nc, cols, b, ws);
+    if (!pl.config.fullyConnected) {
+      // One-to-one: only the diagonal weights are edges (pyhgf #476).
+      final g = grads[l]!;
+      for (var i = 0; i < nc; i++) {
+        for (var j = 0; j < cols; j++) {
+          if (i != j) g[i * cols + j] = 0.0;
+        }
+      }
+    }
   }
 }
 

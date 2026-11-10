@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 
+import 'deep/deep_playground.dart';
 import 'model/fitting.dart';
 import 'model/playground.dart';
 import 'settings.dart';
-import 'ui/home.dart';
+import 'ui/shell.dart';
 
 /// The seed of both themes: the belief colour of the plots.
 const _seed = Color(0xFF2A78D6);
@@ -30,11 +31,17 @@ class PlaygroundApp extends StatelessWidget {
     required this.settings,
     required this.playground,
     required this.fitting,
+    this.deep,
+    this.initialPage = ShellPage.hgf,
   });
 
   final Settings settings;
   final Playground playground;
   final Fitting fitting;
+
+  /// The deep network page's model (made on first visit when `null`).
+  final DeepPlayground? deep;
+  final ShellPage initialPage;
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
@@ -46,10 +53,12 @@ class PlaygroundApp extends StatelessWidget {
       darkTheme: buildTheme(Brightness.dark),
       // Follows the system unless the user picked one.
       themeMode: settings.themeMode,
-      home: HomePage(
+      home: AppShell(
         settings: settings,
         playground: playground,
         fitting: fitting,
+        deep: deep,
+        initialPage: initialPage,
       ),
     ),
   );

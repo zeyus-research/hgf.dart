@@ -186,7 +186,8 @@ extension SequentialFitKernel on DeepKernels {
           )
           ..writeln('      let r = wi / ${cols}u; let c = wi % ${cols}u;')
           ..writeln(
-            '      let g = ${_at(_l[l - 1].u!, 'r')} * ${_at(_l[l].h!, 'c')};',
+            '      let g = '
+            '${_edge(l, '${_at(_l[l - 1].u!, 'r')} * ${_at(_l[l].h!, 'c')}')};',
           )
           ..writeln('      {')
           ..writeln(_optimiserStep(l, optimiser, bc1: 'bc1', bc2: 'bc2'))

@@ -30,8 +30,10 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import optax  # noqa: E402
 
+import pyhgf.utils.vectorised_belief_propagation as _vbp  # noqa: E402
 from pyhgf.model import DeepNetwork  # noqa: E402
 from pyhgf.rshgf import DeepNetwork as RsDeepNetwork  # noqa: E402
+from pyhgf.updates.vectorised.volatile import posterior as _vposterior  # noqa: E402
 
 warnings.filterwarnings("ignore")
 
@@ -140,7 +142,120 @@ def make_optimiser(cache: dict, spec: dict | None):
     return cache[key]
 
 
+# ---------------------------------------------------------------------------
+# Proposed upstream fix: the curvature floor of the value posterior (P18)
+# ---------------------------------------------------------------------------
+#
+# pyhgf clips a hidden layer's posterior precision
+# π̂ + Σ w²·γ·g′² − g″·Σ w·g_a·δ at π̂ from below. When the curvature term
+# cancels the information, the precision falls back to the prior while the
+# mean still moves by msg·g′/π (steps of 1e3 to 1e15 once π̂ is small), which
+# drives the volatility runaway. hgf_deep's DeepFixes.curvatureFloor floors
+# the precision at π̂ + Σ w²·γ·g′² instead. Fixtures whose settings carry
+# "fixes": {"curvature_floor": true} come from pyhgf's JAX backend with that
+# change, computed here independently of the Dart code.
+
+
+def _layer_posterior_update_curvature_floor(
+    layer,
+    child,
+    weights,
+    coupling_fn,
+    parent_has_constant=False,
+    max_posterior_precision=1e10,
+    child_is_input_layer=False,
+    mean_field_updates=False,
+):
+    if parent_has_constant:
+        weights = weights[:, :-1]
+    precision = _vposterior.vectorised_posterior_update_precision_value_level(
+        layer,
+        child,
+        weights,
+        coupling_fn,
+        child_is_input_layer=child_is_input_layer,
+        mean_field_updates=mean_field_updates,
+    )
+    # The first-order (information) term alone, with the effective child
+    # precision of vectorised_posterior_update_precision_value_level.
+    if mean_field_updates:
+        effective = child.expected_precision
+    elif child_is_input_layer:
+        effective = child.conditional_expected_precision
+    else:
+        pi_y = child.precision - child.expected_precision
+        effective = (
+            child.conditional_expected_precision
+            * pi_y
+            / (child.conditional_expected_precision + pi_y)
+        )
+    g1 = jax.vmap(jax.grad(coupling_fn))(layer.expected_mean)
+    information = jnp.matmul((weights**2).T, effective) * g1**2
+    posterior_precision = jnp.clip(
+        precision, layer.expected_precision + information, max_posterior_precision
+    )
+    posterior_mean = _vposterior.vectorised_posterior_update_mean_value_level(
+        layer,
+        child,
+        weights,
+        coupling_fn,
+        posterior_precision,
+        mean_field_updates=mean_field_updates,
+    )
+    return dataclasses.replace(
+        layer, precision=posterior_precision, mean=posterior_mean
+    )
+
+
+class _CurvatureFloor:
+    """Swap the value posterior for the floored one (and clear JAX's caches on
+    both sides, so no trace of the other version is reused)."""
+
+    def __enter__(self):
+        self._orig = _vbp.vectorised_layer_posterior_update
+        _vbp.vectorised_layer_posterior_update = _layer_posterior_update_curvature_floor
+        jax.clear_caches()
+
+    def __exit__(self, *exc):
+        _vbp.vectorised_layer_posterior_update = self._orig
+        jax.clear_caches()
+        return False
+
+
+class _Nothing:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _patches(spec: dict):
+    fixes = spec["settings"].get("fixes", {})
+    unknown = set(fixes) - {"curvature_floor"}
+    if unknown:
+        raise ValueError(f"no JAX reference for the fixes {sorted(unknown)}")
+    return _CurvatureFloor() if fixes.get("curvature_floor") else _Nothing()
+
+
+def pyhgf_commit() -> str:
+    import subprocess
+
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(REPO.parent / "pyhgf"), "rev-parse", "--short", "HEAD"],
+            text=True,
+        ).strip()
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
 def run(spec: dict) -> dict:
+    with _patches(spec):
+        return _run(spec)
+
+
+def _run(spec: dict) -> dict:
     net = build(spec)
     optimisers: dict = {}
     ops_out = []
@@ -523,16 +638,55 @@ def scenarios() -> dict:
         ],
         217,
     )
+
+    # Patched references: the curvature floor (see _CurvatureFloor). The
+    # four-layer tanh network on N(0, 1) data is P18's setting, where pyhgf
+    # runs away within 40 samples.
+    four = [{"size": 2}, {"size": 4}, {"size": 4}, {"size": 3}]
+    seed = 300
+    for vol in ("unbounded", "eHGF", "standard"):
+        seed += 1
+        add(
+            f"floor_{vol}_tanh",
+            {"volatility_updates": vol, "coupling": "tanh", "fixes": {"curvature_floor": True}},
+            four,
+            lambda layers, rng: [
+                fit_op(layers, rng, n=60, optimiser={"id": 0, "kind": "adam", "lr": 0.01}),
+                batch_op(layers, rng, n=16, optimiser={"id": 0, "kind": "adam", "lr": 0.01}),
+                predict_op(layers, rng),
+            ],
+            seed,
+        )
+    add(
+        "floor_binary_mean_field",
+        {"coupling": "tanh", "mean_field_updates": True, "fixes": {"curvature_floor": True}},
+        [{"size": 2, "kind": "binary"}, {"size": 5}, {"size": 3}],
+        lambda layers, rng: [fit_op(layers, rng, n=40), predict_op(layers, rng)],
+        310,
+    )
     return out
 
 
 def main() -> None:
+    import sys
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    commit = pyhgf_commit()
+    only = set(sys.argv[1:])
     for name, spec in scenarios().items():
+        if only and name not in only:
+            continue
         ops = run(spec)
+        fixes = spec["settings"].get("fixes")
         fixture = {
             "name": name,
             "pyhgf": "JAX float64",
+            "pyhgf_commit": commit,
+            "reference": (
+                "pyhgf JAX float64 with the proposed fixes " + ", ".join(sorted(fixes))
+                if fixes
+                else "pyhgf JAX float64"
+            ),
             "settings": spec["settings"],
             "layers": spec["layers"],
             "weights": spec["weights"],

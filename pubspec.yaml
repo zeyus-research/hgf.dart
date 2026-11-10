@@ -166,6 +166,18 @@ melos:
       description: >-
         Regenerate hgf_deep's DeepNetwork fixtures (pyhgf JAX float64, with
         rshgf's float32 deviation for information).
+    examples:deep:
+      run: >-
+        cd packages/hgf_deep &&
+        dart run example/toy_classification.dart all 3 &&
+        dart run example/regression.dart 3 &&
+        dart run example/digits.dart 2 &&
+        dart run example/volatility_effect.dart 2 &&
+        cd ../hgf_gpu &&
+        dart run example/deep_digits_gpu.dart 2 4
+      description: >-
+        Smoke-run the hgf_deep examples (and hgf_gpu's deep example, which
+        skips without wgpu-native) with a few epochs each.
     bench:deep:
       run: >-
         cd packages/hgf_deep &&

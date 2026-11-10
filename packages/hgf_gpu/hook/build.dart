@@ -6,6 +6,19 @@
 // generated for (see tool/fetch_wgpu.sh), checks its sha256 and emits the
 // shared library as a bundled code asset. If the download fails (offline),
 // nothing is bundled and the backend falls back to the system library.
+//
+// Opt out with the user-define `bundle: false` (in the workspace root
+// pubspec.yaml):
+//
+//   hooks:
+//     user_defines:
+//       hgf_gpu:
+//         bundle: false
+//
+// The backend then loads the system library (`$WGPU_LIB`, Homebrew's
+// wgpu-native, ...). `flutter test` on macOS needs this today: it rewrites a
+// bundled dylib's install name to an absolute path, which the prebuilt
+// release has no header room for (install_name_tool aborts).
 
 import 'dart:io';
 
@@ -78,6 +91,16 @@ final _iosSimulatorReleases = <(OS, Architecture), (String, String)>{
 void main(List<String> args) async {
   await build(args, (input, output) async {
     if (!input.config.buildCodeAssets) return;
+    final bundle = input.userDefines['bundle'];
+    if (bundle != null &&
+        bundle is! bool &&
+        bundle != 'true' &&
+        bundle != 'false') {
+      throw const FormatException(
+        'hooks.user_defines.hgf_gpu.bundle must be a boolean (or omitted).',
+      );
+    }
+    if (bundle == false || bundle == 'false') return;
     final code = input.config.code;
     final simulator =
         code.targetOS == OS.iOS && code.iOS.targetSdk == IOSSdk.iPhoneSimulator;

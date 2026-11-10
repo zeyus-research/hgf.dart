@@ -14,3 +14,4 @@ export 'src/kernels.dart' show DeepSettings, Layer;
 export 'src/matrix.dart';
 export 'src/optimiser.dart';
 export 'src/state.dart';
+export 'src/trace.dart' hide TraceRecorder;

@@ -163,3 +163,68 @@ final class LayerConfig {
   /// Initial-belief overrides, broadcast to every node.
   final Map<LayerField, double> initial;
 }
+
+/// Corrections to upstream pyhgf behaviour that hgf_deep applies on top of
+/// the port (see `docs/upstream/README.md`). [DeepFixes.recommended] is the
+/// default of every [DeepNetwork]; [DeepFixes.none] reproduces pyhgf bit for
+/// bit (the parity tests use it).
+final class DeepFixes {
+  const DeepFixes({
+    this.curvatureFloor = false,
+    this.logSpaceVolatility = false,
+  });
+
+  /// Every correction off: pyhgf's behaviour, NaN included.
+  static const none = DeepFixes();
+
+  /// Every correction on.
+  static const recommended = DeepFixes(
+    curvatureFloor: true,
+    logSpaceVolatility: true,
+  );
+
+  /// P18: the value-level posterior precision of a hidden node is
+  /// `π̂ + Σ w²·γ·g′² − g″·msg`. pyhgf clips it at π̂ from below, so when
+  /// the curvature term `−g″·msg` cancels the information the precision
+  /// falls back to the (possibly tiny) prior while the mean still moves by
+  /// `msg·g′/π`: steps of 10³–10¹⁵ that feed the volatility level and run
+  /// it away. With this fix the floor is `π̂ + Σ w²·γ·g′²` (negative
+  /// curvature is dropped, a Gauss–Newton step), so the step never exceeds
+  /// the one the information alone would make.
+  final bool curvatureFloor;
+
+  /// P18: evaluate the volatility terms where they overflow, without
+  /// changing their value elsewhere.
+  ///
+  /// * The eHGF and unbounded volatility posteriors read the known variance
+  ///   of the value-level prediction (the carried `1/π`), stored at
+  ///   prediction time, instead of reconstructing it as
+  ///   `max(1/π̄ − Ω, 1e-128)`, which cancels catastrophically once
+  ///   Ω ≫ 1/π and is ∞ − ∞ once Ω overflows.
+  /// * The eHGF re-prediction uses `r/(p + r) = σ(ln r − ln p)`,
+  ///   `(r − p)/(p + r) = 2σ(ln r − ln p) − 1` and
+  ///   `1/(p + r) = exp(−logaddexp(ln p, ln r))`.
+  /// * The effective precision of the value-level prediction is
+  ///   `γ = 1/(1 + a/Ω)` (`= Ω/(a + Ω)`), whose limit as Ω overflows is 1.
+  ///
+  /// A node whose volatility has run away then has finite beliefs (a
+  /// vanishing predicted precision) and drops out of its parents' updates,
+  /// instead of turning NaN and poisoning the layers above it.
+  final bool logSpaceVolatility;
+
+  bool get isNone => !curvatureFloor && !logSpaceVolatility;
+
+  @override
+  bool operator ==(Object other) =>
+      other is DeepFixes &&
+      other.curvatureFloor == curvatureFloor &&
+      other.logSpaceVolatility == logSpaceVolatility;
+
+  @override
+  int get hashCode => Object.hash(curvatureFloor, logSpaceVolatility);
+
+  @override
+  String toString() =>
+      'DeepFixes(curvatureFloor: $curvatureFloor, '
+      'logSpaceVolatility: $logSpaceVolatility)';
+}

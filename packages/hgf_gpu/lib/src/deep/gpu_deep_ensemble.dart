@@ -103,6 +103,7 @@ final class GpuDeepEnsemble {
       s.feedforwardUncertainty,
       s.carryPrecision,
       s.meanFieldUpdates,
+      s.fixes,
       for (final l in net.debugLayers)
         '${l.size} ${l.kind} ${l.hasConstant} ${l.config.fullyConnected} '
             '${l.coupling} ${l.hasVolatility} ${l.tonicVolatility != null}',
@@ -375,10 +376,12 @@ final class GpuDeepEnsemble {
     final xStride = _uploadData(x, isX: true);
     final yStride = _uploadData(y, isX: false);
     final outStride = rows * kernels.bottomSize;
-    if (readPredictions) {
-      _out = _ensure(_out, _outFloats, size * outStride);
-      _outFloats = math.max(_outFloats, size * outStride);
-    }
+    // The kernel declares OUT whether or not it writes it (the predictions
+    // flag decides at run time), so it is always bound: a placeholder of
+    // one float when the predictions are not read.
+    final outFloats = readPredictions ? size * outStride : 1;
+    _out = _ensure(_out, _outFloats, outFloats);
+    _outFloats = math.max(_outFloats, outFloats);
     if (opt is Adam) {
       _prepareAdam(opt);
       _bc = _ensure(_bc, _bcFloats, 2 * rows);
@@ -426,7 +429,7 @@ final class GpuDeepEnsemble {
           DeepBinding.state => _state,
           DeepBinding.x => _x,
           DeepBinding.y => _y,
-          DeepBinding.out => readPredictions ? _out : null,
+          DeepBinding.out => _out,
           DeepBinding.uniform => _uniform,
           DeepBinding.biasCorrection => opt is Adam ? _bc : null,
         },
