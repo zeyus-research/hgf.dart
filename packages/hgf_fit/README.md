@@ -51,9 +51,37 @@ File('draws.json').writeAsStringSync(post.toJson());  // for ArviZ
   `GaussianReadout` (continuous reports of a belief, with a fitted noise
   precision), `BinarySoftmaxReadout` (binary decisions with an inverse
   temperature), `ObservationSurprise` (fit the perceptual model to the
-  observations alone, e.g. with `TotalGaussianSurprise`), or your own with
-  `ResponseModel.fn`. Each also simulates responses (`HgfModel.simulate`),
-  for parameter recovery.
+  observations alone, e.g. with `TotalGaussianSurprise`),
+  `CategoricalSoftmaxReadout`, `SoftmaxReadout` (choices among options
+  valued at weighted beliefs: bandits, the Iowa Gambling Task), or your own
+  with `ResponseModel.fn`. Each also simulates responses
+  (`HgfModel.simulate`), for parameter recovery.
+- **Choice tasks.** Where the choice decides what the agent sees (only the
+  chosen arm's or deck's outcome), `HgfModel.simulateChoices(subjects, x,
+  rng, reveals: …)` runs the closed loop: predict, draw a choice, reveal
+  that option's inputs, update. It returns ready-to-fit subjects (the
+  observed flags and the choices). `IowaGamblingTask` has the four decks'
+  payoff schedule, a network (one two-level HGF per deck) and its
+  readout, and maps recorded choices and payoffs to inputs
+  (`example/iowa_gambling_task.dart`):
+
+  ```dart
+  final model = HgfModel(
+    network: IowaGamblingTask.network(),
+    response: IowaGamblingTask.readout(),         // softmax over 4 decks
+    parameters: [
+      Parameter('omega', prior: const Normal(-2, 1.5), targets: [
+        for (final n in IowaGamblingTask.valueNodes)
+          NodeTarget(n, NodeField.tonicVolatility),
+      ]),
+      Parameter.response('inverseTemperature', prior: const LogNormal(0.5, 1)),
+    ],
+  );
+  final (:inputs, :observed) = IowaGamblingTask.data(choices, payoffs);
+  final fit = fitMap(model, [
+    Subject(inputs: inputs, observed: observed, responses: choices),
+  ]);
+  ```
 - **Batched evaluation.** `HgfModel.negLogPosterior` evaluates any number of
   (subject, parameter vector) pairs in one `BatchNetwork` pass, with exact
   gradients: forward-mode tangents through every update of the filter (one

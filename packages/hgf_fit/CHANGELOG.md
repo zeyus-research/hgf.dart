@@ -1,5 +1,14 @@
 ## Unreleased
 
+- Choice tasks. `SoftmaxReadout`: choices among options valued at
+  weighted sums of beliefs (`pₖ ∝ exp(β vₖ)`; one node per option with
+  `SoftmaxReadout.nodes`, or e.g. `W − L` for pyhgf's two-armed bandit),
+  with exact gradients, sampling and `FitCodec` support.
+  `HgfModel.simulateChoices(…, reveals:)` simulates the closed loop where
+  the choice decides which inputs are observed, and returns fit-ready
+  subjects. `IowaGamblingTask`: the decks' payoff schedule, a network and
+  readout, and `data(choices, payoffs)` for recorded data
+  (`example/iowa_gambling_task.dart`, `test/choice_task_test.dart`).
 - `DpSurprise` is serialisable (`ObservationSurprise(DpSurprise())`), so dp
   networks can be fitted (α, sensory precision); without exact gradients,
   use `NelderMead` for MAP (`test/dp_fit_test.dart`).

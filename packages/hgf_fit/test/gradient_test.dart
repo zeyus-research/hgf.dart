@@ -417,6 +417,104 @@ void main() {
       expect(g[0], closeTo(0.5, 1e-12)); // −d log N(0.5; 0, 1)
     });
 
+    test('softmax choices: the Iowa Gambling Task (ω, β)', () {
+      final model = HgfModel(
+        network: IowaGamblingTask.network(),
+        response: IowaGamblingTask.readout(),
+        parameters: [
+          Parameter(
+            'omega',
+            targets: [
+              for (final n in IowaGamblingTask.valueNodes)
+                NodeTarget(n, NodeField.tonicVolatility),
+            ],
+            prior: const Normal(-2, 1.5),
+          ),
+          Parameter.response(
+            'inverseTemperature',
+            prior: const LogNormal(0.5, 1),
+          ),
+        ],
+      );
+      final rng = math.Random(4);
+      final env = [
+        for (var s = 0; s < 2; s++)
+          Subject(inputs: IowaGamblingTask.outcomes(100, rng)),
+      ];
+      final subjects = model.simulateChoices(
+        env,
+        [
+          [-2.0, 1.5],
+          [-3.0, 0.5],
+        ],
+        rng,
+        reveals: IowaGamblingTask.reveals,
+      );
+      subjects[1].responses![11] = double.nan;
+      _checkGradients(model, subjects, [
+        [-2.0, 1.5],
+        [-1.0, 3.0],
+      ]);
+    });
+
+    test('softmax over belief combinations: pyhgf\'s two-armed bandit', () {
+      // Nodes 0-3: wins and losses of arms A and B (binary), 4-7 their
+      // logits. Arm A is worth W_A − L_A, arm B W_B − L_B.
+      final net = Network()..addNodes(kind: NodeKind.binaryState, nNodes: 4);
+      for (var i = 0; i < 4; i++) {
+        net.addNodes(valueChildren: [i], tonicVolatility: -2.5);
+      }
+      final model = HgfModel(
+        network: net,
+        response: const SoftmaxReadout(
+          options: [
+            {0: 1.0, 1: -1.0},
+            {2: 1.0, 3: -1.0},
+          ],
+        ),
+        parameters: [
+          Parameter(
+            'omega',
+            targets: [
+              for (final n in [4, 5, 6, 7])
+                NodeTarget(n, NodeField.tonicVolatility),
+            ],
+            prior: const Normal(-2.5, 2),
+          ),
+          Parameter.response(
+            'inverseTemperature',
+            prior: const LogNormal(1, 1),
+          ),
+        ],
+      );
+      final rng = math.Random(5);
+      final outcomes = Float64List.fromList([
+        for (var t = 0; t < 160; t++)
+          for (final p in [
+            (t ~/ 40).isEven ? 0.8 : 0.2,
+            0.5,
+            (t ~/ 40).isEven ? 0.2 : 0.8,
+            0.5,
+          ])
+            rng.nextDouble() < p ? 1.0 : 0.0,
+      ]);
+      final subjects = model.simulateChoices(
+        [Subject(inputs: outcomes)],
+        [
+          [-2.5, 4.0],
+        ],
+        rng,
+        reveals: const [
+          [0, 1],
+          [2, 3],
+        ],
+      );
+      _checkGradients(model, subjects, [
+        [-2.5, 4.0],
+        [-1.5, 1.0],
+      ]);
+    });
+
     test('ResponseModel.fn with a tangent form', () {
       // Decisions with a lapse rate: p = ε / 2 + (1 − ε) μ̂.
       final lapse = ResponseModel.fn(

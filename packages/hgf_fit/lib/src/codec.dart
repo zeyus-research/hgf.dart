@@ -181,6 +181,17 @@ final class FitCodec {
         node: (json['node'] as num).toInt(),
         inverseTemperature: readJsonDouble(json['inverseTemperature']),
       ),
+      'SoftmaxReadout' => SoftmaxReadout(
+        options: [
+          for (final o in json['options'] as List)
+            {
+              for (final term in (o as List).cast<Map<String, Object?>>())
+                (term['node'] as num).toInt(): readJsonDouble(term['weight']),
+            },
+        ],
+        field: NodeField.parse(json['field'] as String),
+        inverseTemperature: readJsonDouble(json['inverseTemperature']),
+      ),
       'ObservationSurprise' => ObservationSurprise(switch (json['function']) {
         'FirstLevelGaussianSurprise' => const FirstLevelGaussianSurprise(),
         'TotalGaussianSurprise' => const TotalGaussianSurprise(),

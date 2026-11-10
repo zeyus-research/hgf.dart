@@ -805,6 +805,7 @@ final class BatchNetwork {
 
   /// Restore every element to its initial state (and initial tangents).
   void reset() {
+    _pendingPrediction = null;
     final nb = _n * _b;
     for (final f in NodeField.values) {
       _column(f).setRange(0, nb, _initial, f.index * nb);
@@ -948,6 +949,9 @@ final class BatchNetwork {
   /// One belief-propagation step for every element from the current state.
   /// [observations] has one value per input node, or with [perElement] one
   /// per input node and element (`observations[k * batchSize + e]`).
+  ///
+  /// The step starts with the prediction sweep, unless [predict] already ran
+  /// it for this trial (as in [Network.step]).
   void step(
     Float64List observations, {
     Float64List? observed,
@@ -963,11 +967,61 @@ final class BatchNetwork {
     if (observed != null && observed.length != flags) {
       throw ArgumentError('Expected $flags observed flag(s)');
     }
+    if (_pendingPrediction != null && _pendingPrediction != timeStep) {
+      throw StateError(
+        'predict() ran with timeStep $_pendingPrediction, step() got $timeStep',
+      );
+    }
+    final predicted = _pendingPrediction != null;
+    _pendingPrediction = null;
     for (var lo = 0; lo < _b; lo += blockSize) {
       final hi = lo + blockSize < _b ? lo + blockSize : _b;
-      _propagate(observations, observed, 0, 0, timeStep, perElement, lo, hi);
+      _propagate(
+        observations,
+        observed,
+        0,
+        0,
+        timeStep,
+        perElement,
+        lo,
+        hi,
+        predicted: predicted,
+      );
     }
   }
+
+  /// Run only the prediction sweep for the next trial, for every element, so
+  /// that the predicted beliefs (`expectedMean`, `expectedPrecision`, ...)
+  /// refer to the upcoming observation: e.g. to draw a choice that decides
+  /// what the agent observes (`HgfModel.simulateChoices` in hgf_fit). The
+  /// next [step] reuses it; calling [predict] twice without a [step] is a
+  /// no-op. As [Network.predict].
+  void predict({double timeStep = 1.0}) {
+    _checkTemplate();
+    if (_pendingPrediction != null) {
+      if (_pendingPrediction != timeStep) {
+        throw StateError(
+          'A prediction for timeStep $_pendingPrediction is pending',
+        );
+      }
+      return;
+    }
+    for (var lo = 0; lo < _b; lo += blockSize) {
+      final hi = lo + blockSize < _b ? lo + blockSize : _b;
+      if (_k != 0) {
+        _tPredictSweep(timeStep, lo, hi);
+      } else {
+        final predNode = _predNode, predStep = _predStep;
+        for (var k = 0; k < predNode.length; k++) {
+          _dispatch(predStep[k], predNode[k], timeStep, lo, hi);
+        }
+      }
+    }
+    _pendingPrediction = timeStep;
+  }
+
+  /// Time step of a [predict] not yet consumed by [step], if any.
+  double? _pendingPrediction;
 
   int _prepareRun(
     Float64List data,
@@ -996,6 +1050,9 @@ final class BatchNetwork {
       throw ArgumentError('timeSteps must have one entry per time step');
     }
     if (!append) reset();
+    if (_pendingPrediction != null) {
+      throw StateError('predict() is pending; call step() or reset() first');
+    }
     return nTime;
   }
 
@@ -1056,8 +1113,9 @@ final class BatchNetwork {
     double timeStep,
     bool perElement,
     int lo,
-    int hi,
-  ) {
+    int hi, {
+    bool predicted = false,
+  }) {
     if (_k != 0) {
       _tPropagate(
         data,
@@ -1068,12 +1126,15 @@ final class BatchNetwork {
         perElement,
         lo,
         hi,
+        predicted: predicted,
       );
       return;
     }
-    final predNode = _predNode, predStep = _predStep;
-    for (var k = 0; k < predNode.length; k++) {
-      _dispatch(predStep[k], predNode[k], timeStep, lo, hi);
+    if (!predicted) {
+      final predNode = _predNode, predStep = _predStep;
+      for (var k = 0; k < predNode.length; k++) {
+        _dispatch(predStep[k], predNode[k], timeStep, lo, hi);
+      }
     }
     _observe(data, observed, offset, observedOffset, perElement, lo, hi);
     final updNode = _updNode, updStep = _updStep;

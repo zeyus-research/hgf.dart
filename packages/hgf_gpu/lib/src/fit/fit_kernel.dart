@@ -286,6 +286,12 @@ final class FitKernel {
 GpuResponse gpuResponseOf(ResponseModel response) => switch (response) {
   GaussianReadout(:final node, :final field, :final precision) =>
     GpuGaussianReadout(node: node, field: field, precision: precision),
+  SoftmaxReadout(:final options, :final field, :final inverseTemperature) =>
+    GpuSoftmax(
+      options: options,
+      field: field,
+      inverseTemperature: inverseTemperature,
+    ),
   BinarySoftmaxReadout(:final node, :final inverseTemperature) =>
     GpuBinarySoftmax(node: node, inverseTemperature: inverseTemperature),
   ObservationSurprise(:final function) => switch (function) {

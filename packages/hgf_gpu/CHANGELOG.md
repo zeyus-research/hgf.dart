@@ -1,5 +1,7 @@
 ## Unreleased
 
+- `GpuSoftmax`: hgf_fit's `SoftmaxReadout` on the GPU (`GpuFitter`), with
+  tangents; f32 within 2e-7 of f64 on the IGT and bandit cases.
 - `GpuDeepEnsemble` keeps each member's working state in workgroup memory
   where that was measured faster (`DeepKernels.sequential(workgroupState:)`):
   always for small states, below 128 members for medium ones (more

@@ -5,7 +5,12 @@ import 'package:hgf/hgf.dart';
 import 'trial.dart';
 
 export 'trial.dart'
-    show GpuBinarySoftmax, GpuGaussianReadout, GpuResponse, gpuNodeFields;
+    show
+        GpuBinarySoftmax,
+        GpuGaussianReadout,
+        GpuResponse,
+        GpuSoftmax,
+        gpuNodeFields;
 
 /// A [Network] compiled into a WGSL compute shader: one invocation per
 /// batch element (parameter set), looping over a range of trials with the

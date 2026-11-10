@@ -94,6 +94,27 @@ final class GpuBinarySoftmax extends GpuResponse {
   bool get usesResponses => true;
 }
 
+/// `SoftmaxReadout`: a choice among options worth `vₖ = Σ w · belief`,
+/// option `k` with probability `exp(β vₖ) / Σⱼ exp(β vⱼ)`. Parameter:
+/// `inverseTemperature`.
+final class GpuSoftmax extends GpuResponse {
+  const GpuSoftmax({
+    required this.options,
+    this.field = NodeField.expectedMean,
+    this.inverseTemperature = 1.0,
+  });
+
+  final List<Map<int, double>> options;
+  final NodeField field;
+  final double inverseTemperature;
+
+  @override
+  List<double> get defaults => [inverseTemperature];
+
+  @override
+  bool get usesResponses => true;
+}
+
 /// `f32` versions of the engine's `f64` constants.
 abstract final class F32 {
   /// Smallest normal `f32`; the `f64` engine floors at 1e-128, below
@@ -203,6 +224,19 @@ final class TrialCompiler {
         }
       case GpuBinarySoftmax(:final node):
         _checkNode(node);
+      case GpuSoftmax(:final options, :final field):
+        if (!gpuNodeFields.contains(field)) {
+          throw UnsupportedError('No GPU slot for $field');
+        }
+        if (options.length < 2) {
+          throw ArgumentError.value(options, 'options', 'Needs two or more');
+        }
+        for (final o in options) {
+          if (o.isEmpty) {
+            throw ArgumentError.value(options, 'options', 'An option is empty');
+          }
+          o.keys.forEach(_checkNode);
+        }
       case _ObservationResponse(:final which):
         if (which == 'first' &&
             (n < 2 ||
@@ -1173,6 +1207,31 @@ final class _Pass {
         final p = let('prob', one / (one + exp(-z)));
         final q = let('qprob', one / (one + exp(z)));
         s = sel(zero, binarySurprise(ne(resp, zero), p, q), present);
+      case GpuSoftmax(:final options, :final field):
+        // log Σ exp(β vₖ) − β v_resp; a response that is no option's index
+        // picks none (the CPU engine rejects it).
+        final present = letCond('present', Cond(source.responsePresent()));
+        final resp = let('resp', Lit(source.response()));
+        final z = [
+          for (var k = 0; k < options.length; k++)
+            let(
+              'z$k',
+              rp(0) *
+                  sum([
+                    for (final MapEntry(:key, :value) in options[k].entries)
+                      value == 1.0 ? r(key, field) : lit(value) * r(key, field),
+                  ]),
+            ),
+        ];
+        var lse = z.first;
+        for (var k = 1; k < z.length; k++) {
+          lse = let('lse$k', logAddExp(lse, z[k]));
+        }
+        final chosen = sum([
+          for (var k = 0; k < z.length; k++)
+            sel(zero, z[k], eq(resp, lit(k.toDouble()))),
+        ]);
+        s = sel(zero, lse - chosen, present);
     }
     final sv = let('s', s);
     line('bad = bad || !isFinite(s);');

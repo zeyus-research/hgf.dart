@@ -88,12 +88,10 @@ extension on BatchNetwork {
     double timeStep,
     bool perElement,
     int lo,
-    int hi,
-  ) {
-    final predNode = _predNode, predStep = _predStep;
-    for (var s = 0; s < predNode.length; s++) {
-      _tDispatch(predStep[s], predNode[s], timeStep, lo, hi);
-    }
+    int hi, {
+    bool predicted = false,
+  }) {
+    if (!predicted) _tPredictSweep(timeStep, lo, hi);
     _observe(data, observed, offset, observedOffset, perElement, lo, hi);
     // Observations don't depend on the parameters.
     final inputs = _inputs, b = _b, k = _k, dMean = _dMean;
@@ -108,6 +106,14 @@ extension on BatchNetwork {
     final updNode = _updNode, updStep = _updStep;
     for (var s = 0; s < updNode.length; s++) {
       _tDispatch(updStep[s], updNode[s], timeStep, lo, hi);
+    }
+  }
+
+  /// The prediction sweep with tangents, for elements `[lo, hi)`.
+  void _tPredictSweep(double timeStep, int lo, int hi) {
+    final predNode = _predNode, predStep = _predStep;
+    for (var s = 0; s < predNode.length; s++) {
+      _tDispatch(predStep[s], predNode[s], timeStep, lo, hi);
     }
   }
 

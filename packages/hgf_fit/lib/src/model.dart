@@ -466,6 +466,105 @@ final class HgfModel {
     return out;
   }
 
+  /// Simulated choices in a task where the choice decides what the agent
+  /// observes: bandits, the Iowa Gambling Task, and the like.
+  ///
+  /// Each subject's [Subject.inputs] hold every option's outcome on every
+  /// trial (what the agent would see whichever option it took). On each
+  /// trial the agent predicts, [response] draws a choice `c` from those
+  /// predictions (under the constrained parameters `x[s]`), and only the
+  /// input nodes listed in `reveals[c]` (positions in `network.inputIdxs`)
+  /// observe their outcome; the others are missing for that trial, so their
+  /// beliefs only grow less certain. A subject's own [Subject.observed]
+  /// flags still apply on top. A NaN choice (a response model that can't
+  /// decide, e.g. on diverged beliefs) reveals nothing.
+  ///
+  /// Returns, per subject, a [Subject] with the same inputs and time steps,
+  /// the observed flags the choices produced, and the choices as responses:
+  /// ready to fit, e.g. for parameter recovery.
+  List<Subject> simulateChoices(
+    List<Subject> subjects,
+    List<List<double>> x,
+    math.Random rng, {
+    required List<List<int>> reveals,
+  }) {
+    if (x.length != subjects.length) {
+      throw ArgumentError('One parameter vector per subject');
+    }
+    final nIn = _nInputs;
+    for (final r in reveals) {
+      for (final i in r) {
+        if (i < 0 || i >= nIn) {
+          throw RangeError.range(i, 0, nIn - 1, 'reveals', 'Not an input');
+        }
+      }
+    }
+    final k = dimension, n = subjects.length;
+    final subjectOf = Int32List.fromList([for (var s = 0; s < n; s++) s]);
+    final flat = Float64List(n * k);
+    for (var s = 0; s < n; s++) {
+      if (x[s].length != k) throw ArgumentError('x[$s] must have $k values');
+      flat.setRange(s * k, (s + 1) * k, x[s]);
+    }
+    final choices = <Float64List>[
+      for (final s in subjects) Float64List(s.inputs.length ~/ _nColumns),
+    ];
+    final seen = <Float64List>[
+      for (final s in subjects) Float64List(s.inputs.length ~/ _nColumns * nIn),
+    ];
+    for (final g in _group(subjects, subjectOf, needResponses: false)) {
+      final b = g.elements.length;
+      final batch = _batch(b);
+      final (params, _) = _applyParameters(batch, g.elements, flat);
+      final (data, observed, perElement) = _data(subjects, subjectOf, g);
+      final nCols = _nColumns, per = perElement ? b : 1;
+      final row = Float64List(nCols * b), rowObs = Float64List(nIn * b);
+      batch.reset();
+      final p = _responseNames.length;
+      for (var t = 0; t < g.nTime; t++) {
+        final dt = g.timeSteps?[t] ?? 1.0;
+        batch.predict(timeStep: dt);
+        for (var c = 0; c < nCols; c++) {
+          for (var j = 0; j < b; j++) {
+            row[c * b + j] = data[(t * nCols + c) * per + (perElement ? j : 0)];
+          }
+        }
+        rowObs.fillRange(0, rowObs.length, 0.0);
+        for (var j = 0; j < b; j++) {
+          final s = subjectOf[g.elements[j]];
+          final choice = response.sample(batch, j, t, params, j * p, rng);
+          choices[s][t] = choice;
+          if (choice.isNaN) continue;
+          final ci = choice.toInt();
+          if (ci < 0 || ci >= reveals.length || ci != choice) {
+            throw StateError(
+              '${response.runtimeType} chose $choice; reveals has '
+              '${reveals.length} options',
+            );
+          }
+          for (final i in reveals[ci]) {
+            final o = observed == null
+                ? 1.0
+                : observed[(t * nIn + i) * per + (perElement ? j : 0)];
+            rowObs[i * b + j] = o;
+            seen[s][t * nIn + i] = o;
+          }
+        }
+        batch.step(row, observed: rowObs, timeStep: dt, perElement: true);
+      }
+    }
+    return [
+      for (var s = 0; s < n; s++)
+        Subject(
+          inputs: subjects[s].inputs,
+          observed: seen[s],
+          timeSteps: subjects[s].timeSteps,
+          responses: choices[s],
+          id: subjects[s].id,
+        ),
+    ];
+  }
+
   /// Input nodes (observed flags per trial).
   int get _nInputs => network.inputIdxs.length;
 

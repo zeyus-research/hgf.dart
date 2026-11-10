@@ -134,6 +134,61 @@ void main() {
       expect(() => batch.step(Float64List(2)), throwsArgumentError);
     });
 
+    test('predict() then step() is step(), with and without tangents', () {
+      final omegas = Float64List.fromList([-5, -4, -3]);
+      for (final tangents in [0, 1]) {
+        BatchNetwork make() {
+          final b = BatchNetwork(hgf(), 3, tangents: tangents, blockSize: 2)
+            ..setInitial(1, NodeField.tonicVolatility, omegas);
+          if (tangents > 0) {
+            b.setInitialTangent(
+              1,
+              NodeField.tonicVolatility,
+              0,
+              Float64List.fromList([1, 1, 1]),
+            );
+          }
+          return b..reset();
+        }
+
+        final plain = make(), split = make();
+        final row = Float64List(1), seen = Float64List(1);
+        for (var t = 0; t < u.length; t++) {
+          row[0] = u[t];
+          seen[0] = t % 7 == 3 ? 0.0 : 1.0;
+          final dt = 1.0 + (t % 3) * 0.5;
+          split.predict(timeStep: dt);
+          split.predict(timeStep: dt); // a no-op
+          // The prediction is the one the full step will use.
+          final predicted = [
+            for (var e = 0; e < 3; e++) split.get(e, 1, NodeField.expectedMean),
+          ];
+          plain.step(row, observed: seen, timeStep: dt);
+          split.step(row, observed: seen, timeStep: dt);
+          for (var e = 0; e < 3; e++) {
+            expect(plain.get(e, 1, NodeField.expectedMean), predicted[e]);
+            for (var i = 0; i < 3; i++) {
+              for (final f in NodeField.values) {
+                expect(split.get(e, i, f), plain.get(e, i, f));
+              }
+              if (tangents > 0) {
+                expect(
+                  split.getTangent(e, i, NodeField.mean, 0),
+                  plain.getTangent(e, i, NodeField.mean, 0),
+                );
+              }
+            }
+          }
+        }
+        split.predict(timeStep: 2);
+        expect(() => split.predict(), throwsStateError);
+        expect(() => split.step(row), throwsStateError);
+        expect(() => split.inputData(u, append: true), throwsStateError);
+        split.reset();
+        split.inputData(u); // reset() drops the pending prediction
+      }
+    });
+
     test('is unusable once the network gains nodes', () {
       final net = hgf();
       final batch = BatchNetwork(net, 2);

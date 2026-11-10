@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, HGF neural networks on the CPU and GPU, GPU ensembles of sequential fits, the playground's parameter recovery, fit host isolate and worker, categorical and dp fitting, data import/export, and hgf_deep's data loading and model saving)
+## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, HGF neural networks on the CPU and GPU, GPU ensembles of sequential fits, the playground's parameter recovery, fit host isolate and worker, categorical and dp fitting, data import/export, hgf_deep's data loading and model saving, and choice tasks)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -23,7 +23,7 @@ supersedes its phase list.
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`; a dp-state
     surprise (`DpSurprise`, an hgf.dart extension, 2026-11-10).
-- 657 engine tests pass (plus 126 fitting, 120 hgf_deep, 16 widget and 65
+- 658 engine tests pass (plus 135 fitting, 120 hgf_deep, 16 widget and 65
   playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
   `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
@@ -1601,7 +1601,56 @@ network per participant.
   (e.g. sensor data, think about including LSL streams with liblsl.dart).
 - [ ] Allow custom agents / models and parameters, to be able to e.g.
   fit something like the Iowa Gambling Task, or abitrary experimental
-  data.
+  data. **Library side done (2026-11-10, see "Choice tasks" below):**
+  `SoftmaxReadout`, `HgfModel.simulateChoices`, `IowaGamblingTask`, on the
+  CPU and the GPU. **Next, the playground:**
+  - A "choice task" preset kind (IGT, pyhgf's two-armed bandit): the preset
+    gives the network, the `SoftmaxReadout` options, `reveals` and an
+    outcome generator (`IowaGamblingTask.outcomes`, bandit contingencies).
+  - The playground holds the full outcome table (`nTrials × nInputs`), the
+    choices, and an observed mask per trial and input node (generalise
+    `observed` and `Player._flag` from one flag per trial to `nInputs`).
+    Simulated data = a closed-loop agent: its β becomes a playground
+    parameter, and every edit re-runs `simulateChoices` (a fixed choice
+    seed, so the choices change only through the beliefs), then filters
+    with the mask. Playback steps the loop trial by trial.
+  - Plots: each option's predicted value and the choice probabilities, the
+    choices as a raster, cumulative payoff.
+  - Fitting: responses only (the choices), ω per branch or shared, β;
+    recovery calls `simulateChoices` instead of `simulate` (`RecoveryJob`
+    and its wire format carry `reveals`).
+  - Import: a choice column and a payoff column (the mapping dialog gains
+    a "choice task" mode that calls `IowaGamblingTask.data`, or its
+    generalisation over `reveals`).
+  - Later: a perseveration / stickiness term and a lapse rate (common in IGT
+    models: an extra option-value term for the previous choice), and a
+    model builder (pick a network per option, how options are valued, the
+    reveals).
+- [ ] **Export a network / model to code** (requested 2026-11-10). Someone
+  designs a network or a whole fitting setup in the playground (structure,
+  node parameters, couplings, update scheme, the response model, the free
+  parameters with their priors and transforms) and exports it as a
+  runnable script to keep working on. Targets, in order:
+  1. **Dart** using `package:hgf` (+ `hgf_fit`): `Network()..addNodes(…)`
+     calls with the non-default parameters only, `inputData` on a CSV
+     loader, and, for a fit, the `HgfModel`/`Parameter`/`fitMap` (or
+     `sampleNuts`) call with the playground's settings. Must analyse clean
+     and reproduce the playground's trajectories (a round-trip test:
+     preset → code → run → same `Trajectories` bit for bit).
+  2. **Python using pyhgf** (`Network().add_nodes(…)`, `input_data`, and a
+     PyMC/NumPyro model for fitting), so the lab can continue in its usual
+     stack; test it against the parity fixtures' generator in
+     `tool/gen_fixtures.py`. Flag what pyhgf can't express (hgf.dart
+     extensions: `DpSurprise`, `ehgfMgfCorrection`, NaN-safe fixes) as
+     comments in the output.
+  3. Maybe **hgf_deep** networks (layer sizes, config, trained weights by
+     reference to the saved JSON) and Julia (HierarchicalGaussianFiltering.jl).
+  Build it as one generator per target over the existing JSON
+  (`Network.toJson`, `FitCodec.encodeModel`), in a Flutter-free package or
+  `hgf_fit/lib/codegen`, so a CLI (`dart run hgf:export model.json
+  --to python`) and the playground ("Export → Dart / Python", copy or save)
+  share it. Custom couplings and `ResponseModel.fn` closures can't be
+  generated: emit a stub with a TODO.
 - [x] **dp-state surprise, to fit dp networks** (agreed 2026-11-10; done
   the same day, see "dp fitting" below: the new-cluster term became the
   base measure's predictive, not the candidate).
@@ -1902,6 +1951,33 @@ browsers now that a round trip is ~0.3 ms.
   test accuracy 0.972 either way. README section "Getting started with your
   own data".
 
+#### Choice tasks: softmax choices, closed-loop simulation, the IGT (2026-11-10): done (library)
+
+- **`SoftmaxReadout`** (hgf_fit): choices among options, option `k` with
+  probability `exp(β vₖ) / Σ exp(β vⱼ)`, where `vₖ` is a weighted sum of node
+  beliefs (`options: [{node: weight}, …]`, `field` default `expectedMean`).
+  `SoftmaxReadout.nodes([...])` for one node per option (IGT decks);
+  `{0: 1, 1: -1}` gives pyhgf's two-armed bandit (`W − L`). Exact gradients
+  (checked against Richardson differences on both tasks), sampling, JSON
+  (`FitCodec`, so workers and the fit host take it), and a GPU kernel
+  (`GpuSoftmax`: a `logAddExp` chain, tangents from the IR): f32 matches f64
+  to 2e-7 (values) and 7e-7 (gradients) on the IGT and bandit cases of
+  `fit_check.dart`.
+- **`BatchNetwork.predict()`**: the prediction sweep alone, reused by the
+  next `step` (as `Network.predict`), with or without tangents; bit-identical
+  to a plain `step`.
+- **`HgfModel.simulateChoices(subjects, x, rng, reveals:)`**: the closed loop
+  where the choice decides what is seen. Per trial: predict, draw the
+  choice from the response model, observe only the inputs in
+  `reveals[choice]` (and the subject's own observed flags), update. Returns
+  fit-ready `Subject`s (observed mask + choices).
+- **`IowaGamblingTask`**: the decks' payoff schedule (Bechara et al. 1994
+  probabilities, drawn at random; units of $100), a network of four
+  two-level continuous HGFs, its readout and reveals, and `data(choices,
+  payoffs)` for recorded data. `example/iowa_gambling_task.dart`: 200
+  agents × 100 trials, MAP of all of them in 0.46 s (JIT, one core);
+  recovery r = 0.80 (ω shared across decks), 0.96 (log β).
+
 ## Upstream issues
 
 Found while porting and optimising; none reported yet. Details, suggested
@@ -2028,10 +2104,12 @@ loads networks and reads CSV datasets (`example/workflow.dart`). Phase 8:
 the parameter recovery view, the fit host isolate (desktop), categorical
 fitting, the web's fit host worker and WebGPU queue polling (Firefox:
 100 ms → 0.25 ms per round trip), dp fitting (a dp-state surprise),
-column mapping on import and CSV exports are done (2026-11-10); next are
-the app's remaining Phase 8 items (custom models such as the Iowa Gambling
-Task, real-time sources / LSL), vector node kinds on the GPU, and a faster
-dp candidate search.
+column mapping on import and CSV exports are done (2026-11-10), and so is
+the library side of choice tasks (`SoftmaxReadout`, `simulateChoices`,
+`IowaGamblingTask`, CPU and GPU). Next are the playground's choice-task
+presets (the plan is under Phase 8's custom-models item), export to
+code (Dart, then pyhgf), real-time sources / LSL, vector node kinds on the
+GPU, and a faster dp candidate search.
 
 ```sh
 cd hgf.dart

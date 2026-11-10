@@ -205,6 +205,103 @@ List<FitCase> fitCases() {
       ],
     ));
   }
+  {
+    // The Iowa Gambling Task: four continuous branches, a softmax over the
+    // predicted payoffs; only the chosen deck is observed.
+    final model = HgfModel(
+      network: IowaGamblingTask.network(),
+      response: IowaGamblingTask.readout(),
+      parameters: [
+        Parameter(
+          'omega',
+          targets: [
+            for (final n in IowaGamblingTask.valueNodes)
+              NodeTarget(n, NodeField.tonicVolatility),
+          ],
+          prior: const Normal(-2, 1.5),
+        ),
+        Parameter.response(
+          'inverseTemperature',
+          prior: const LogNormal(0.5, 1),
+        ),
+      ],
+    );
+    final rng = math.Random(6);
+    final sims = model.simulateChoices(
+      [
+        Subject(inputs: IowaGamblingTask.outcomes(100, rng)),
+        Subject(inputs: IowaGamblingTask.outcomes(100, rng)),
+      ],
+      [
+        [-2.0, 1.5],
+        [-3.0, 4.0],
+      ],
+      rng,
+      reveals: IowaGamblingTask.reveals,
+    );
+    sims[1].responses![20] = double.nan;
+    cases.add((
+      name: 'Iowa Gambling Task: softmax over 4 decks (ω, β), missed choice',
+      model: model,
+      subjects: sims,
+      points: [
+        [-2.0, 1.5],
+        [-1.0, 3.0],
+      ],
+    ));
+  }
+  {
+    // pyhgf's two-armed bandit: arm values W − L from four binary branches.
+    final net = Network()..addNodes(kind: NodeKind.binaryState, nNodes: 4);
+    for (var i = 0; i < 4; i++) {
+      net.addNodes(valueChildren: [i], tonicVolatility: -2.5);
+    }
+    final model = HgfModel(
+      network: net,
+      response: const SoftmaxReadout(
+        options: [
+          {0: 1.0, 1: -1.0},
+          {2: 1.0, 3: -1.0},
+        ],
+      ),
+      parameters: [
+        Parameter(
+          'omega',
+          targets: [
+            for (final n in [4, 5, 6, 7])
+              NodeTarget(n, NodeField.tonicVolatility),
+          ],
+          prior: const Normal(-2.5, 2),
+        ),
+        Parameter.response('inverseTemperature', prior: const LogNormal(1, 1)),
+      ],
+    );
+    final rng = math.Random(8);
+    final outcomes = Float64List.fromList([
+      for (var t = 0; t < 160; t++)
+        for (final p in [(t ~/ 40).isEven ? 0.8 : 0.2, 0.5, 0.3, 0.5])
+          rng.nextDouble() < p ? 1.0 : 0.0,
+    ]);
+    cases.add((
+      name: 'two-armed bandit: softmax over W − L (ω, β)',
+      model: model,
+      subjects: model.simulateChoices(
+        [Subject(inputs: outcomes)],
+        [
+          [-2.5, 4.0],
+        ],
+        rng,
+        reveals: const [
+          [0, 1],
+          [2, 3],
+        ],
+      ),
+      points: [
+        [-2.5, 4.0],
+        [-1.5, 1.0],
+      ],
+    ));
+  }
   return cases;
 }
 

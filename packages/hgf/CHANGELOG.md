@@ -1,5 +1,8 @@
 ## Unreleased
 
+- `BatchNetwork.predict()`: the prediction sweep alone (with or without
+  tangents), reused by the next `step`, as `Network.predict` is; for
+  drawing a choice from the predictions before the observation.
 - dp-state nodes record a surprise (an hgf.dart extension; pyhgf defines
   none, see docs/upstream P20): `NodeField.surprise` holds the
   observation's surprise under the node's Chinese-restaurant-process

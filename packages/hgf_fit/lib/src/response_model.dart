@@ -570,6 +570,194 @@ final class CategoricalSoftmaxReadout extends ResponseModel {
   }
 }
 
+/// Choices among options whose values the agent reads off its beliefs, made
+/// with a softmax: option `k` with probability
+/// `pₖ = exp(β vₖ) / Σⱼ exp(β vⱼ)`, where `vₖ = Σ w · belief` sums the
+/// [field] of the nodes in `options[k]` (node → weight).
+///
+/// This is the decision rule of bandit tasks and the Iowa Gambling Task:
+/// one option per arm or deck, valued at the predicted outcome of its input
+/// node ([SoftmaxReadout.nodes]), or as a combination such as pyhgf's
+/// two-armed bandit example, where arm A is worth `W_A − L_A`
+/// (`{0: 1, 1: -1}`) from the predicted win and loss probabilities. Pair it
+/// with `HgfModel.simulateChoices` to simulate a task where only the chosen
+/// option's outcome is seen.
+///
+/// A response is the chosen option's index (`0`, `1`, …; NaN: no
+/// response). Parameter: `inverseTemperature` (default
+/// [inverseTemperature]); `β = 0` chooses at random, large `β` the option
+/// of highest value.
+final class SoftmaxReadout extends ResponseModel {
+  const SoftmaxReadout({
+    required this.options,
+    this.field = NodeField.expectedMean,
+    this.inverseTemperature = 1.0,
+  });
+
+  /// One option per node, valued at that node's [field].
+  SoftmaxReadout.nodes(
+    List<int> nodes, {
+    NodeField field = NodeField.expectedMean,
+    double inverseTemperature = 1.0,
+  }) : this(
+         options: [
+           for (final n in nodes) {n: 1.0},
+         ],
+         field: field,
+         inverseTemperature: inverseTemperature,
+       );
+
+  /// Each option's value as weights on the nodes' [field].
+  final List<Map<int, double>> options;
+
+  /// The belief the values are read from (default: the prediction).
+  final NodeField field;
+
+  /// Default β when it isn't fitted.
+  final double inverseTemperature;
+
+  @override
+  Map<String, double> get parameters => {
+    'inverseTemperature': inverseTemperature,
+  };
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'SoftmaxReadout',
+    'options': [
+      for (final o in options)
+        [
+          for (final MapEntry(:key, :value) in o.entries)
+            {'node': key, 'weight': jsonDouble(value)},
+        ],
+    ],
+    'field': field.pyhgfName,
+    'inverseTemperature': jsonDouble(inverseTemperature),
+  };
+
+  @override
+  void prepare(Network network) {
+    if (options.length < 2) {
+      throw ArgumentError.value(options, 'options', 'Needs two or more');
+    }
+    for (final o in options) {
+      if (o.isEmpty) {
+        throw ArgumentError.value(options, 'options', 'An option is empty');
+      }
+      for (final n in o.keys) {
+        _checkNode(network, n);
+      }
+    }
+  }
+
+  double _value(BatchNetwork network, int element, int k) {
+    var v = 0.0;
+    for (final MapEntry(:key, :value) in options[k].entries) {
+      v += value * network.get(element, key, field);
+    }
+    return v;
+  }
+
+  /// `log Σⱼ exp(β vⱼ)`, computed stably.
+  double _logNormaliser(BatchNetwork network, int element, double beta) {
+    var top = double.negativeInfinity;
+    for (var k = 0; k < options.length; k++) {
+      final z = beta * _value(network, element, k);
+      if (z > top) top = z;
+    }
+    if (!top.isFinite) return top;
+    var sum = 0.0;
+    for (var k = 0; k < options.length; k++) {
+      sum += math.exp(beta * _value(network, element, k) - top);
+    }
+    return top + math.log(sum);
+  }
+
+  int _choice(double response) {
+    final r = response.toInt();
+    if (r < 0 || r >= options.length || r != response) {
+      throw ArgumentError.value(
+        response,
+        'response',
+        'Not an option index (0 .. ${options.length - 1})',
+      );
+    }
+    return r;
+  }
+
+  @override
+  double surprise(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    Float64List params,
+    int offset,
+  ) {
+    if (response.isNaN) return 0.0;
+    final beta = params[offset];
+    final r = _choice(response);
+    return _nanToInf(
+      _logNormaliser(network, element, beta) -
+          beta * _value(network, element, r),
+    );
+  }
+
+  @override
+  bool get supportsGradients => BatchNetwork.tangentFields.contains(field);
+
+  @override
+  double surprisePartials(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    Float64List params,
+    int offset,
+    ResponsePartials partials,
+  ) {
+    if (response.isNaN) return 0.0;
+    final beta = params[offset];
+    final r = _choice(response);
+    final z = _logNormaliser(network, element, beta);
+    final vr = _value(network, element, r);
+    // S = log Σ exp(β vⱼ) − β vᵣ: ∂S/∂vₖ = β (pₖ − [k = r]),
+    // ∂S/∂β = Σ pₖ vₖ − vᵣ; each vₖ is linear in the beliefs.
+    var dBeta = -vr;
+    for (var k = 0; k < options.length; k++) {
+      final v = _value(network, element, k);
+      final p = math.exp(beta * v - z);
+      dBeta += p * v;
+      final dv = beta * (p - (k == r ? 1.0 : 0.0));
+      for (final MapEntry(:key, :value) in options[k].entries) {
+        partials.add(key, field, dv * value);
+      }
+    }
+    partials.addParameter(0, dBeta);
+    return _nanToInf(z - beta * vr);
+  }
+
+  @override
+  double sample(
+    BatchNetwork network,
+    int element,
+    int t,
+    Float64List params,
+    int offset,
+    math.Random rng,
+  ) {
+    final beta = params[offset];
+    final z = _logNormaliser(network, element, beta);
+    if (!z.isFinite) return double.nan;
+    var u = rng.nextDouble();
+    for (var k = 0; k < options.length - 1; k++) {
+      u -= math.exp(beta * _value(network, element, k) - z);
+      if (u < 0) return k.toDouble();
+    }
+    return (options.length - 1).toDouble();
+  }
+}
+
 /// The surprise of the observations themselves under the network's
 /// predictions, from a parameter-free `ResponseFunction` such as
 /// `TotalGaussianSurprise`, `FirstLevelBinarySurprise` or

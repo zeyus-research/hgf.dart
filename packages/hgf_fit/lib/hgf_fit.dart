@@ -54,6 +54,7 @@ export 'src/sample/diagnostics.dart'
 export 'src/sample/nuts.dart';
 export 'src/sample/sample.dart'
     hide chainSeed, EnsembleEvaluator, NutsEnsembles, nutsEnsembles;
+export 'src/tasks.dart';
 export 'src/special.dart' show erf, erfc, logNormalCdf, normalQuantile;
 export 'src/transform.dart';
 export 'src/workers.dart';

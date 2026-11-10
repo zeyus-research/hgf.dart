@@ -207,6 +207,49 @@ void main() {
     }
   });
 
+  test('softmax choices over belief combinations', () {
+    const response = SoftmaxReadout(
+      options: [
+        {0: 1.0, 1: -1.0},
+        {2: 0.5},
+        {3: 1.0},
+      ],
+      field: NodeField.expectedMean,
+      inverseTemperature: 2,
+    );
+    final model = HgfModel(
+      network: IowaGamblingTask.network(),
+      response: response,
+      parameters: [
+        Parameter(
+          'omega',
+          targets: [
+            for (final n in IowaGamblingTask.valueNodes)
+              NodeTarget(n, NodeField.tonicVolatility),
+          ],
+          prior: const Normal(-2, 1.5),
+        ),
+        Parameter.response('inverseTemperature', prior: const LogNormal(0, 1)),
+      ],
+    );
+    final copy = _roundTrip(model);
+    expect(copy.response.toJson(), response.toJson());
+    final rng = math.Random(3);
+    final subjects = model.simulateChoices(
+      [Subject(inputs: IowaGamblingTask.outcomes(60, rng))],
+      [
+        [-2.0, 2.0],
+      ],
+      rng,
+      reveals: const [
+        [0, 1],
+        [2],
+        [3],
+      ],
+    );
+    _sameObjective(model, copy, subjects);
+  });
+
   test('continuous model with a Gaussian readout and couplings', () {
     final model = HgfModel(
       network: Network(volatilityUpdates: VolatilityUpdates.eHGF)
