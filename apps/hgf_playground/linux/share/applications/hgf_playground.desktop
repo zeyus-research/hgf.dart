@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=hgf_playground
+Comment=hgf_playground
+Exec=hgf_playground
+Icon=hgf_playground
+Terminal=false
+Type=Application
+Categories=Utility;
+StartupWMClass=com.zeyus.hgf_playground
