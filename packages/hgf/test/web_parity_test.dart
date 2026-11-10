@@ -46,11 +46,12 @@ void main() {
     ];
   });
 
-  // Each check yields between fixtures: browser test suites share one
-  // event loop, and a long synchronous run (the dp-state fixtures take
-  // seconds each) keeps the other suites' pages from loading. Yielding
-  // makes the default 30 s timeout apply (a synchronous body can't be
-  // timed out), and each check takes minutes on dart2js.
+  // Each check yields between fixtures so the test timeout can fire (a
+  // synchronous body can't be timed out). Browser suites share one event
+  // loop, and a single dp-state fixture blocks it for 15-45 s on dart2wasm,
+  // which is longer than package:test's 30 s suite load timeout. So run the
+  // browser suites with `-j 1` (see `melos run test:web`), and each check
+  // takes minutes on dart2js.
   const long = Timeout(Duration(minutes: 10));
   Future<List<String>> each(
     Iterable<String> Function(Map<String, Object?>) check,

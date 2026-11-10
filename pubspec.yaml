@@ -59,10 +59,14 @@ melos:
       description: Run the pyhgf parity suites against the JSON fixtures.
     test:web:
       # Chrome is found via CHROME_EXECUTABLE (e.g. /usr/bin/chromium).
+      # -j 1: browser suites share one tab's event loop, and a suite loads
+      # only when it gets a run slot. The dp fixtures block for 15-45 s each
+      # in web_parity_test, which starved concurrently loading suites past
+      # package:test's fixed 30 s load timeout.
       exec:
         command: >-
-          dart test -p node,chrome --tags parity 2>&1 &&
-          dart test -p chrome -c dart2wasm --tags parity 2>&1 || [ \$? -eq 79 ]
+          dart test -p node,chrome -j 1 --tags parity 2>&1 &&
+          dart test -p chrome -c dart2wasm -j 1 --tags parity 2>&1 || [ \$? -eq 79 ]
         concurrency: 1
       packageFilters:
         dirExists: test
