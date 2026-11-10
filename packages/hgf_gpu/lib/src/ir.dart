@@ -318,3 +318,110 @@ final class Tangents {
     }
   }
 }
+
+/// Reverse mode: emits the adjoint statements of a straight-line program
+/// (one SSA trial, [TrialCompiler.compileSsa]).
+///
+/// Every variable `x` that [hasAdjoint] accepts has an accumulator `x_b`
+/// (declared by the caller). [statement] back-propagates `x_b` through the
+/// tree of `let x = e` into the accumulators of the variables `e` reads,
+/// using the same partial derivatives as [Tangents] (the [Call] rules, the
+/// quotient as `(a/b)/b`, an active clamp passing nothing); calling it for
+/// the statements in reverse order is the vector-Jacobian product of the
+/// whole program.
+final class Adjoints {
+  Adjoints(this.hasAdjoint);
+
+  /// Whether variable `name` has an adjoint accumulator.
+  final bool Function(String name) hasAdjoint;
+
+  /// The emitted WGSL statements, in order.
+  final lines = <String>[];
+
+  var _tmp = 0;
+  final _active = Expando<bool>();
+
+  /// Whether [e] reads any variable with an adjoint.
+  bool active(Ex e) {
+    final cached = _active[e];
+    if (cached != null) return cached;
+    final out = switch (e) {
+      Lit() || TZero() => false,
+      Ref(:final name) => hasAdjoint(name),
+      TRef() => throw StateError('Adjoint of a tangent'),
+      _Neg(:final a) => active(a),
+      _Bin(:final a, :final b) => active(a) || active(b),
+      Sel(:final f, :final t) => active(f) || active(t),
+      Call(:final args) => args.any(active),
+    };
+    _active[e] = out;
+    return out;
+  }
+
+  /// [e] as an atom: itself if it is one, else a fresh `let`.
+  Ex _bind(Ex e, String stem) {
+    if (e is Ref || e is Lit) return e;
+    final name = '$stem${_tmp++}';
+    lines.add('let $name = ${e.w};');
+    return Ref(name);
+  }
+
+  /// The adjoint statements of `let name = e`, given that `name_b` is
+  /// complete (every later reader has been processed).
+  void statement(String name, Ex e) =>
+      _back(e, Ref('${name}_b'), self: Ref(name));
+
+  void _back(Ex e, Ex g, {Ex? self}) {
+    if (!active(e)) return;
+    switch (e) {
+      case Lit() || TZero():
+        return;
+      case TRef():
+        throw StateError('Adjoint of a tangent');
+      case Ref(:final name):
+        lines.add('${name}_b += ${g.w};');
+      case _Neg(:final a):
+        _back(a, neg(g));
+      case _Bin(:final op, :final a, :final b):
+        final aa = active(a), ab = active(b);
+        // The adjoint is used twice below: bind it.
+        final gg = aa && ab ? _bind(g, 'adjG') : g;
+        switch (op) {
+          case '+':
+            _back(a, gg);
+            _back(b, gg);
+          case '-':
+            _back(a, gg);
+            _back(b, neg(gg));
+          case '*':
+            if (aa) _back(a, mul(gg, ab ? _bind(b, 'adjP') : b));
+            if (ab) _back(b, mul(gg, aa ? _bind(a, 'adjP') : a));
+          case '/':
+            final bb = _bind(b, 'adjP');
+            if (aa) _back(a, div(gg, bb));
+            // ∂(a/b)/∂b = −(a/b)/b, never through 1/b² (as in [Tangents]).
+            if (ab) _back(b, neg(div(mul(div(a, bb), gg), bb)));
+          default:
+            throw StateError(op);
+        }
+      case Sel(:final f, :final t, :final c):
+        final both = active(f) && active(t);
+        final gg = both ? _bind(g, 'adjG') : g;
+        _back(t, Sel(zero, gg, c));
+        _back(f, Sel(gg, zero, c));
+      case Call(:final fn, :final args):
+        final rule = _rules[fn];
+        if (rule == null) throw StateError('No derivative rule for $fn');
+        final n = args.where(active).length;
+        final gg = n > 1 ? _bind(g, 'adjG') : g;
+        // The partials re-read the arguments' primal subtrees; the shader
+        // compiler merges the repeats.
+        final partials = rule(args, self ?? e);
+        for (var i = 0; i < args.length; i++) {
+          final p = partials[i];
+          if (p == null || !active(args[i])) continue;
+          _back(args[i], mul(gg, p));
+        }
+    }
+  }
+}

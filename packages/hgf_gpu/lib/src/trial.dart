@@ -387,21 +387,98 @@ final class TrialCompiler {
       active = {...active, ...needs};
     }
   }
+
+  /// Compiles the trial in SSA form, for reverse mode: one flat scope, every
+  /// local and every write of a slot variable a fresh `let`, and the
+  /// statements kept as expression trees ([SsaTrial.statements]) so their
+  /// adjoints can be emitted in reverse order. No tangents, no `bad` flag
+  /// and no running total (the trial's surprise is [SsaTrial.objective]).
+  ///
+  /// Throws [UnsupportedError] for the unbounded update (its mutable
+  /// accumulators and `if` blocks have no SSA form yet).
+  SsaTrial compileSsa(TrialSource source) {
+    final pass = _Pass(this, source, const {}, ssa: true);
+    pass.run();
+    final carried = {
+      for (final e in pass.firstAccessRead.entries)
+        if (e.value) e.key,
+    };
+    return SsaTrial._(
+      pass.body.toString(),
+      List.unmodifiable(pass.statements),
+      pass.objective!,
+      carried,
+      pass.written,
+      Map.unmodifiable(pass.current),
+      slotOfVar,
+    );
+  }
+}
+
+/// A trial in SSA form ([TrialCompiler.compileSsa]).
+final class SsaTrial {
+  SsaTrial._(
+    this.body,
+    this.statements,
+    this.objective,
+    this.carried,
+    this.written,
+    this.finalVersion,
+    this.slotOfVar,
+  );
+
+  /// The primal statements (`let`s, flat), reading the carried slot
+  /// variables by their own names.
+  final String body;
+
+  /// Every differentiable `let` of [body], in order: its name and value.
+  final List<(String, Ex)> statements;
+
+  /// The statement holding the trial's surprise.
+  final String objective;
+
+  /// Slot variables read before they are written.
+  final Set<String> carried;
+
+  /// Slot variables the trial writes.
+  final Set<String> written;
+
+  /// The name of each written slot variable's last version.
+  final Map<String, String> finalVersion;
+
+  final Map<String, int> slotOfVar;
 }
 
 /// One code-generation pass over the trial, for a fixed set of active slot
 /// variables.
 final class _Pass {
-  _Pass(this.c, this.source, this.activeSlots)
+  _Pass(this.c, this.source, this.activeSlots, {this.ssa = false})
     : net = c.net,
       n = c.n,
-      k = c.directions;
+      k = ssa ? 0 : c.directions;
 
   final TrialCompiler c;
   final TrialSource source;
   final Set<String> activeSlots;
   final Network net;
   final int n, k;
+
+  /// SSA mode ([TrialCompiler.compileSsa]).
+  final bool ssa;
+
+  /// SSA mode: the differentiable statements, the current version of each
+  /// written slot variable, and the surprise's statement.
+  final statements = <(String, Ex)>[];
+  final current = <String, String>{};
+  String? objective;
+  var _version = 0;
+  String _fresh(String name) => '${name}_v${_version++}';
+
+  /// `bad = bad || !(c)` (not in SSA mode, where the forward sweep has
+  /// already flagged the element).
+  void flag(Cond c) {
+    if (!ssa) line('bad = bad || !${c.text};');
+  }
 
   final body = StringBuffer();
   var _indent = 2;
@@ -458,7 +535,10 @@ final class _Pass {
   }
 
   void open(String s) {
-    line('$s {');
+    if (ssa && s.isNotEmpty) {
+      throw UnsupportedError('Control flow has no SSA form: $s');
+    }
+    if (!ssa) line('$s {');
     _indent++;
     _scopes.add({});
   }
@@ -466,6 +546,10 @@ final class _Pass {
   void close([String s = '}']) {
     _indent--;
     _scopes.removeLast();
+    if (ssa) {
+      if (s != '}') throw UnsupportedError('Control flow has no SSA form: $s');
+      return;
+    }
     line(s);
     if (s.endsWith('{')) {
       _indent++;
@@ -486,6 +570,12 @@ final class _Pass {
   /// `let name = e;` (and its tangent).
   Ex let(String name, Object e) {
     final x = ex(e);
+    if (ssa) {
+      final v = _fresh(name);
+      line('let $v = ${x.w};');
+      statements.add((v, x));
+      return Ref(v);
+    }
     line('let $name = ${x.w};');
     final dt = _d(x, self: Ref(name));
     if (dt != null) _tangentLines('let ', name, '=', dt);
@@ -495,12 +585,14 @@ final class _Pass {
 
   /// A boolean `let`.
   Cond letCond(String name, Cond c) {
+    if (ssa) name = _fresh(name);
     line('let $name = ${c.text};');
     return Cond(name);
   }
 
   /// `var name = e;`, with a tangent if [e] has one or [active].
   Ex variable(String name, Object e, {bool active = false}) {
+    if (ssa) throw UnsupportedError('Mutable local $name has no SSA form');
     final x = ex(e);
     line('var $name = ${x.w};');
     final dt = _d(x);
@@ -513,6 +605,16 @@ final class _Pass {
   /// `name = e;` for a local or slot variable.
   void set(String name, Object e) {
     final x = ex(e);
+    if (ssa) {
+      if (!c.slotOfVar.containsKey(name)) {
+        throw UnsupportedError('Mutable local $name has no SSA form');
+      }
+      final v = _fresh(name);
+      line('let $v = ${x.w};');
+      statements.add((v, x));
+      current[name] = v;
+      return;
+    }
     final dt = _d(x);
     if (_isActive(name)) {
       _tangentLines('', name, '=', dt);
@@ -540,7 +642,7 @@ final class _Pass {
   Ex r(int node, NodeField f) {
     final v = TrialCompiler.fieldVar(node, f);
     firstAccessRead.putIfAbsent(v, () => true);
-    return Ref(v);
+    return Ref(current[v] ?? v);
   }
 
   /// Writes node field [f] of [node].
@@ -554,7 +656,7 @@ final class _Pass {
 
   Ex _slotRead(String v) {
     firstAccessRead.putIfAbsent(v, () => true);
-    return Ref(v);
+    return Ref(current[v] ?? v);
   }
 
   Ex a(int parent, int child) => _slotRead('a${parent}_$child');
@@ -689,7 +791,7 @@ final class _Pass {
     final pv = let('pv', dt * exp(totvol));
     // f64: pv ≤ 1e-128 becomes NaN; here pv ≤ 0 (underflow) flags the
     // element.
-    line('bad = bad || !(pv > 0.0f);');
+    flag(gt(pv, zero));
     final carried = let(
       'carried',
       input ? one / prec : (lambda * lambda) / prec,
@@ -1234,7 +1336,12 @@ final class _Pass {
         s = sel(zero, lse - chosen, present);
     }
     final sv = let('s', s);
-    line('bad = bad || !isFinite(s);');
+    if (ssa) {
+      objective = (sv as Ref).name;
+      close();
+      return;
+    }
+    flag(isFinite(sv));
     // Kahan summation (the tangent is summed plainly).
     final ds = _d(sv);
     if (ds != null) _tangentLines('', 'total', '+=', ds);

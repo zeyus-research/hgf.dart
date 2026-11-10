@@ -1589,6 +1589,42 @@ network per participant.
   sample on one core); the rest is barrier latency, 13 phases per row.
   Tested in all three placements on wgpu-native and SwiftShader.
 
+#### Reverse-mode spike (2026-11-11): done, not yet wired in
+
+Question: when does reverse-mode AD beat the forward tangents on the GPU?
+Full write-up, including how all the gradients are computed (for readers
+used to JAX/Julia AD): [DIFFERENTIATION.md](DIFFERENTIATION.md) §7.
+
+- `TrialCompiler.compileSsa` emits the trial as flat SSA (fresh `let`
+  per local and per slot write) and keeps the statements as trees.
+  `Adjoints` (`ir.dart`) emits their VJP in reverse order from the same
+  partials table as `Tangents`. Across trials: a full tape of the carried
+  state, or √T checkpoints with each segment recomputed. Each reverse step
+  recomputes its trial's primal from the stored state.
+  The existing kernels' WGSL is byte-identical (all three update modes).
+- `GradKernel`/`GradJob` (`fit/grad_kernel.dart`, not exported): one
+  harness for primal, forward (k directions) and reverse kernels.
+  `test/native_reverse_test.dart` checks reverse against forward (4
+  models, 2e-4). `benchmark/bin/reverse_gpu.dart` measures cost and
+  `reverse_f64.dart` compares both against f64: typical elements are about
+  1e-6 off for both; the worst-disagreeing elements (|∂| ~ 1e4) are
+  1e-4 to 3e-2 off for both, with no consistent winner.
+- Result (RX 7600 XT, 320 trials): for the models fitted today (k ≤ 10,
+  ≤ 17 carried slots) checkpointed reverse costs 2.7–6× the primal, the
+  same as forward at k ≈ 5–10, so **forward stays the default**. On an
+  8-input binary network (33 parameters, 61 carried slots), forward mode
+  falls off a cliff: 56–105× the primal at k = 10 and 690–970× at
+  k = 33. That jump fits register spilling. Reverse costs 4.7–9.6×, about
+  200× faster at B = 16,384. Checkpointing beats the full tape at large B
+  and fits browser buffer limits.
+- Pitfall: one dispatch of forward k = 33 at B = 65,536 ran long enough
+  that amdgpu reset the GPU (ring timeout). The bench now stops adding
+  directions once one run takes over 300 ms.
+- Next, if a model needs many parameters: SSA for the unbounded update
+  (its `if` blocks and accumulators as `select`s), dispatch splitting,
+  `FitKernel(reverse:)` chosen by k × carried slots, and maybe
+  forward-over-reverse for an exact Laplace Hessian.
+
 ### Phase 8: App -> HGF GUI modelling
 
 - [ ] Since the performance is excellent so far, the playground can be
