@@ -1,5 +1,13 @@
 ## Unreleased
 
+- `GpuDeepEnsemble`: hgf_deep's sequential `fit` for many networks of one
+  shape at once (one workgroup per member runs the sample loop in one
+  kernel, `SequentialFitKernel.sequentialFit` on
+  `DeepKernels.sequential`); shared or per-member data, SGD/Adam (bias
+  corrections from a host table), `upload`/`download`/`downloadAll`,
+  dispatches sized to ~50 ms so drivers don't reset the device.
+- `DeepKernels`' epilogues are factored out for reuse (the batch kernels'
+  WGSL is byte-identical); `DeepBinding.biasCorrection`.
 - `GpuDeepNetwork`: hgf_deep's `DeepNetwork` on the GPU (`batchUpdate`,
   `trainEpoch`, `predict`, `upload`/`download`), from `DeepKernels`, which
   generates one fused GEMM-plus-epilogue kernel per layer, a split-K weight

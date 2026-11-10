@@ -14,6 +14,8 @@ import 'package:hgf_deep/hgf_deep.dart';
 
 import '../trial.dart' show prelude;
 
+part 'deep_fit_kernel.dart';
+
 /// The buffers a deep kernel binds, in binding order.
 enum DeepBinding {
   /// Parameters: weights, optimiser moments, per-node constants and the
@@ -34,8 +36,11 @@ enum DeepBinding {
   /// (`rows × bottomSize`).
   out('OUT', 'read_write'),
 
-  /// The per-call uniform (`DeepUniform`).
-  uniform('U', '');
+  /// The per-call uniform.
+  uniform('U', ''),
+
+  /// Adam's bias corrections per step of a sequential fit (`2·steps`).
+  biasCorrection('BC', 'read');
 
   const DeepBinding(this.name, this.access);
   final String name;
@@ -83,7 +88,27 @@ final class _LayerLayout {
 final class DeepKernels {
   DeepKernels(DeepNetwork net, {required this.capacity})
     : settings = net.settings,
-      layers = net.debugLayers {
+      layers = net.debugLayers,
+      _pb = '',
+      _sb = '' {
+    _check();
+  }
+
+  /// The layout and kernel of a sequential `fit` over an ensemble of
+  /// networks of [net]'s shape ([sequentialFit]): every member has its own
+  /// width-1 copy of the parameter and state layouts, `paramFloats` and
+  /// `stateFloats` apart, and the generated code addresses them relative
+  /// to the member's base offsets `pb` and `sb`.
+  DeepKernels.sequential(DeepNetwork net)
+    : capacity = 1,
+      settings = net.settings,
+      layers = net.debugLayers,
+      _pb = 'pb + ',
+      _sb = 'sb + ' {
+    _check();
+  }
+
+  void _check() {
     if (layers.length < 2) {
       throw ArgumentError('A GPU deep network needs at least two layers.');
     }
@@ -102,6 +127,10 @@ final class DeepKernels {
   final int capacity;
   final DeepSettings settings;
   final List<Layer> layers;
+
+  /// Base-offset prefixes of `P` and `S` indices (empty for the batch
+  /// kernels; the member's bases for [DeepKernels.sequential]).
+  final String _pb, _sb;
 
   final _l = <_LayerLayout>[];
   late final int paramFloats, stateFloats;
@@ -212,9 +241,13 @@ final class DeepKernels {
   String get _bm => '${capacity}u';
 
   /// `S[...]` of field [f] of layer [l] at flat index [k] (`i·cap + s`).
-  String _s(int l, LayerField f, String k) => 'S[${_l[l].state[f]!}u + $k]';
-  String _t(int l, LayerField f, String i) => 'P[${_l[l].template[f]!}u + $i]';
-  String _at(int base, String k) => 'S[${base}u + $k]';
+  String _s(int l, LayerField f, String k) => 'S[$_sb${_l[l].state[f]!}u + $k]';
+  String _t(int l, LayerField f, String i) =>
+      'P[$_pb${_l[l].template[f]!}u + $i]';
+  String _at(int base, String k) => 'S[$_sb${base}u + $k]';
+
+  /// `P[...]` at [base] + [k] (member-relative in a sequential kernel).
+  String _p(int base, String k) => 'P[$_pb${base}u + $k]';
 
   static String _f(double v) {
     if (!v.isFinite) throw ArgumentError('Non-finite constant $v');
@@ -301,10 +334,11 @@ struct Uniform {
   DeepKernelSource _kernel(
     String name,
     String body,
-    (int, int) Function(int b) grid,
-  ) {
+    (int, int) Function(int b) grid, {
+    String uniformStruct = _uniformStruct,
+  }) {
     final used = <DeepBinding>{DeepBinding.uniform};
-    final decl = StringBuffer(_uniformStruct);
+    final decl = StringBuffer(uniformStruct);
     for (final b in DeepBinding.values) {
       if (b == DeepBinding.uniform) {
         decl.writeln('@group(0) @binding(${b.index}) var<uniform> U: Uniform;');
@@ -558,12 +592,20 @@ $body
   /// Clamp `x` on the top layer: its means, its coupled outputs `g(x)` (the
   /// prediction's and the gradient's) and, with feedforward uncertainty,
   /// `g'(x)²/π̂`.
-  DeepKernelSource top() {
+  DeepKernelSource top() => _elementwise(
+    'top',
+    topSize,
+    _topBody('X[(U.start + s) * ${topSize}u + i]'),
+  );
+
+  /// Clamp predictor [x] (a WGSL expression) on top node `i` (expects `i`,
+  /// `k` in scope).
+  String _topBody(String x) {
     final l = nLayers - 1;
     final ll = _l[l];
     final fn = _fn(l);
     final body = StringBuffer()
-      ..writeln('  let v = X[(U.start + s) * ${topSize}u + i];')
+      ..writeln('  let v = $x;')
       ..writeln('  ${_s(l, LayerField.expectedMean, 'k')} = v;')
       ..writeln('  ${_s(l, LayerField.mean, 'k')} = v;')
       ..writeln('  let gv = ${_g(fn, 'v')};')
@@ -577,7 +619,7 @@ $body
           '${_t(l, LayerField.expectedPrecision, 'i')};',
         );
     }
-    return _elementwise('top', topSize, body.toString());
+    return body.toString();
   }
 
   /// Predict layer [l] from the one above: `μ̂ = W·g(μ̂_parent)` and the
@@ -588,12 +630,40 @@ $body
     final pll = _l[l + 1];
     final cols = pl.weights!.cols;
     final w = pll.weights!;
+    final ffu = _feedforward(l);
+    return _gemm(
+      'predict layer $l',
+      m: '${c.size}u',
+      mMax: c.size,
+      n: 'U.b',
+      nMax: capacity,
+      depth: '${cols}u',
+      a: 'P[${w}u + r * ${cols}u + k]',
+      aAlongK: true,
+      b0: _at(pll.coupled!, 'k * $_bm + c'),
+      // The bias row of perParent is never written (zero-initialised).
+      b1: ffu ? _at(pll.perParent!, 'k * $_bm + c') : null,
+      squareA1: true,
+      bAlongK: false,
+      epilogue: _predictEpilogue(l),
+      grid: (tm, tn) => _overSamples(c.size, tm, tn),
+    );
+  }
+
+  /// Whether layer [l]'s prediction adds the feedforward uncertainty
+  /// `Σ W²·g'²/π̂` of its parents (the second accumulator `acc1`).
+  bool _feedforward(int l) =>
+      settings.feedforwardUncertainty &&
+      layers[l].kind == LayerKind.volatile &&
+      !layers[l].isInputLayer &&
+      settings.predictPrecision;
+
+  /// Layer [l]'s prediction from `acc0 = (W·g(μ̂_parent))[r]` (and `acc1`)
+  /// for node `r`, sample `c`.
+  String _predictEpilogue(int l) {
+    final c = layers[l];
     final predict = settings.predictPrecision;
-    final ffu =
-        settings.feedforwardUncertainty &&
-        c.kind == LayerKind.volatile &&
-        !c.isInputLayer &&
-        predict;
+    final ffu = _feedforward(l);
     final e = StringBuffer()
       ..writeln('  let i = r; let s = c; let k = i * $_bm + s;')
       ..writeln('  let mu = acc0;');
@@ -617,7 +687,7 @@ $body
           if (c.hasVolatility) {
             e
               ..writeln(
-                '  let pvv = guardV(U.t * exp(P[${ll.tonicVol}u + i]));',
+                '  let pvv = guardV(U.t * exp(${_p(ll.tonicVol!, 'i')}));',
               )
               ..writeln('  let ev = 1.0f / (1.0f / pv + pvv);')
               ..writeln('  ${S(LayerField.expectedMeanVol)} = mv;')
@@ -628,11 +698,11 @@ $body
               e.writeln('  total = total + 1.0f / (2.0f * ev);');
             }
             if (ll.tonic != null) {
-              e.writeln('  total = total + P[${ll.tonic}u + i];');
+              e.writeln('  total = total + ${_p(ll.tonic!, 'i')};');
             }
             e.writeln('  predVol = guardV(U.t * exp(total));');
           } else if (ll.tonic != null) {
-            e.writeln('  predVol = guardV(U.t * exp(P[${ll.tonic}u + i]));');
+            e.writeln('  predVol = guardV(U.t * exp(${_p(ll.tonic!, 'i')}));');
           }
         } else if (c.hasVolatility) {
           e
@@ -670,23 +740,7 @@ $body
       case LayerKind.categorical:
         e.writeln('  ${S(LayerField.expectedMean)} = mu;');
     }
-    return _gemm(
-      'predict layer $l',
-      m: '${c.size}u',
-      mMax: c.size,
-      n: 'U.b',
-      nMax: capacity,
-      depth: '${cols}u',
-      a: 'P[${w}u + r * ${cols}u + k]',
-      aAlongK: true,
-      b0: _at(pll.coupled!, 'k * $_bm + c'),
-      // The bias row of perParent is never written (zero-initialised).
-      b1: ffu ? _at(pll.perParent!, 'k * $_bm + c') : null,
-      squareA1: true,
-      bAlongK: false,
-      epilogue: e.toString(),
-      grid: (tm, tn) => _overSamples(c.size, tm, tn),
-    );
+    return e.toString();
   }
 
   /// `g(μ̂)` (and `g'(μ̂)²/π̂`) of layer [l] for the layer below.
@@ -731,13 +785,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   /// Clamp `y` on the bottom layer, then its prediction error.
-  DeepKernelSource updateBottom() {
+  DeepKernelSource updateBottom() => _elementwise(
+    'update layer 0',
+    bottomSize,
+    _bottomBody('Y[(U.start + s) * ${bottomSize}u + i]'),
+  );
+
+  /// Clamp observation [y] (a WGSL expression) on bottom node `i`, then its
+  /// prediction error (expects `i`, `s`, `k` in scope).
+  String _bottomBody(String y) {
     final e = StringBuffer()
-      ..writeln('  let mean = Y[(U.start + s) * ${bottomSize}u + i];')
+      ..writeln('  let mean = $y;')
       ..writeln('  ${_s(0, LayerField.mean, 'k')} = mean;')
       ..writeln('  let prec = ${_s(0, LayerField.precision, 'k')};');
     _predictionError(e, 0);
-    return _elementwise('update layer 0', bottomSize, e.toString());
+    return e.toString();
   }
 
   /// The value-level posterior of layer [l] from its children's errors,
@@ -747,8 +809,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     final cl = _l[l - 1];
     final cols = pl.weights!.cols;
     final w = _l[l].weights!;
-    final fn = _fn(l);
     final nc = layers[l - 1].size;
+    return _gemm(
+      'posterior layer $l',
+      m: '${pl.size}u',
+      mMax: pl.size,
+      n: 'U.b',
+      nMax: capacity,
+      depth: '${nc}u',
+      // Wᵀ: A(r = parent j, k = child i) = W[i][j].
+      a: 'P[${w}u + k * ${cols}u + r]',
+      aAlongK: false,
+      b0: _at(cl.gain!, 'k * $_bm + c'),
+      b1: _at(cl.effc!, 'k * $_bm + c'),
+      squareA1: true,
+      bAlongK: false,
+      epilogue: _posteriorEpilogue(l),
+      grid: (tm, tn) => _overSamples(pl.size, tm, tn),
+    );
+  }
+
+  /// Layer [l]'s value posterior from `acc0 = (Wᵀ·gain·δ)[r]` and
+  /// `acc1 = ((W²)ᵀ·π_eff)[r]` for node `r`, sample `c`, then its prediction
+  /// error and `g(μ)` for the gradient.
+  String _posteriorEpilogue(int l) {
+    final fn = _fn(l);
     final e = StringBuffer()
       ..writeln('  let i = r; let s = c; let k = i * $_bm + s;')
       ..writeln('  let msg = acc0; let pc1 = acc1;')
@@ -769,23 +854,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     e
       ..writeln('  let hv = $gm;')
       ..writeln('  ${_at(_l[l].h!, 'k')} = select(0.0f, hv, isFinite(hv));');
-    return _gemm(
-      'posterior layer $l',
-      m: '${pl.size}u',
-      mMax: pl.size,
-      n: 'U.b',
-      nMax: capacity,
-      depth: '${nc}u',
-      // Wᵀ: A(r = parent j, k = child i) = W[i][j].
-      a: 'P[${w}u + k * ${cols}u + r]',
-      aAlongK: false,
-      b0: _at(cl.gain!, 'k * $_bm + c'),
-      b1: _at(cl.effc!, 'k * $_bm + c'),
-      squareA1: true,
-      bAlongK: false,
-      epilogue: e.toString(),
-      grid: (tm, tn) => _overSamples(pl.size, tm, tn),
-    );
+    return e.toString();
   }
 
   /// Layer [l]'s prediction error by kind (expects `mean` and `precision`
@@ -854,7 +923,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     String S(LayerField f) => _s(l, f, 'k');
     final ll = _l[l];
     final maxPp = _f(settings.maxPosteriorPrecision);
-    final omega = ll.tonic == null ? '0.0f' : 'P[${ll.tonic}u + i]';
+    final omega = ll.tonic == null ? '0.0f' : _p(ll.tonic!, 'i');
     e
       ..writeln('  let effv0 = ${S(LayerField.effectivePrecision)};')
       ..writeln('  let dpe = ${S(LayerField.volatilityPredictionError)};')
@@ -1038,17 +1107,24 @@ $step
   }
 
   /// The optimiser's update of weight `wi` of layer [l] from gradient `g`.
-  String _optimiserStep(int l, DeepOptimiserKind optimiser) {
+  /// [bc1] and [bc2] are Adam's bias corrections (WGSL expressions).
+  String _optimiserStep(
+    int l,
+    DeepOptimiserKind optimiser, {
+    String bc1 = 'U.bc1',
+    String bc2 = 'U.bc2',
+  }) {
     final ll = _l[l];
-    final w = 'P[${ll.weights}u + wi]';
+    final w = _p(ll.weights!, 'wi');
+    final mu = _p(ll.mu!, 'wi'), nu = _p(ll.nu!, 'wi');
     return switch (optimiser) {
       DeepOptimiserKind.sgd => '  $w = $w + (-U.lr) * g;',
       DeepOptimiserKind.adam =>
-        '  let m = (1.0f - U.b1) * g + U.b1 * P[${ll.mu}u + wi];\n'
-            '  let v = (1.0f - U.b2) * (g * g) + U.b2 * P[${ll.nu}u + wi];\n'
-            '  P[${ll.mu}u + wi] = m;\n'
-            '  P[${ll.nu}u + wi] = v;\n'
-            '  let upd = (m / U.bc1) / (sqrt(v / U.bc2 + U.epsRoot) + U.eps);\n'
+        '  let m = (1.0f - U.b1) * g + U.b1 * $mu;\n'
+            '  let v = (1.0f - U.b2) * (g * g) + U.b2 * $nu;\n'
+            '  $mu = m;\n'
+            '  $nu = v;\n'
+            '  let upd = (m / $bc1) / (sqrt(v / $bc2 + U.epsRoot) + U.eps);\n'
             '  $w = $w + (-U.lr) * upd;',
     };
   }
@@ -1078,7 +1154,7 @@ $step
       String carried(String p, String cep, String ep, String i) =>
           settings.carryPrecision
           ? '$p + maxN($cep - $ep, 0.0f)'
-          : 'P[${_l[l].prior}u + $i]';
+          : _p(_l[l].prior!, i);
       body.writeln('  ${first == 0 ? '' : 'else '}if (node < ${first + n}u) {');
       body.writeln('    let i = node - ${first}u;');
       if (l == nLayers - 1) {

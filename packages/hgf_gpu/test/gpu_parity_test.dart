@@ -92,4 +92,27 @@ void main() {
     expect(deepFixtures, isNotEmpty);
     expect(bad, isEmpty, reason: bad.join('\n'));
   });
+
+  test(
+    'hgf_deep fixtures: sequential fit (GpuDeepEnsemble) matches f64 CPU',
+    () async {
+      if (backend == null) {
+        markTestSkipped('No WebGPU adapter in this browser');
+        return;
+      }
+      final bad = <String>[];
+      var compared = 0;
+      for (final fixture in deepFixtures) {
+        final name = fixture['name']! as String;
+        final results = [
+          for (final r in await deep.checkFitOps(backend!, fixture))
+            if (!r.$2.isNaN) r,
+        ];
+        compared += results.length;
+        bad.addAll([for (final f in deep.failures(name, results)) '$name: $f']);
+      }
+      expect(compared, greaterThan(0));
+      expect(bad, isEmpty, reason: bad.join('\n'));
+    },
+  );
 }

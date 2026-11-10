@@ -427,6 +427,17 @@ the hgf_deep fixtures traces back to such a NaN.
 **hgf.dart:** matches JAX, NaN included (`hgf_deep`'s fixtures
 `deep4_tanh_*`, `fit_eHGF_tanh`, `fit_adam_continued` contain it).
 
+**How common (2026-11-10):** with Xavier-scale random weights, N(0, 0.5²)
+data, Adam(1e-3) and pyhgf's defaults otherwise (carried precision), most
+random networks run away within a few hundred samples. Of six 3-12-9-4 tanh
+networks, 4 left f32's range or went NaN within 120 samples under each update
+(after 8–117 samples; hgf_gpu `native_deep_test.dart`, "random members").
+Over 200 samples, 1–3 of six 3-12-4 networks and 3–6 of six 3-8-8-4 ones
+did, depending on update and data scale. Without carried
+precision (`carryPrecision: false`, no volatility levels) none did over 400
+samples. This bounds any sequential `fit` comparison, and what an ensemble of
+deep HGF networks can be trained for, until it is fixed.
+
 ## rshgf
 
 P1 and P2 apply to rshgf too.

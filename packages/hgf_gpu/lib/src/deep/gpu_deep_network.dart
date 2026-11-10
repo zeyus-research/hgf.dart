@@ -244,6 +244,7 @@ final class GpuDeepNetwork {
               DeepBinding.y => _y,
               DeepBinding.out => _out,
               DeepBinding.uniform => _uniform,
+              DeepBinding.biasCorrection => null,
             }
           : null,
   ];

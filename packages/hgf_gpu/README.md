@@ -40,6 +40,22 @@ final yHat = await gpu.predict(xTest);
 await gpu.download(net);                           // weights + beliefs back
 ```
 
+`GpuDeepEnsemble` runs the sequential `fit` (one sample at a time, as
+pyhgf's) for many networks of one shape at once: one workgroup per network
+runs the whole sample loop in a single kernel. Members can differ in
+weights, beliefs and data (one matrix for all, or one per member):
+
+```dart
+final nets = [for (var s = 0; s < 1024; s++) build()..weightInitialisation(const XavierInit(), seed: s)];
+final ens = await GpuDeepEnsemble.create(backend!, nets);
+final predictions = await ens.fit([x], [y], optimiser: Adam(1e-3));
+await ens.downloadAll(nets);
+```
+
+A single network is no faster than the CPU (each sample is a chain of
+small dependent steps); 1024 medium networks train ~200× faster than one
+core runs them (`melos run bench:gpu-ensemble`).
+
 Status: see Phase 7 in `docs/ROADMAP.md`.
 - Supported: continuous, binary and constant nodes; standard, eHGF and
   unbounded updates; named couplings; missing observations; time steps.
@@ -50,7 +66,9 @@ Status: see Phase 7 in `docs/ROADMAP.md`.
 - Not yet: vector node kinds, custom couplings or response models.
 - Deep networks: `batchUpdate`, `trainEpoch` (SGD, Adam) and `predict`,
   every layer kind, volatility update and setting `hgf_deep` has; f32,
-  matching f64 to ~1e-6. The sequential `fit` stays on the CPU.
+  matching f64 to ~1e-6. Sequential `fit` for ensembles
+  (`GpuDeepEnsemble`), matching f64 `fit` to ~1e-5 until the f64 run itself
+  leaves f32's range (pyhgf's runaway, P18); no trajectory recording.
 
 - Web: `import 'package:hgf_gpu/web.dart'`. On Linux, Chromium needs
   `--enable-unsafe-webgpu` and Vulkan.

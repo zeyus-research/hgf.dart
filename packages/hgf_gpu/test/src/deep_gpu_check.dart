@@ -270,8 +270,13 @@ DeepNetwork randomNetwork(
   int seed, {
   CouplingFn coupling = CouplingFn.tanh,
   DeepVolatilityUpdate update = DeepVolatilityUpdate.unbounded,
+  bool carryPrecision = true,
 }) {
-  final net = DeepNetwork(coupling: coupling, volatilityUpdates: update);
+  final net = DeepNetwork(
+    coupling: coupling,
+    volatilityUpdates: update,
+    carryPrecision: carryPrecision,
+  );
   for (final s in sizes) {
     net.addLayer(s);
   }
@@ -284,3 +289,200 @@ DeepNetwork randomNetwork(
 }
 
 Float64List flat(Matrix m) => m.data;
+
+/// Replays [fixture]'s operations on the CPU; before each `fit`, a
+/// two-member [GpuDeepEnsemble] takes the CPU's current state (both
+/// members) and runs the same fit, with a fresh optimiser on both sides.
+/// Compares both members' predictions, weights and carried beliefs with
+/// the CPU's. Lines as [checkFixture]'s.
+///
+/// A fit whose CPU trajectory leaves f32's range (the P18 runaway: means
+/// of 1e105 with precisions of 1e-106, whose product the gradient needs)
+/// is compared only on the predictions up to the row that does, with a
+/// line whose error is NaN saying so.
+Future<List<(String, double, int)>> checkFitOps(
+  GpuBackend backend,
+  Map<String, Object?> fixture,
+) async {
+  final cpu = buildNetwork(fixture);
+  final ops = fixture['ops'] as List<Object?>;
+  final results = <(String, double, int)>[];
+  final optimisers = <int, Optimiser>{};
+  for (var i = 0; i < ops.length; i++) {
+    final op = ops[i] as Map<String, Object?>;
+    final kind = op['op'] as String;
+    final x = matrix(op['x']);
+    final timeStep = (op['time_step'] as num?)?.toDouble() ?? 1.0;
+    final learningKind = LearningKind.parse(
+      op['learning_kind'] as String? ?? 'precision_weighted',
+    );
+    switch (kind) {
+      case 'fit':
+        final y = matrix(op['y']);
+        final spec = op['optimiser'] as Map<String, Object?>?;
+        final weightUpdate = op['weight_update'] as bool? ?? true;
+        final updatePrecisions = op['update_precisions'] as bool? ?? true;
+        final tag = 'op $i (fit)';
+        final range = outsideF32(cpu);
+        if (range != null) {
+          results.add(('$tag skipped: $range is outside f32', double.nan, 0));
+        } else {
+          final ref = cloneFrom(fixture, cpu);
+          final gpu = await GpuDeepEnsemble.create(backend, [
+            cloneFrom(fixture, cpu),
+            cloneFrom(fixture, cpu),
+          ]);
+          try {
+            final cpuPred = ref.fit(
+              x,
+              y,
+              optimiser: freshOptimiser(spec),
+              learningKind: learningKind,
+              weightUpdate: weightUpdate,
+              timeStep: timeStep,
+              updatePrecisions: updatePrecisions,
+              record: LayerField.values.toSet(),
+            );
+            final leaves = firstRowOutsideF32(ref.trajectories!);
+            final gpuPred = (await gpu.fit(
+              [x],
+              [y],
+              optimiser: freshOptimiser(spec),
+              learningKind: learningKind,
+              weightUpdate: weightUpdate,
+              timeStep: timeStep,
+              updatePrecisions: updatePrecisions,
+              rowsPerDispatch: 7,
+            ))!;
+            if (leaves != null) {
+              results.add((
+                '$tag: row ${leaves.$1} leaves f32 or turns NaN (${leaves.$2}); '
+                    'predictions compared before it',
+                double.nan,
+                0,
+              ));
+            }
+            final upTo = leaves?.$1 ?? x.rows;
+            for (var e = 0; e < 2; e++) {
+              final n = upTo * cpuPred.cols;
+              final c = compare(
+                cpuPred.data.sublist(0, n),
+                gpuPred[e].data.sublist(0, n),
+              );
+              results.add(('$tag member $e predictions', c.err, c.lost));
+              if (leaves != null) continue;
+              final scratch = buildNetwork(fixture);
+              await gpu.download(e, scratch);
+              for (final r in compareStates(ref, scratch)) {
+                results.add(('$tag member $e ${r.$1}', r.$2, r.$3));
+              }
+            }
+          } finally {
+            gpu.dispose();
+          }
+        }
+        cpu.fit(
+          x,
+          y,
+          optimiser: spec == null
+              ? null
+              : optimisers.putIfAbsent(
+                  spec['id'] as int,
+                  () => freshOptimiser(spec)!,
+                ),
+          learningKind: learningKind,
+          weightUpdate: weightUpdate,
+          timeStep: timeStep,
+          updatePrecisions: updatePrecisions,
+        );
+      case 'batch_update':
+        _replay(
+          cpu,
+          op,
+          x,
+          matrix(op['y']),
+          optimisers,
+          learningKind,
+          timeStep,
+        );
+      case 'predict':
+    }
+  }
+  return results;
+}
+
+/// Weights and carried beliefs of [actual] against [expected].
+List<(String, double, int)> compareStates(
+  DeepNetwork expected,
+  DeepNetwork actual,
+) {
+  final out = <(String, double, int)>[];
+  for (var l = 1; l < expected.nLayers; l++) {
+    final c = compare(expected.weights[l]!.data, actual.weights[l]!.data);
+    out.add(('weights $l', c.err, c.lost));
+  }
+  for (var l = 0; l < expected.nLayers; l++) {
+    for (final f in const [
+      LayerField.precision,
+      LayerField.meanVol,
+      LayerField.precisionVol,
+    ]) {
+      final e = expected.state(l).field(f);
+      if (e == null) continue;
+      final c = compare(e, actual.state(l).field(f)!);
+      out.add(('${f.pyhgfName} $l', c.err, c.lost));
+    }
+  }
+  return out;
+}
+
+/// The first recorded row whose beliefs hold a finite value beyond f32's
+/// normal range, a prediction error beyond √(f32 max) ≈ 1.8e19 (its
+/// square, in the volatility update and Adam's second moment, overflows),
+/// or a NaN, and which; or `null`.
+///
+/// NaN counts because its onset is a threshold: the guards zero a NaN
+/// node's gradients, so a GPU that reaches the NaN one row later moves
+/// those weights by a whole optimiser step (seen on SwiftShader).
+(int, String)? firstRowOutsideF32(DeepTrajectories traj) {
+  bool bad(double v) =>
+      !v.isFinite || v != 0 && (v.abs() < 1.17549435e-38 || v.abs() > 3.4e38);
+  for (var t = 0; t < traj.steps; t++) {
+    for (var l = 0; ; l++) {
+      final Float64List? mean, expected;
+      try {
+        mean = traj.of(LayerField.mean, l);
+        expected = traj.of(LayerField.expectedMean, l);
+      } on RangeError {
+        break;
+      }
+      final n = mean!.length ~/ traj.steps;
+      for (var i = 0; i < n; i++) {
+        final d = mean[t * n + i] - expected![t * n + i];
+        if (d.isFinite && d.abs() > 1.8e19) {
+          return (
+            t,
+            'prediction error ${d.toStringAsExponential(1)}, layer $l',
+          );
+        }
+      }
+    }
+    for (final f in traj.fields) {
+      for (var l = 0; ; l++) {
+        final Float64List? data;
+        try {
+          data = traj.of(f, l);
+        } on RangeError {
+          break;
+        }
+        if (data == null) continue;
+        final n = data.length ~/ traj.steps;
+        for (var i = 0; i < n; i++) {
+          final v = data[t * n + i];
+          if (bad(v)) return (t, '${f.pyhgfName} $l = $v');
+        }
+      }
+    }
+  }
+  return null;
+}

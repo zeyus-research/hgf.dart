@@ -101,6 +101,28 @@ void main() {
     expect(partial.grid(4096).$1, greaterThan(1));
   });
 
+  test('sequential fit: one workgroup per member, bias corrections '
+      'only for Adam', () {
+    expect(
+      () => DeepKernels(_net(), capacity: 8).sequentialFit(),
+      throwsStateError,
+    );
+    final k = DeepKernels.sequential(_net());
+    expect(k.capacity, 1);
+    final sgd = k.sequentialFit(optimiser: DeepOptimiserKind.sgd);
+    final adam = k.sequentialFit(optimiser: DeepOptimiserKind.adam);
+    expect(sgd.bindings, isNot(contains(DeepBinding.biasCorrection)));
+    expect(adam.bindings, contains(DeepBinding.biasCorrection));
+    expect(k.sequentialFit().bindings, contains(DeepBinding.out));
+    expect(adam.grid(3), (3, 1));
+    expect(adam.grid(70000), (deepFitGridWidth, 2));
+    expect(adam.source, contains('@workgroup_size(64)'));
+    expect(
+      k.sequentialFit(workgroupSize: 128).source,
+      contains('@workgroup_size(128)'),
+    );
+  });
+
   final naga = Process.runSync('which', ['naga']).exitCode == 0;
   test('every variant validates with naga', () {
     final dir = Directory.systemTemp.createTempSync('deep_wgsl');
@@ -122,7 +144,19 @@ void main() {
               ),
               capacity: 1024,
             );
-            for (final s in _all(k)) {
+            final seq = DeepKernels.sequential(
+              _net(
+                update: update,
+                ffu: ffu,
+                meanField: meanField,
+                bottom: bottom,
+              ),
+            );
+            for (final s in [
+              ..._all(k),
+              for (final opt in [null, ...DeepOptimiserKind.values])
+                seq.sequentialFit(optimiser: opt),
+            ]) {
               final f = File('${dir.path}/k.wgsl')..writeAsStringSync(s.source);
               final r = Process.runSync('naga', [f.path]);
               expect(

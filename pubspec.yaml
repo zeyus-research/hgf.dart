@@ -267,6 +267,20 @@ melos:
       description: >-
         GpuDeepNetwork batchUpdate / trainEpoch / predict vs DeepNetwork on
         hgf_deep's small, medium and wide benchmark networks.
+    bench:gpu-ensemble:
+      # hgf_deep's sequential fit for many networks at once on wgpu-native
+      # (GpuDeepEnsemble) vs DeepNetwork.fit on one core (~1 min).
+      exec:
+        command: >-
+          dart compile exe benchmark/bin/deep_ensemble.dart -o .dart_tool/deep_ensemble &&
+          taskset -c 0 .dart_tool/deep_ensemble --members 1,16,256,1024,4096
+        concurrency: 1
+      packageFilters:
+        fileExists: benchmark/bin/deep_ensemble.dart
+      description: >-
+        GpuDeepEnsemble.fit vs DeepNetwork.fit by member count, on the small,
+        medium and wide benchmark networks (wide skips what the device can't
+        hold).
     bench:gpu-native:
       exec:
         command: >-

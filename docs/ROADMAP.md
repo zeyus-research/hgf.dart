@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, and HGF neural networks on the CPU and GPU)
+## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, HGF neural networks on the CPU and GPU, and GPU ensembles of sequential fits)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -84,6 +84,9 @@ supersedes its phase list.
   0.55–0.75 ms on an RX 7600 XT, 1.7–16× faster than JAX f32 on one core
   and 3.6–120× faster than the f64 CPU engine; at 4096 samples per step it is
   40–470× faster than the CPU engine. See "hgf_deep on the GPU".
+  The sequential `fit` runs on the GPU for ensembles (`GpuDeepEnsemble`,
+  2026-11-10): one workgroup per network, 1024 medium networks ~200×
+  faster than one core runs them. See "Sequential fit on the GPU".
 
 - CI (`.github/workflows/ci.yml`, every push and PR): lint, VM + Flutter
   tests, parity on dart2js/dart2wasm in Chrome and Node, and the `-O4`
@@ -1482,6 +1485,68 @@ stays on the CPU.
   out. The GPU clocks down between light calls, so time with a few
   warm-up runs and best-of-many.
 
+#### Sequential fit on the GPU: `GpuDeepEnsemble` (2026-11-10): done
+
+`GpuDeepEnsemble` (hgf_gpu, `lib/src/deep/gpu_deep_ensemble.dart`) runs
+`DeepNetwork.fit` (one sample at a time) for many networks of one shape at
+once, in f32. Members share the layer shapes, kinds, couplings and settings,
+and may differ in weights, beliefs, tonic volatilities, prior precisions and
+data (`fit([x], [y])` shares one matrix, `fit(xs, ys)` gives each member
+its own). Uses: ensembles over seeds, sweeps over initial beliefs, one
+network per participant.
+
+- **Kernel** (`SequentialFitKernel.sequentialFit`, `deep_fit_kernel.dart`,
+  a part of `deep_kernels.dart`): one workgroup per member runs the sample
+  loop. Per row: clamp x, predict each layer (threads over nodes, a GEMV
+  each), clamp y, the posteriors (transposed GEMVs), the predictions into
+  `OUT`, the gradient and SGD/Adam step (threads over weights), the carried
+  beliefs; `storageBarrier()` between phases. Its belief arithmetic is the
+  batch kernels' own epilogues, now factored out of `DeepKernels`
+  (`DeepKernels.sequential` gives the width-1 layout addressed from each
+  member's base offset); the batch kernels' WGSL is byte-identical after
+  the refactor (checked by diffing every variant against HEAD). Adam's bias
+  corrections come from a per-row host table (f32's `1 − 0.999ᵗ` loses
+  digits). Rows are split across dispatches sized to ~5e8 weight visits
+  (~50 ms): a 256-row dispatch of 1024 wide members ran for seconds and the
+  driver reset the GPU.
+- **Accuracy** (`native_deep_test.dart`, and on SwiftShader in
+  `gpu_parity_test.dart`): every `fit` op of the 25 hgf_deep fixtures runs
+  on a two-member ensemble from the CPU's state; random ensembles (6
+  members, own data, every update, 120 rows in two calls; SGD with frozen
+  precisions; no weight update; layers wider than the workgroup; 400 rows
+  without carried precision) against per-member CPU fits. Max error
+  ≤ 4.1e-5 relative to max(1, |x|), mostly 1e-6–1e-5.
+  - The comparison stops at the first row where the f64 run leaves f32's
+    range, gets a prediction error beyond √(f32 max) (its square overflows
+    in Adam's v and the volatility update), or turns NaN: all P18. Seven
+    fixture fits do (rows 6–39), and 4 of 6 random 4-layer members within
+    120 rows (now in [P18](upstream/README.md#p18)). These were the only
+    failures, and each was traced to one row: e.g. a mean of −1.8e105 with
+    precision 3.9e-106, whose product the gradient needs, is −inf·0 in f32,
+    and the guard zeroes that row's gradient. The f64 fits are well
+    conditioned (a 1e-6 relative nudge to the weights moves the predictions
+    1–3e-6), so a jump is a threshold, not drift. NaN onsets count too:
+    SwiftShader reached one a row later than f64 and native wgpu, and the
+    guards then moved a weight by a whole Adam step.
+- **Speed** (`melos run bench:gpu-ensemble`, RX 7600 XT, 500 rows, Adam;
+  CPU f64 `fit` on one core of the i7-7700, times the member count):
+
+  | network | CPU, one network | 1 member | 16 | 256 | 1024 | 4096 |
+  |---|--:|--:|--:|--:|--:|--:|
+  | small 2-8-8-4 | 10 µs/sample | 0.4× | 9× | 49× | 71× | 84× |
+  | medium 10-64-64-16 | 132 µs/sample | 2.9× | 45× | 172× | 206× | 214× |
+  | wide 16-256-256-32 | 1280 µs/sample | 6.5× | 73× | 90× | 89× | |
+
+  At saturation: 0.12 / 0.62 / 14 µs per member-sample. Wide is
+  memory-bound (~2.5 MB of weights and Adam moments per member-sample;
+  1024 members hold 1 GB). Workgroup size: 32 was best for small, 128 for
+  medium, 256 for wide; the default is twice the largest layer, clamped to
+  32–256.
+- **What bounds one network:** a small network's row takes ~26 µs (13
+  barrier-separated phases, each a chain of dependent global loads). Next
+  lever: keep a member's working state (and a small network's weights) in
+  workgroup memory, which fits up to medium networks.
+
 ### Phase 8: App -> HGF GUI modelling
 
 - [ ] Since the performance is excellent so far, the playground can be
@@ -1668,9 +1733,11 @@ done and a go (2026-11-07, `packages/hgf_gpu`); its follow-ups (HGF neural
 networks, GPU tangents and a GPU transport for hgf_fit) are listed there.
 The HGF neural networks have a CPU baseline (`packages/hgf_deep`,
 2026-11-09, parity with JAX f64) and run batched on the GPU
-(`GpuDeepNetwork`, 2026-11-10). Open there: the sequential `fit` (and
-ensembles of networks) on the GPU, tile sizes for small batches, and a
-browser benchmark.
+(`GpuDeepNetwork`, 2026-11-10), and the sequential `fit` runs on the GPU
+for ensembles (`GpuDeepEnsemble`, 2026-11-10). Open there: workgroup
+memory for the sequential kernel (one network is still CPU-speed), tile
+sizes for small batches, and a browser benchmark. Phase 8's next items:
+the fit host isolate and a parameter-recovery view.
 
 ```sh
 cd hgf.dart
@@ -1687,6 +1754,7 @@ melos run bench:web-parallel                      # ... and their speed-ups (~10
 melos run bench:playground-fit                    # the playground's fits (~3 min)
 melos run fixtures:deep && melos run bench:deep   # hgf_deep: fixtures, speed vs pyhgf
 melos run test:gpu && melos run bench:gpu-deep    # GPU kernels incl. GpuDeepNetwork
+melos run bench:gpu-ensemble                      # GpuDeepEnsemble (sequential fit)
 (cd apps/hgf_playground && flutter run -d chrome --wasm)   # try it
 dart compile exe packages/hgf/benchmark/bin/profile_modes.dart -o /tmp/pm && \
   (cd packages/hgf && /tmp/pm)                    # ns/trial baseline per mode
