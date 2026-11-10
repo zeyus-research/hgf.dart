@@ -10,8 +10,9 @@ const int batchElements = 5;
 const int batchBlock = 2;
 
 /// Element [e]'s parameters: every continuous node's tonic volatility moved
-/// by `-0.25 e` and its prior mean by `0.1 e`, and the volatility edge
-/// [kappaEdge] (if any) set to `1 + 0.2 e`.
+/// by `-0.25 e` and its prior mean by `0.1 e`, every dp-state node's α
+/// scaled by `1 + e`, and the volatility edge [kappaEdge] (if any) set to
+/// `1 + 0.2 e`.
 void _perturb(
   int e,
   Network template,
@@ -20,6 +21,10 @@ void _perturb(
   required void Function(int parent, int child, double k) setKappa,
 }) {
   for (var i = 0; i < template.nNodes; i++) {
+    if (template.kindOf(i) == NodeKind.dpState) {
+      final alpha = template.getInitial(i, NodeField.alpha);
+      setInitial(i, NodeField.alpha, alpha * (1 + e));
+    }
     if (template.kindOf(i) != NodeKind.continuousState) continue;
     for (final (f, d) in [
       (NodeField.tonicVolatility, -0.25 * e),
@@ -72,19 +77,6 @@ List<String> batchMismatches(Map<String, Object?> fixture) {
       : Float64List.fromList(series(fixture['time_steps']));
 
   final template = build();
-  final unbatched = {NodeKind.dpState}.intersection({
-    for (var i = 0; i < template.nNodes; i++) template.kindOf(i),
-  });
-  if (unbatched.isNotEmpty) {
-    // No batched kernels for dp-state nodes yet: the batch must refuse the
-    // network.
-    try {
-      BatchNetwork(template, batchElements);
-      return ['$name: BatchNetwork accepted a network with $unbatched'];
-    } on UnsupportedError {
-      return const [];
-    }
-  }
   final kappas = Float64List(batchElements);
   final batch = BatchNetwork(template, batchElements, blockSize: batchBlock);
   final edge = _firstVolatilityEdge(build());
@@ -123,12 +115,7 @@ List<String> batchMismatches(Map<String, Object?> fixture) {
   final nCols = dims.fold(0, (a, d) => a + d);
   final nTime = data.length ~/ nCols;
   final n = template.nNodes;
-  const vectorFields = [
-    VectorField.mean,
-    VectorField.xis,
-    VectorField.observationSs,
-    VectorField.alpha,
-  ];
+  const vectorFields = VectorField.values;
 
   /// The first field of node [i] where element [e] differs, or null.
   String? differs(Network net, int e, int i) {
@@ -228,15 +215,16 @@ List<String> batchMismatches(Map<String, Object?> fixture) {
 
   compareRuns('shared data', (_) => data, (_) => observed);
 
-  // Each element its own series: continuous (and ef-state) inputs shifted
-  // by 0.01 e, and input k of element e also missing where
+  // Each element its own series: continuous (ef-state, dp-state) inputs
+  // shifted by 0.01 e, and input k of element e also missing where
   // (t + 2e + k) % 7 == 0, so the elements differ in which children they
   // observe.
   final shift = [
     for (final (k, i) in template.inputIdxs.indexed)
       for (var j = 0; j < dims[k]; j++)
         template.kindOf(i) == NodeKind.continuousState ||
-            template.kindOf(i) == NodeKind.efState,
+            template.kindOf(i) == NodeKind.efState ||
+            template.kindOf(i) == NodeKind.dpState,
   ];
   final own = [
     for (var e = 0; e < batchElements; e++)

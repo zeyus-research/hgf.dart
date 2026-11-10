@@ -1,7 +1,8 @@
 part of '../network.dart';
 
-/// Batched ef-state and categorical-state steps: [Network]'s
-/// `updates/exponential.dart` and `updates/categorical.dart`, element by
+/// Batched ef-state, categorical-state and dp-state steps: [Network]'s
+/// `updates/exponential.dart`, `updates/categorical.dart` and
+/// `updates/dirichlet.dart`, element by
 /// element over `[lo, hi)`, with the same arithmetic in the same order (so
 /// each element matches [Network] bit for bit).
 ///
@@ -24,6 +25,10 @@ extension on BatchNetwork {
         _bPredictionErrorCategorical(node, lo, hi);
       case _kPosteriorCategorical:
         _bPosteriorCategorical(node, lo, hi);
+      case _kPredictionDp:
+        _bPredictionDp(node, lo, hi);
+      case _kPredictionErrorDp:
+        _bPredictionErrorDp(node, lo, hi);
     }
   }
 
@@ -35,8 +40,11 @@ extension on BatchNetwork {
   void _tDispatchVector(int step, int node, int lo, int hi) {
     _bDispatchVector(step, node, lo, hi);
     switch (step) {
-      case _kPredictionErrorEfDynamic || _kPredictionErrorCategorical:
-        // The parents' (binary nodes') new means are observations.
+      case _kPredictionErrorEfDynamic ||
+          _kPredictionErrorCategorical ||
+          _kPredictionErrorDp:
+        // The parents' (binary nodes', clusters') new means are
+        // observations.
         for (var e = _vpStart[node], end = _vpStart[node + 1]; e < end; e++) {
           _tZeroMean(_vpIdx[e], lo, hi);
         }
@@ -163,6 +171,90 @@ extension on BatchNetwork {
         alpha[(a0 + i) * b + e] = next[i];
       }
       _mean[c * b + e] = x[m0 * b + e];
+    }
+  }
+
+  /// Each cluster's expected mean and standard deviation from its ef-state
+  /// parent's `ξ = [E x, E x²]`.
+  void _bPredictionDp(int c, int lo, int hi) {
+    final b = _b, em = _dpExpectedMeans, es = _dpExpectedSigmas, xis = _xis;
+    var k = _dpStart[c];
+    for (var q = _vpStart[c], end = _vpStart[c + 1]; q < end; q++, k++) {
+      final s = _ssStart[_vpIdx[q]];
+      for (var e = lo; e < hi; e++) {
+        final m = xis[s * b + e];
+        em[k * b + e] = m;
+        es[k * b + e] = math.sqrt(xis[(s + 1) * b + e] - m * m);
+      }
+    }
+  }
+
+  /// [Network]'s `_predictionErrorDp`, per element. Element `e` caches its
+  /// proposal rows in slot `e % slots` (one per element of a block).
+  void _bPredictionErrorDp(int c, int lo, int hi) {
+    final b = _b, vp0 = _vpStart[c], k = _vpStart[c + 1] - vp0;
+    final off = _dpStart[c];
+    final em = _dpExpectedMeans, es = _dpExpectedSigmas, n = _dpN;
+    final act = _dpActivated, obs = _observed, mean = _mean;
+    final gm = _dpMeansE, gs = _dpSigmasE, scratch = _dpScratch!;
+    for (var e = lo; e < hi; e++) {
+      for (var i = 0; i < k; i++) {
+        obs[_vpIdx[vp0 + i] * b + e] = 0.0;
+      }
+      if (obs[c * b + e] == 0.0) continue;
+
+      final value = mean[c * b + e], alpha = _dpAlpha[c * b + e];
+      final nTotal = _nTotal[c * b + e];
+
+      var best = double.negativeInfinity;
+      var bestIdx = 0;
+      for (var i = 0; i < k; i++) {
+        final q = (off + i) * b + e;
+        final m = em[q], sd = es[q];
+        gm[off + i] = m;
+        gs[off + i] = sd;
+        var ll = jaxNormPdf(value, m, sd) * act[q];
+        ll *= n[q] / (alpha + nTotal);
+        if (best.isNaN) continue;
+        if (ll.isNaN || ll > best) {
+          best = ll;
+          bestIdx = i;
+        }
+      }
+
+      final (cMean, cSigma) = dpCandidate(
+        value,
+        _sensoryPrecision[c * b + e],
+        gm,
+        gs,
+        off,
+        k,
+        scratch,
+        slot: e % scratch.slots,
+      );
+      final candidate =
+          jaxNormPdf(value, cMean, cSigma) * (alpha / (alpha + nTotal));
+
+      for (var i = 0; i < k; i++) {
+        final p = _vpIdx[vp0 + i];
+        mean[p * b + e] = value;
+        _vMean[_vMeanStart[p] * b + e] = value;
+      }
+      if (best >= candidate) {
+        obs[_vpIdx[vp0 + bestIdx] * b + e] = 1.0;
+        n[(off + bestIdx) * b + e] += 1.0;
+      } else {
+        final idx = _nActiveCluster[c * b + e].toInt();
+        if (idx < k) {
+          act[(off + idx) * b + e] = 1.0;
+          final s = _ssStart[_vpIdx[vp0 + idx]];
+          _xis[s * b + e] = cMean;
+          _xis[(s + 1) * b + e] = cMean * cMean + cSigma * cSigma;
+          n[(off + idx) * b + e] = 1.0;
+        }
+        _nActiveCluster[c * b + e] += 1.0;
+      }
+      _nTotal[c * b + e] = nTotal + 1.0;
     }
   }
 }

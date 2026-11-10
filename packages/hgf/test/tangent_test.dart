@@ -29,7 +29,7 @@ void main() {
       test(fixture['name'] as String, () {
         final result = checkTangents(fixture);
         if (result == null) {
-          markTestSkipped('node kinds without batched kernels');
+          markTestSkipped('no continuous nodes to differentiate');
           return;
         }
         final (failures, compared) = result;

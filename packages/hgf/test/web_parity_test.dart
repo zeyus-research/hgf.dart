@@ -46,17 +46,38 @@ void main() {
     ];
   });
 
-  test('every fixture matches pyhgf on this compiler', () {
+  // Each check yields between fixtures: browser test suites share one
+  // event loop, and a long synchronous run (the dp-state fixtures take
+  // seconds each) keeps the other suites' pages from loading. Yielding
+  // makes the default 30 s timeout apply (a synchronous body can't be
+  // timed out), and each check takes minutes on dart2js.
+  const long = Timeout(Duration(minutes: 10));
+  Future<List<String>> each(
+    Iterable<String> Function(Map<String, Object?>) check,
+  ) async {
+    final failures = <String>[];
+    for (final f in fixtures) {
+      failures.addAll(check(f));
+      await Future<void>.delayed(Duration.zero);
+    }
+    return failures;
+  }
+
+  test('every fixture matches pyhgf on this compiler', () async {
     expect(fixtures, isNotEmpty);
-    final failures = [for (final f in fixtures) ...fixtureMismatches(f)];
+    final failures = await each(fixtureMismatches);
     expect(failures, isEmpty, reason: failures.take(10).join('\n'));
-  });
-  test('BatchNetwork matches Network bit for bit on this compiler', () {
-    final failures = [for (final f in fixtures) ...batchMismatches(f)];
+  }, timeout: long);
+  test('BatchNetwork matches Network bit for bit on this compiler', () async {
+    final failures = await each(batchMismatches);
     expect(failures, isEmpty, reason: failures.take(10).join('\n'));
-  });
-  test('BatchNetwork tangents match finite differences on this compiler', () {
-    final failures = [for (final f in fixtures) ...?checkTangents(f)?.$1];
-    expect(failures, isEmpty, reason: failures.take(10).join('\n'));
-  });
+  }, timeout: long);
+  test(
+    'BatchNetwork tangents match finite differences on this compiler',
+    () async {
+      final failures = await each((f) => checkTangents(f)?.$1 ?? const []);
+      expect(failures, isEmpty, reason: failures.take(10).join('\n'));
+    },
+    timeout: long,
+  );
 }

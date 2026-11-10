@@ -148,8 +148,8 @@ bool _same(double a, double b) => a == b || (a.isNaN && b.isNaN);
 ///   two large tangents (`vape = μ − μ̂`) can't be more exact than they are.
 ///
 /// Returns the failures (empty if none) and the number of finite-difference
-/// comparisons made; null if the network has node kinds `BatchNetwork`
-/// doesn't support.
+/// comparisons made; null if the network has no continuous node (nothing
+/// to differentiate).
 (List<String>, int)? tangentMismatches(
   Map<String, Object?> fixture, {
   double relTol = 2e-5,
@@ -159,10 +159,8 @@ bool _same(double a, double b) => a == b || (a.isNaN && b.isNaN);
   final name = fixture['name'] as String;
   final spec = NetworkSpec.fromJson(fixture['spec'] as Map<String, Object?>);
   final template = spec.build(couplings: testCouplings)..build();
-  for (var i = 0; i < template.nNodes; i++) {
-    if (template.kindOf(i) == NodeKind.dpState) return null;
-  }
-  // Nothing to differentiate in a lone (fixed-rate ef-state) node.
+  // Nothing to differentiate without continuous nodes (a lone fixed-rate
+  // ef-state node, a dp-state node and its clusters).
   if (!List.generate(
     template.nNodes,
     template.kindOf,
@@ -357,9 +355,12 @@ bool _same(double a, double b) => a == b || (a.isNaN && b.isNaN);
 ///   tangents as the step shrinks (to ~1e-4).
 /// * `continuous_2level_unbounded_overflow`: the predicted variances reach
 ///   1e300; finite differences are good to ~1e-4 there.
+/// * `dp_mixed`: its dp-state node costs ~1 ms per element-trial on the JIT
+///   VM, and the check runs dozens of filters; 40 trials keep it to seconds.
 const _overrides = {
   'continuous_2level_eHGF': (maxTrials: 120, relTol: 2e-4),
   'continuous_2level_unbounded_overflow': (maxTrials: null, relTol: 1e-4),
+  'dp_mixed': (maxTrials: 40, relTol: 2e-5),
 };
 
 /// [tangentMismatches] with the per-fixture settings of [_overrides].

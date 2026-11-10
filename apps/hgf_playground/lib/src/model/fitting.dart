@@ -499,9 +499,11 @@ class Fitting extends ChangeNotifier {
     final net = pg.network;
     final kinds = {for (var i = 0; i < net.nNodes; i++) net.kindOf(i)};
     if (kinds.contains(NodeKind.dpState)) {
+      // pyhgf defines no surprise for a dp-state node, so nothing scores
+      // its observations (BatchNetwork runs it since 2026-11-10).
       unsupported =
-          'Fitting runs on the batched engine, which doesn\'t support '
-          'Dirichlet process nodes yet.';
+          'A Dirichlet process node defines no surprise for its '
+          'observations yet, so there is nothing to fit its parameters to.';
       candidates = const [];
       return;
     }

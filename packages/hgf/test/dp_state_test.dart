@@ -352,10 +352,49 @@ void main() {
     });
   });
 
-  group('not supported yet', () {
-    test('BatchNetwork', () {
-      expect(() => BatchNetwork(dpNetwork(), 4), throwsUnsupportedError);
+  group('BatchNetwork', () {
+    // Bit-for-bit agreement with Network on the fixtures is in batch_test.
+    final x = mixture(60);
+
+    test('each element clusters with its own alpha', () {
+      final alphas = Float64List.fromList([0.01, 0.1, 1.0, 50.0]);
+      final batch = BatchNetwork(dpNetwork(), alphas.length)
+        ..setInitial(0, NodeField.alpha, alphas)
+        ..inputData(x);
+      for (var e = 0; e < alphas.length; e++) {
+        final net = dpNetwork()
+          ..setInitial(0, NodeField.alpha, alphas[e])
+          ..inputData(x, record: false);
+        for (final f in [VectorField.n, VectorField.expectedMeans]) {
+          expect(batch.getVector(e, 0, f), net.getVector(0, f));
+        }
+        expect(
+          batch.get(e, 0, NodeField.nActiveCluster),
+          net.get(0, NodeField.nActiveCluster),
+        );
+      }
+      expect(batch.get(0, 0, NodeField.nActiveCluster), lessThan(5));
+      expect(batch.get(3, 0, NodeField.nActiveCluster), greaterThan(20));
     });
+
+    test('blocks are capped by the proposal caches', () {
+      // 64 MB of 320 KB rows: 69 elements with 3 clusters.
+      expect(BatchNetwork(dpNetwork(), 500).blockSize, 69);
+      expect(BatchNetwork(dpNetwork(), 10).blockSize, 10);
+      expect(BatchNetwork(dpNetwork(), 500, blockSize: 8).blockSize, 8);
+    });
+
+    test('reset restores the initial clusters', () {
+      final batch = BatchNetwork(dpNetwork(), 2)..inputData(x);
+      expect(batch.get(1, 0, NodeField.nTotal), 60);
+      batch.reset();
+      expect(batch.getVector(1, 0, VectorField.n), [0.0, 0.0, 0.0]);
+      expect(batch.getVector(1, 3, VectorField.xis), [0.0, 1.0]);
+      expect(batch.get(1, 0, NodeField.nTotal), 0);
+    });
+  });
+
+  group('not supported yet', () {
     test('sample()', () {
       expect(() => dpNetwork().sample(5), throwsUnsupportedError);
     });

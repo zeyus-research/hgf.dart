@@ -19,7 +19,7 @@ supersedes its phase list.
     `NetworkSpec`;
   - `BatchNetwork`: lock-step batches with per-element parameters and
     data, bit-identical to `Network` (W4); ef-state and categorical nodes
-    too since 2026-11-10 (dp-state not yet);
+    too since 2026-11-10, and dp-state (so every node kind);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
 - 632 engine tests pass (plus 112 fitting, 16 widget and 27 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
@@ -1577,6 +1577,25 @@ network per participant.
 - [ ] Allow custom agents / models and parameters, to be able to e.g.
   fit something like the Iowa Gambling Task, or abitrary experimental
   data.
+- [ ] **dp-state surprise, to fit dp networks** (agreed 2026-11-10).
+  **Diverges from pyhgf**, which defines no surprise for a dp-state node
+  (its node surprise is NaN). Use the predictive mixture of the
+  Chinese-restaurant process, `−log(Σᵢ nᵢ/(α+N) N(x; μᵢ, σᵢ) + α/(α+N)
+  N(x; μ*, σ*))`, over the open clusters plus the new-cluster candidate:
+  the two terms the dp step already compares. Compute it before the
+  assignment, from the same `jaxNormPdf` values.
+  - Expose it as the node's `NodeField.surprise` and a `DpSurprise`
+    response in `Network` and `BatchNetwork` (batched). Keep
+    pyhgf-parity tests on NaN through a switch, as `DeepFixes` does.
+  - Document the divergence in the dp docs and `docs/upstream/README.md`
+    (next to P14), and suggest it upstream.
+  - Fitting: α and the sensory precision change the assignments in
+    jumps, so the likelihood is only piecewise smooth. Use Nelder–Mead
+    for MAP and finite differences for NUTS, never exact tangents.
+    hgf_fit would need a per-parameter gradient choice, or a model-level
+    "no exact gradients" flag.
+  - Playground: drop the dp `unsupported` message in `fitting.dart`;
+    free parameters α (log-normal prior) and the sensory precision.
 
 #### Phase 8 quick wins (2026-11-09): done
 
@@ -1674,7 +1693,8 @@ the apps.
   (hgf_fit: choose `k` with probability `∝ μ̂ₖ^β`). The categorical preset
   fits to the observations or to an agent's choices, and recovers. ef is
   not offered: pyhgf defines no surprise for a fixed-rate ef-state node,
-  so there is nothing to fit its ν to. dp-state needs batched kernels.
+  so there is nothing to fit its ν to. dp-state needs batched kernels
+  (done since; see below) and a surprise.
 - **Found:** hgf_fit's L-BFGS / Nelder–Mead were 30× slower on the JIT
   VM (see "Measured runtime facts"); fixed by making them state machines.
 
@@ -1735,8 +1755,8 @@ the apps.
   in Chromium went from 37 s (Phase 8 quick wins) to 24–26 s; in Firefox
   it now beats its CPU workers (33 vs 63 s).
 
-**Next (Phase 8):** the remaining items above; dp-state batched kernels;
-a categorical readout on the GPU; re-measure `FitConfig.autoGpuChains` /
+**Next (Phase 8):** the remaining items above; a dp-state surprise (its
+batched kernels are done, see below); a categorical readout on the GPU; re-measure `FitConfig.autoGpuChains` /
 `autoGpuMapRuns` in browsers now that a round trip is ~0.3 ms.
 
 
@@ -1777,6 +1797,38 @@ a categorical readout on the GPU; re-measure `FitConfig.autoGpuChains` /
   tasks (the model's own feedback, P18 "still open"); the improper 0/0
   posterior of a dead node (P19) is for upstream to decide; the `hgf`
   package is not yet synced to pyhgf HEAD.
+
+#### dp-state on `BatchNetwork` (2026-11-10): done
+
+- **Batched dp kernels** (`_bPredictionDp`, `_bPredictionErrorDp` in
+  `batch_vectors.dart`): the dp vectors (`n`, expected means and sigmas,
+  `activated`) live in the `[offset][element]` side store, and α, the
+  sensory precision and the counts are per-element fields, so each element
+  clusters with its own α. Bit-identical to `Network` on the 6 dp
+  fixtures, trial by trial and per element (VM, dart2js, dart2wasm,
+  `-O4`). `BatchNetwork` now refuses no node kind.
+- **Proposal caches:** `DpScratch` keeps a slot of cached proposal rows
+  per element of a block (the working buffers are shared), so the batch
+  keeps the scalar engine's per-cluster row cache. A slot is 320 KB per
+  cluster, so dp networks cap `blockSize` at the slots that fit in 64 MB
+  (52 with 4 clusters, 69 with 3). AOT, 4 clusters, 32 elements, 200
+  trials: 1.18 ms per element-trial vs 1.25–1.29 ms for a `Network` per
+  element.
+- **Tangents:** dp steps carry none (their outputs are counts and data);
+  the clusters' means get zero tangents. `dp_mixed` (dp next to a
+  continuous HGF) is now tangent-checked, over 40 trials (its dp node
+  makes the full check take ~50 s on the JIT VM).
+- **Web parity test:** its three checks now yield between fixtures, with a
+  10-minute timeout. Run synchronously, the longer batch check kept Chrome
+  from loading the other dart2js suites ("Timed out waiting for browser
+  to load test suite").
+- **Not yet:** fitting dp networks (unchecked item under Phase 8). pyhgf
+  defines no surprise for a dp-state node. The natural one is the predictive mixture
+  `−log(Σᵢ nᵢ/(α+N) N(x; μᵢ, σᵢ) + α/(α+N) N(x; μ*, σ*))`, the two terms
+  the step already compares. α changes the cluster assignments
+  discretely, so its likelihood is piecewise smooth: exact tangents
+  would ignore the jumps, which suggests Nelder–Mead or NUTS on finite
+  differences.
 
 ## Upstream issues
 
@@ -1877,8 +1929,8 @@ Phase W is done apart from the optional SIMD variant and W5 (both AOT
 only). Phase 4's node kinds are all done: ef-state (2026-11-05),
 categorical-state and dp-state (2026-11-06). Left in Phase 4: per-child
 coupling functions (only if needed), `sample` for the vector kinds, and
-batched kernels for dp-state (`BatchNetwork` runs ef-state and categorical
-since 2026-11-10, and rejects dp-state). Phase 5's first version is
+a surprise for dp-state (`BatchNetwork` runs every node kind since
+2026-11-10). Phase 5's first version is
 done (2026-11-06): `packages/hgf_widgets` and `apps/hgf_playground`, with
 views and presets for every node kind; see its open items. CI runs on
 every push, and the playground deploys to
@@ -1900,7 +1952,7 @@ sizes for small batches, and a browser benchmark. Phase 8: the parameter
 recovery view, the fit host isolate (desktop), categorical fitting, the
 web's fit host worker and WebGPU queue polling (Firefox: 100 ms → 0.25 ms
 per round trip) are done (2026-11-10); next are the app's remaining Phase 8
-items and dp-state batched kernels.
+items and a dp-state surprise (to fit dp networks).
 
 ```sh
 cd hgf.dart

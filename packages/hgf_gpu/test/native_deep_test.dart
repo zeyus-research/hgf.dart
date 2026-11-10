@@ -342,8 +342,12 @@ void main() {
       // The kernel declares its OUT binding either way.
       final rng = math.Random(23);
       final x = randn(40, 2, rng, 0.5), y = randn(40, 3, rng, 0.5);
-      final a = [randomNetwork([3, 6, 2], 1)];
-      final b = [randomNetwork([3, 6, 2], 1)];
+      final a = [
+        randomNetwork([3, 6, 2], 1),
+      ];
+      final b = [
+        randomNetwork([3, 6, 2], 1),
+      ];
       final ga = await GpuDeepEnsemble.create(backend!, a);
       final gb = await GpuDeepEnsemble.create(backend, b);
       await ga.fit([x], [y], optimiser: Adam(1e-2));

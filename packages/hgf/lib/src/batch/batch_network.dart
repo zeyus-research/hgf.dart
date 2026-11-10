@@ -83,7 +83,7 @@ final class BatchNetwork {
       _n = net._n,
       _b = b,
       _k = k,
-      blockSize = _positive(blockSize, 'blockSize'),
+      blockSize = _dpBlock(net, b, _positive(blockSize, 'blockSize')),
       _kind = net._kind,
       _couplingFn = net._couplingFn,
       _couplings = net._couplings,
@@ -137,6 +137,23 @@ final class BatchNetwork {
       _xisInitial = _broadcast(net._xisInitial, b),
       _ssInitial = _broadcast(net._ssInitial, b),
       _alphaInitial = _broadcast(net._alphaInitial, b),
+      _dpStart = net._dpStart,
+      _dpN = Float64List(net._dpN.length * b),
+      _dpExpectedMeans = Float64List(net._dpN.length * b),
+      _dpExpectedSigmas = Float64List(net._dpN.length * b),
+      _dpActivated = Float64List(net._dpN.length * b),
+      _dpNInitial = _broadcast(net._dpNInitial, b),
+      _dpExpectedMeansInitial = _broadcast(net._dpExpectedMeansInitial, b),
+      _dpExpectedSigmasInitial = _broadcast(net._dpExpectedSigmasInitial, b),
+      _dpActivatedInitial = _broadcast(net._dpActivatedInitial, b),
+      _dpMeansE = Float64List(net._dpN.length),
+      _dpSigmasE = Float64List(net._dpN.length),
+      _dpScratch = net._dpN.isEmpty
+          ? null
+          : DpScratch(
+              net._dpN.length,
+              slots: _dpBlock(net, b, _positive(blockSize, 'blockSize')),
+            ),
       _alphaCurrent = Float64List(net._alphaScratch.length),
       _alphaNext = Float64List(net._alphaScratch.length),
       _predNode = net._predNode,
@@ -191,10 +208,25 @@ final class BatchNetwork {
     return out;
   }
 
-  /// Highest step code the batched kernels implement: the scalar kinds,
-  /// ef-state and categorical-state (`batch_vectors.dart`). The dp-state
-  /// steps are rejected until they get batched kernels.
-  static const int _kLastBatchedStep = _kPosteriorCategorical;
+  /// Highest step code the batched kernels implement: the scalar kinds and
+  /// the vector kinds (`batch_vectors.dart`).
+  static const int _kLastBatchedStep = _kPredictionErrorDp;
+
+  /// Memory for the dp-state proposal row caches ([DpScratch]), one slot
+  /// per element of a block.
+  static const int _dpCacheBytes = 64 << 20;
+
+  /// [blockSize] for [net]: with dp-state nodes, at most as many elements
+  /// as have a row cache slot within [_dpCacheBytes] (and at least one).
+  /// Their step costs ~1 ms per element-trial, so a small block loses
+  /// nothing.
+  static int _dpBlock(Network net, int b, int blockSize) {
+    final block = blockSize < b ? blockSize : b;
+    final nd = net._dpN.length;
+    if (nd == 0) return blockSize;
+    final fit = _dpCacheBytes ~/ (nd * DpScratch.bytesPerRow);
+    return fit < 1 ? 1 : (fit < block ? fit : block);
+  }
 
   final Network _template;
   final int _n;
@@ -207,6 +239,9 @@ final class BatchNetwork {
   /// the CPU more independent work per stage; smaller ones keep the block's
   /// state in cache. The default of 256 is best or close to it for every
   /// update mode on AOT and Wasm (`benchmark/bin/batch_blocks.dart`).
+  /// Networks with dp-state nodes cap it (at most the batch size, and as
+  /// many elements as their proposal caches fit in 64 MB: 52 with 4
+  /// clusters).
   final int blockSize;
 
   final Uint8List _kind, _couplingFn, _isLeaf;
@@ -258,6 +293,18 @@ final class BatchNetwork {
 
   // The categorical posterior's old and new α of one element.
   final Float64List _alphaCurrent, _alphaNext;
+
+  // dp-state vectors, `[offset][element]` from `_dpStart`, with their
+  // initial values; one element's cluster means and sigmas gathered for
+  // [dpCandidate]; its row caches, one slot per element of a block.
+  final Int32List _dpStart;
+  final Float64List _dpN, _dpExpectedMeans, _dpExpectedSigmas, _dpActivated;
+  final Float64List _dpNInitial,
+      _dpExpectedMeansInitial,
+      _dpExpectedSigmasInitial,
+      _dpActivatedInitial;
+  final Float64List _dpMeansE, _dpSigmasE;
+  final DpScratch? _dpScratch;
 
   final Int32List _predNode, _updNode;
   final Uint8List _predStep, _updStep;
@@ -365,6 +412,28 @@ final class BatchNetwork {
         _s.coupling.length < _template._u.capacity * _s.stride) {
       throw StateError('Scratch buffers too small');
     }
+    final nd = _dpStart[n];
+    for (final v in [
+      _dpN,
+      _dpExpectedMeans,
+      _dpExpectedSigmas,
+      _dpActivated,
+      _dpNInitial,
+      _dpExpectedMeansInitial,
+      _dpExpectedSigmasInitial,
+      _dpActivatedInitial,
+    ]) {
+      if (v.length != nd * b) throw StateError('Bad dp-state store');
+    }
+    final dps = _dpScratch;
+    if (nd > 0 &&
+        (_dpMeansE.length != nd ||
+            _dpSigmasE.length != nd ||
+            dps == null ||
+            dps.clusters != nd ||
+            dps.slots < (blockSize < b ? blockSize : b))) {
+      throw StateError('Bad dp-state scratch');
+    }
     // The graph arrays are the network's, validated by its own build().
     if (_vpStart.length != n + 1 || _kind.length != n) {
       throw StateError('Bad graph');
@@ -440,25 +509,30 @@ final class BatchNetwork {
     return out..setRange(0, _b, _column(field), start);
   }
 
-  /// [node]'s current [field] vector in [element] (ef-state and
-  /// categorical nodes; empty for nodes without that vector). As
+  /// [node]'s current [field] vector in [element] (ef-state, categorical
+  /// and dp-state nodes; empty for nodes without that vector). As
   /// [Network.getVector].
   Float64List getVector(int element, int node, VectorField field) {
     final i = _index(element, node) - element; // validates both
     assert(i == node * _b);
-    final (store, start) = switch (field) {
-      VectorField.mean => (_vMean, _vMeanStart),
-      VectorField.xis => (_xis, _ssStart),
-      VectorField.observationSs => (_ss, _ssStart),
-      VectorField.alpha => (_alpha, _alphaStart),
-      _ => (_f64, null), // dp-state fields: dp nodes aren't batched
-    };
+    final (store, start) = _vectorStore(field);
     final len = _template.vectorLength(node, field);
-    if (start == null || len == 0) return Float64List(0);
+    if (len == 0) return Float64List(0);
     return Float64List.fromList([
       for (var j = 0; j < len; j++) store[(start[node] + j) * _b + element],
     ]);
   }
+
+  (Float64List, Int32List) _vectorStore(VectorField field) => switch (field) {
+    VectorField.mean => (_vMean, _vMeanStart),
+    VectorField.xis => (_xis, _ssStart),
+    VectorField.observationSs => (_ss, _ssStart),
+    VectorField.alpha => (_alpha, _alphaStart),
+    VectorField.n => (_dpN, _dpStart),
+    VectorField.expectedMeans => (_dpExpectedMeans, _dpStart),
+    VectorField.expectedSigmas => (_dpExpectedSigmas, _dpStart),
+    VectorField.activated => (_dpActivated, _dpStart),
+  };
 
   /// Initial value of [field] on [node] of [element].
   double getInitial(int element, int node, NodeField field) =>
@@ -739,6 +813,10 @@ final class BatchNetwork {
     _xis.setAll(0, _xisInitial);
     _ss.setAll(0, _ssInitial);
     _alpha.setAll(0, _alphaInitial);
+    _dpN.setAll(0, _dpNInitial);
+    _dpExpectedMeans.setAll(0, _dpExpectedMeansInitial);
+    _dpExpectedSigmas.setAll(0, _dpExpectedSigmasInitial);
+    _dpActivated.setAll(0, _dpActivatedInitial);
     if (_k == 0) return;
     final nbk = nb * _k;
     for (var slot = 0; slot < _kTangentFields; slot++) {

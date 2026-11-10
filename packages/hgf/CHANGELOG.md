@@ -1,5 +1,14 @@
 ## Unreleased
 
+- `BatchNetwork` runs dp-state nodes too (`batch/batch_vectors.dart`), so
+  it now takes every node kind. Each element has its own α, sensory
+  precision and clusters (`getVector` reads `n`, `expectedMeans`,
+  `expectedSigmas`, `activated`), and matches `Network` bit for bit on
+  the 6 dp fixtures (VM, dart2js, dart2wasm, `-O4`). `DpScratch` has
+  per-slot proposal row caches (`slots:`, `dpCandidate(slot:)`), one per
+  element of a block. dp networks cap `blockSize` at the slots that fit
+  in 64 MB (52 with 4 clusters). AOT: 1.18 ms per element-trial vs
+  `Network`'s 1.25–1.29 ms (4 clusters, 32 elements).
 - `BatchNetwork` runs ef-state and categorical-state nodes (batched kernels
   in `batch/batch_vectors.dart`, a per-element vector side store
   `[offset][element]`, multi-column inputs; `getVector`). Each element

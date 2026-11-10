@@ -102,40 +102,55 @@ void _minMaxScale(Float64List v) {
 }
 
 /// Scratch for [dpCandidate], reused across trials (one per network), with
-/// room for [clusters] clusters (all dp-state nodes together).
+/// room for [clusters] clusters (all dp-state nodes together) in each of
+/// [slots] row caches.
 ///
-/// It caches each cluster's two rows of proposal terms, keyed on the
+/// Each cache holds each cluster's two rows of proposal terms, keyed on the
 /// cluster's expected mean and standard deviation: on most trials only the
 /// cluster that learned changes, so the others' 2 × 20000 densities are
 /// reused. (The sums over clusters are redone in the same order, so the
-/// result is the same as without the cache.) 320 KB per cluster.
+/// result is the same as without the cache, whichever slot is used.) A
+/// batch gives each element it runs at once its own slot; the working
+/// buffers are shared. 320 KB per cluster and slot.
 final class DpScratch {
-  DpScratch(this.clusters)
+  DpScratch(this.clusters, {this.slots = 1})
     : _pre = Float64List(dpProposalCount),
       _iso = Float64List(dpProposalCount),
       _w = Float64List(dpProposalCount),
       _ll = Float64List(dpProposalCount),
       _idx = Int32List(dpProposalCount),
       _sample = Float64List(dpProposalCount ~/ _sampleStride),
-      _rowPre = Float64List(clusters * dpProposalCount),
-      _rowIso = Float64List(clusters * dpProposalCount),
-      _rowMean = Float64List(clusters)..fillRange(0, clusters, double.nan),
-      _rowSigma = Float64List(clusters)..fillRange(0, clusters, double.nan);
+      _rowPre = Float64List(slots * clusters * dpProposalCount),
+      _rowIso = Float64List(slots * clusters * dpProposalCount),
+      _rowMean = Float64List(slots * clusters)
+        ..fillRange(0, slots * clusters, double.nan),
+      _rowSigma = Float64List(slots * clusters)
+        ..fillRange(0, slots * clusters, double.nan) {
+    if (clusters < 1 || slots < 1) {
+      throw ArgumentError('DpScratch needs at least one cluster and slot');
+    }
+  }
 
-  /// How many clusters' rows fit.
+  /// Bytes of row cache per cluster and slot.
+  static const int bytesPerRow = 2 * dpProposalCount * 8;
+
+  /// How many clusters' rows fit in each slot.
   final int clusters;
+
+  /// How many independent row caches there are.
+  final int slots;
 
   final Float64List _pre, _iso, _w, _ll, _sample;
   final Int32List _idx;
 
-  // Per cluster i, row i: its density at each proposal's mean, and the
-  // proposal's isolation factor from it; computed for (_rowMean[i],
-  // _rowSigma[i]) (NaN: not yet).
+  // Per row r = slot * clusters + cluster: the cluster's density at each
+  // proposal's mean, and the proposal's isolation factor from it; computed
+  // for (_rowMean[r], _rowSigma[r]) (NaN: not yet).
   final Float64List _rowPre, _rowIso, _rowMean, _rowSigma;
 }
 
-/// Fill [s]'s cached rows for cluster [i] at mean [m], standard deviation
-/// [sd].
+/// Fill [s]'s cached row [i] (`slot * clusters + cluster`) at mean [m],
+/// standard deviation [sd].
 @pragma('vm:unsafe:no-bounds-checks')
 void _clusterRows(DpProposals p, DpScratch s, int i, double m, double sd) {
   final mu = p.mu, sigma2 = p._sigma2, logNorm = p._logNorm;
@@ -158,7 +173,7 @@ void _clusterRows(DpProposals p, DpScratch s, int i, double m, double sd) {
 /// The new-cluster candidate `(mean, sigma)` for [value] given the existing
 /// clusters' expected [means] and [sigmas] (all of them, active or not, as
 /// pyhgf does), read from `[start, start + count)`; [s] must have room for
-/// `start + count` clusters.
+/// `start + count` clusters. The rows are cached in [s]'s [slot].
 ///
 /// The steps are JAX's, in its order of operations, with two shortcuts that
 /// give the same result: the min-max scalings use `max(v − min v) =
@@ -173,10 +188,13 @@ void _clusterRows(DpProposals p, DpScratch s, int i, double m, double sd) {
   Float64List sigmas,
   int start,
   int count,
-  DpScratch s,
-) {
+  DpScratch s, {
+  int slot = 0,
+}) {
   if (start < 0 ||
       count < 1 ||
+      slot < 0 ||
+      slot >= s.slots ||
       start + count > s.clusters ||
       start + count > means.length ||
       start + count > sigmas.length) {
@@ -193,7 +211,11 @@ void _clusterRows(DpProposals p, DpScratch s, int i, double m, double sd) {
   for (final v in [mu, sigma, sigma2, logNorm, self, spread, pre, iso, w, ll]) {
     if (v.length != n) throw StateError('Bad proposal buffers');
   }
-  if (s._idx.length != n || rowPre.length < s.clusters * n) {
+  if (s._idx.length != n ||
+      rowPre.length < s.slots * s.clusters * n ||
+      s._rowIso.length != rowPre.length ||
+      s._rowMean.length < s.slots * s.clusters ||
+      s._rowSigma.length != s._rowMean.length) {
     throw StateError('Bad proposal buffers');
   }
 
@@ -201,12 +223,13 @@ void _clusterRows(DpProposals p, DpScratch s, int i, double m, double sd) {
   // of the densities the existing clusters give its mean. 2. Isolation: per
   // existing cluster, its density at its own mean against that plus the
   // proposal's density there, multiplied over the clusters.
+  final row0 = slot * s.clusters;
   for (var i = start; i < start + count; i++) {
-    final m = means[i], sd = sigmas[i];
-    if (m != s._rowMean[i] || sd != s._rowSigma[i]) {
-      _clusterRows(p, s, i, m, sd);
+    final m = means[i], sd = sigmas[i], r = row0 + i;
+    if (m != s._rowMean[r] || sd != s._rowSigma[r]) {
+      _clusterRows(p, s, r, m, sd);
     }
-    final base = i * n;
+    final base = r * n;
     if (i == start) {
       for (var j = 0; j < n; j++) {
         pre[j] = 0.0 + rowPre[base + j];
