@@ -1,14 +1,9 @@
-import 'dart:io';
-
 import 'package:hgf_fit/hgf_fit.dart';
 import 'package:hgf_gpu/native.dart';
 
 import 'open_gpu.dart';
 
 Future<GpuOpened> openGpu() async {
-  if (Platform.isAndroid || Platform.isIOS) {
-    return (device: null, reason: 'wgpu-native isn\'t bundled on mobile yet.');
-  }
   try {
     final fitter = await WgpuIsolateFitter.spawn();
     return (device: _NativeGpu(fitter), reason: null);

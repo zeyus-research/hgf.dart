@@ -15,10 +15,13 @@ environment:
   sdk: ^3.10.0
 
 dependencies:
+  code_assets: ^2.2.0
+  crypto: ^3.0.8
   ffi: ^2.1.4
   hgf: ^0.1.0-dev.1
   hgf_deep: ^0.1.0-dev.1
   hgf_fit: ^0.1.0-dev.1
+  hooks: ^2.2.0
 
 dev_dependencies:
   ffigen: ^23.0.0

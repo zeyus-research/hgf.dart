@@ -44,6 +44,47 @@ String _str(WGPUStringView v) => v.data == nullptr || v.length == 0
         allowMalformed: true,
       );
 
+/// Where the library may be, most specific first.
+List<String> _candidates(String? library) {
+  final explicit = library ?? Platform.environment['WGPU_LIB'];
+  if (explicit != null) return [explicit];
+  final exe = File(Platform.resolvedExecutable).parent.path;
+  final sep = Platform.pathSeparator;
+  if (Platform.isMacOS) {
+    return [
+      // Flutter wraps each bundled dylib in a framework (hook/build.dart).
+      '$exe/../Frameworks/wgpu_native.framework/wgpu_native',
+      'libwgpu_native.dylib',
+      '/opt/homebrew/lib/libwgpu_native.dylib',
+      '/usr/local/lib/libwgpu_native.dylib',
+    ];
+  }
+  if (Platform.isIOS) {
+    return ['$exe/Frameworks/wgpu_native.framework/wgpu_native'];
+  }
+  if (Platform.isWindows) {
+    return ['$exe${sep}wgpu_native.dll', 'wgpu_native.dll'];
+  }
+  // Android: the APK's native library dir, found by name. Linux: Flutter
+  // bundles next to the runner in lib/, which dlopen doesn't search.
+  return [
+    if (Platform.isLinux) '$exe/lib/libwgpu_native.so',
+    'libwgpu_native.so',
+  ];
+}
+
+DynamicLibrary _open(String? library) {
+  final errors = <String>[];
+  for (final path in _candidates(library)) {
+    try {
+      return DynamicLibrary.open(path);
+    } on ArgumentError catch (e) {
+      errors.add('$path: ${e.message}');
+    }
+  }
+  throw ArgumentError('could not open wgpu-native:\n  ${errors.join('\n  ')}');
+}
+
 /// [GpuBackend] on wgpu-native (Vulkan, Metal, D3D12) through `dart:ffi`:
 /// the same WGSL kernels as in the browser, on desktop.
 ///
@@ -60,19 +101,13 @@ final class WgpuBackend implements GpuBackend {
     this.maxStorageBufferBytes,
   );
 
-  /// Opens [library] (default: `$WGPU_LIB`, else `libwgpu_native.so`
-  /// / `.dylib` / `wgpu_native.dll` on the library path) and its
-  /// high-performance adapter. Returns null if there is no adapter.
+  /// Opens [library] (default: `$WGPU_LIB`, else the copy the build hook
+  /// bundled into the app, else `libwgpu_native.so` / `.dylib` /
+  /// `wgpu_native.dll` on the library path) and its high-performance
+  /// adapter. Returns null if there is no adapter. Throws an
+  /// [ArgumentError] listing the paths tried if none opens.
   static WgpuBackend? create({String? library}) {
-    final path =
-        library ??
-        Platform.environment['WGPU_LIB'] ??
-        (Platform.isMacOS
-            ? 'libwgpu_native.dylib'
-            : Platform.isWindows
-            ? 'wgpu_native.dll'
-            : 'libwgpu_native.so');
-    final w = WgpuBindings(DynamicLibrary.open(path));
+    final w = WgpuBindings(_open(library));
     final instance = w.wgpuCreateInstance(nullptr);
 
     WGPUAdapter adapter = nullptr;

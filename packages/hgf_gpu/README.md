@@ -72,8 +72,13 @@ Status: see Phase 7 in `docs/ROADMAP.md`.
 
 - Web: `import 'package:hgf_gpu/web.dart'`. On Linux, Chromium needs
   `--enable-unsafe-webgpu` and Vulkan.
-- Desktop: `import 'package:hgf_gpu/native.dart'`. Needs `libwgpu_native`
-  v29: install it, or run `tool/fetch_wgpu.sh` and set `WGPU_LIB`.
+- Native (macOS, Linux, Windows, Android, iOS):
+  `import 'package:hgf_gpu/native.dart'`. The build hook (`hook/build.dart`)
+  downloads the pinned `libwgpu_native` v29 release for the target and Flutter
+  bundles it into the app. `WGPU_LIB` overrides it. For plain `dart run` and
+  `dart test`, install the library, or run `tool/fetch_wgpu.sh` and set
+  `WGPU_LIB`. Offline builds bundle nothing and fall back to the system
+  library.
   Regenerate the bindings with
   `dart run ffigen --config ffigen.yaml --compiler-opts -I/usr/lib/clang/<v>/include`.
 - Tests: `melos run test:gpu`. Benchmarks: `melos run bench:gpu-web`,

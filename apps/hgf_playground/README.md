@@ -22,8 +22,9 @@ An interactive playground for Hierarchical Gaussian Filters, built on the
   on the workers); without `fit_worker` on the main thread between frames.
 - Fits can run on the GPU ([`hgf_gpu`](../../packages/hgf_gpu)): WebGPU in
   the browser (Chrome, Edge; Firefox with WebGPU enabled, where the adapter
-  shows without a name), wgpu-native on desktop (install `wgpu-native`, or point
-  `WGPU_LIB` at the library; it runs in a background isolate). The GPU
+  shows without a name), wgpu-native on desktop and mobile (bundled into the app
+  by `hgf_gpu`'s build hook, or set `WGPU_LIB` to override it; it runs in a background
+  isolate). The GPU
   pays off for NUTS with many chains; *Auto* uses it from 32 chains.
 - Settings (the *tune* button, saved between sessions): theme, device
   (Auto / CPU f64 / GPU f32), the number of workers (default: one per
