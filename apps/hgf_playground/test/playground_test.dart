@@ -11,6 +11,7 @@ import 'package:hgf_playground/src/model/fitting.dart';
 import 'package:hgf_playground/src/model/playground.dart';
 import 'package:hgf_playground/src/model/presets.dart';
 import 'package:hgf_playground/src/settings.dart';
+import 'package:hgf_playground/src/ui/choice_plots.dart';
 import 'package:hgf_widgets/hgf_widgets.dart';
 
 void main() {
@@ -169,6 +170,10 @@ void main() {
       // Only the input: no node kind with a surprise.
       'dp': 1,
       'ef': 1,
+      // Choice probabilities, option values, cumulative payoff, and the
+      // four hidden nodes (the inputs show through the values).
+      'igt': 7,
+      'bandit': 7,
     };
     tester.view.physicalSize = const Size(1400, 900);
     for (final p in presets) {
@@ -182,7 +187,9 @@ void main() {
         reason: p.id,
       );
       expect(
-        HgfTrajectoryView.panelCount(pg.network),
+        p.task != null
+            ? ChoiceTaskView.panelCount(pg)
+            : HgfTrajectoryView.panelCount(pg.network),
         panels[p.id],
         reason: p.id,
       );

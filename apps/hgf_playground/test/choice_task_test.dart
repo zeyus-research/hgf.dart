@@ -218,11 +218,9 @@ void main() {
       pg.setParam(4, NodeField.tonicVolatility, 0.0);
       expect(pg.choices, same(choices));
       expect(
-        () => pg.loadChoices(
-          Float64List.fromList([4]),
-          [Float64List.fromList([1])],
-          'bad',
-        ),
+        () => pg.loadChoices(Float64List.fromList([4]), [
+          Float64List.fromList([1]),
+        ], 'bad'),
         throwsFormatException,
       );
       // Another preset: back to simulated data.
@@ -243,4 +241,3 @@ void main() {
     });
   });
 }
-

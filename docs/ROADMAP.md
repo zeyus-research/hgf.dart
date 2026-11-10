@@ -1603,29 +1603,37 @@ network per participant.
   fit something like the Iowa Gambling Task, or abitrary experimental
   data. **Library side done (2026-11-10, see "Choice tasks" below):**
   `SoftmaxReadout`, `HgfModel.simulateChoices`, `IowaGamblingTask`, on the
-  CPU and the GPU. **Next, the playground:**
-  - A "choice task" preset kind (IGT, pyhgf's two-armed bandit): the preset
-    gives the network, the `SoftmaxReadout` options, `reveals` and an
-    outcome generator (`IowaGamblingTask.outcomes`, bandit contingencies).
-  - The playground holds the full outcome table (`nTrials × nInputs`), the
-    choices, and an observed mask per trial and input node (generalise
-    `observed` and `Player._flag` from one flag per trial to `nInputs`).
-    Simulated data = a closed-loop agent: its β becomes a playground
-    parameter, and every edit re-runs `simulateChoices` (a fixed choice
-    seed, so the choices change only through the beliefs), then filters
-    with the mask. Playback steps the loop trial by trial.
-  - Plots: each option's predicted value and the choice probabilities, the
-    choices as a raster, cumulative payoff.
-  - Fitting: responses only (the choices), ω per branch or shared, β;
-    recovery calls `simulateChoices` instead of `simulate` (`RecoveryJob`
-    and its wire format carry `reveals`).
-  - Import: a choice column and a payoff column (the mapping dialog gains
-    a "choice task" mode that calls `IowaGamblingTask.data`, or its
-    generalisation over `reveals`).
+  CPU and the GPU. **Playground done (2026-11-10):**
+  - [x] A choice-task preset kind (`Preset.task`, a `ChoiceTask`: options,
+    softmax weights, `reveals`, the value nodes, what a recorded choice
+    reveals): *Iowa Gambling Task* (four 2-level HGFs, payoffs in $100)
+    and *Two-armed bandit* (pyhgf's: win/loss binary HGFs per arm, an arm
+    worth P(win) − P(loss), the good arm swapping every block).
+  - [x] The playground holds the full outcome table, the choices and an
+    observed mask per trial and input (`observed` is `nTrials × nInputs`;
+    `Player` steps with a flag per input). The agent's β is a playground
+    parameter (Data card); every edit replays `simulateChoices` with a
+    fixed seed, and keeps the old arrays (so a fit result survives) when
+    the choices didn't change. Tested: the plotted choice probabilities
+    (Network) give the fit model's likelihood (BatchNetwork) to 1e-9.
+  - [x] Plots (`ChoiceTaskView`): choice probabilities with the choices as
+    rows, option values with each choice's payoff (and the true expected
+    payoffs), cumulative payoff, then the hidden nodes.
+  - [x] Fitting: choices only; ω shared across options (default) or one
+    per option (mutually exclusive chips), a shared π_u for continuous
+    outcomes, β. `FreeParam.alsoTargets` for shared parameters (on the
+    wire too). Apply is off for simulated choices (they would replay);
+    on recorded ones it sets ω and the agent's β. Recovery plays the task
+    per agent (`RecoveryJob.reveals`, on the wire); for recorded choices
+    on a simulated outcome table as long.
+  - [x] Import: Load CSV on a task preset asks for the choice column and
+    what it revealed (`payoff` in dollars for the IGT; `win`, `loss` for
+    the bandit). Export writes the payoffs and the choices.
   - Later: a perseveration / stickiness term and a lapse rate (common in IGT
     models: an extra option-value term for the previous choice), and a
     model builder (pick a network per option, how options are valued, the
-    reveals).
+    reveals). The choice rows overlap the panel title's box (as in the
+    categorical panel).
 - [ ] **Export a network / model to code** (requested 2026-11-10). Someone
   designs a network or a whole fitting setup in the playground (structure,
   node parameters, couplings, update scheme, the response model, the free
