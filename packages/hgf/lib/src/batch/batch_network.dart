@@ -122,6 +122,23 @@ final class BatchNetwork {
       _sensoryPrecision = Float64List(net._n * b),
       _nTotal = Float64List(net._n * b),
       _nActiveCluster = Float64List(net._n * b),
+      _inputCol = net._inputCol,
+      _inputDim = net._inputDim,
+      _nCols = net._nInputColumns,
+      _hasVectorInputs = net._hasVectorInputs,
+      _vMeanStart = net._vMeanStart,
+      _ssStart = net._ssStart,
+      _alphaStart = net._alphaStart,
+      _vMean = Float64List(net._vMeanInitial.length * b),
+      _xis = Float64List(net._xisInitial.length * b),
+      _ss = Float64List(net._ssInitial.length * b),
+      _alpha = Float64List(net._alphaInitial.length * b),
+      _vMeanInitial = _broadcast(net._vMeanInitial, b),
+      _xisInitial = _broadcast(net._xisInitial, b),
+      _ssInitial = _broadcast(net._ssInitial, b),
+      _alphaInitial = _broadcast(net._alphaInitial, b),
+      _alphaCurrent = Float64List(net._alphaScratch.length),
+      _alphaNext = Float64List(net._alphaScratch.length),
       _predNode = net._predNode,
       _predStep = net._predStep,
       _updNode = net._updNode,
@@ -174,10 +191,10 @@ final class BatchNetwork {
     return out;
   }
 
-  /// Highest step code the batched kernels implement. Step codes added for
-  /// new node kinds (vector-valued nodes) are rejected until they get a
-  /// batched kernel.
-  static const int _kLastBatchedStep = _kPredictionErrorBinary;
+  /// Highest step code the batched kernels implement: the scalar kinds,
+  /// ef-state and categorical-state (`batch_vectors.dart`). The dp-state
+  /// steps are rejected until they get batched kernels.
+  static const int _kLastBatchedStep = _kPosteriorCategorical;
 
   final Network _template;
   final int _n;
@@ -225,6 +242,22 @@ final class BatchNetwork {
       _sensoryPrecision,
       _nTotal,
       _nActiveCluster;
+
+  // Input columns, as [Network]'s: input q reads `_inputDim[q]` columns
+  // from column `_inputCol[q]` of each row of `_nCols`.
+  final Int32List _inputCol, _inputDim;
+  final int _nCols;
+  final bool _hasVectorInputs;
+
+  // Vector side store, `[offset][element]` (node i's entry j of element e
+  // at `(start[i] + j) * B + e`), with its initial values; ef-state and
+  // categorical nodes only.
+  final Int32List _vMeanStart, _ssStart, _alphaStart;
+  final Float64List _vMean, _xis, _ss, _alpha;
+  final Float64List _vMeanInitial, _xisInitial, _ssInitial, _alphaInitial;
+
+  // The categorical posterior's old and new α of one element.
+  final Float64List _alphaCurrent, _alphaNext;
 
   final Int32List _predNode, _updNode;
   final Uint8List _predStep, _updStep;
@@ -303,6 +336,16 @@ final class BatchNetwork {
 
   /// As [Network.inputIdxs].
   List<int> get inputIdxs => _template._inputIdxsView;
+
+  /// How many value parents node [i] has (as [Network.valueParentsOf],
+  /// without allocating; for response functions).
+  int valueParentCount(int i) => _vpStart[i + 1] - _vpStart[i];
+
+  /// Node [i]'s value parent number [k], in [Network.valueParentsOf] order.
+  int valueParent(int i, int k) {
+    RangeError.checkValidIndex(k, null, 'k', valueParentCount(i));
+    return _vpIdx[_vpStart[i] + k];
+  }
 
   void _checkInvariants() {
     final n = _n, b = _b;
@@ -395,6 +438,26 @@ final class BatchNetwork {
     final out = into ?? Float64List(_b);
     if (out.length != _b) throw ArgumentError('into must have batchSize items');
     return out..setRange(0, _b, _column(field), start);
+  }
+
+  /// [node]'s current [field] vector in [element] (ef-state and
+  /// categorical nodes; empty for nodes without that vector). As
+  /// [Network.getVector].
+  Float64List getVector(int element, int node, VectorField field) {
+    final i = _index(element, node) - element; // validates both
+    assert(i == node * _b);
+    final (store, start) = switch (field) {
+      VectorField.mean => (_vMean, _vMeanStart),
+      VectorField.xis => (_xis, _ssStart),
+      VectorField.observationSs => (_ss, _ssStart),
+      VectorField.alpha => (_alpha, _alphaStart),
+      _ => (_f64, null), // dp-state fields: dp nodes aren't batched
+    };
+    final len = _template.vectorLength(node, field);
+    if (start == null || len == 0) return Float64List(0);
+    return Float64List.fromList([
+      for (var j = 0; j < len; j++) store[(start[node] + j) * _b + element],
+    ]);
   }
 
   /// Initial value of [field] on [node] of [element].
@@ -672,6 +735,10 @@ final class BatchNetwork {
     for (final f in NodeField.values) {
       _column(f).setRange(0, nb, _initial, f.index * nb);
     }
+    _vMean.setAll(0, _vMeanInitial);
+    _xis.setAll(0, _xisInitial);
+    _ss.setAll(0, _ssInitial);
+    _alpha.setAll(0, _alphaInitial);
     if (_k == 0) return;
     final nbk = nb * _k;
     for (var slot = 0; slot < _kTangentFields; slot++) {
@@ -810,16 +877,17 @@ final class BatchNetwork {
     bool perElement = false,
   }) {
     _checkTemplate();
-    final width = _inputs.length * (perElement ? _b : 1);
+    final per = perElement ? _b : 1;
+    final width = _nCols * per, flags = _inputs.length * per;
     if (observations.length != width) {
       throw ArgumentError('Expected $width observation(s)');
     }
-    if (observed != null && observed.length != width) {
-      throw ArgumentError('Expected $width observed flag(s)');
+    if (observed != null && observed.length != flags) {
+      throw ArgumentError('Expected $flags observed flag(s)');
     }
     for (var lo = 0; lo < _b; lo += blockSize) {
       final hi = lo + blockSize < _b ? lo + blockSize : _b;
-      _propagate(observations, observed, 0, timeStep, perElement, lo, hi);
+      _propagate(observations, observed, 0, 0, timeStep, perElement, lo, hi);
     }
   }
 
@@ -831,16 +899,20 @@ final class BatchNetwork {
     bool append,
   ) {
     _checkTemplate();
-    final width = _inputs.length * (perElement ? _b : 1);
+    final per = perElement ? _b : 1;
+    final width = _nCols * per;
     if (data.length % width != 0) {
       throw ArgumentError(
         'data length ${data.length} is not a multiple of $width '
-        '(${_inputs.length} input(s)${perElement ? ' x $_b elements' : ''})',
+        '($_nCols input column(s)${perElement ? ' x $_b elements' : ''})',
       );
     }
     final nTime = data.length ~/ width;
-    if (observed != null && observed.length != data.length) {
-      throw ArgumentError('observed must have the same shape as data');
+    if (observed != null && observed.length != nTime * _inputs.length * per) {
+      throw ArgumentError(
+        'observed must have one flag per time step and input node'
+        '${perElement ? ' and element' : ''}',
+      );
     }
     if (timeSteps != null && timeSteps.length != nTime) {
       throw ArgumentError('timeSteps must have one entry per time step');
@@ -860,7 +932,8 @@ final class BatchNetwork {
     Float64List? perTrial,
     Float64List? gradient,
   ) {
-    final b = _b, k = _k, width = _inputs.length * (perElement ? b : 1);
+    final b = _b, k = _k, per = perElement ? b : 1;
+    final width = _nCols * per, flags = _inputs.length * per;
     final partials = _partials;
     for (var lo = 0; lo < b; lo += blockSize) {
       final hi = lo + blockSize < b ? lo + blockSize : b;
@@ -869,6 +942,7 @@ final class BatchNetwork {
           data,
           observed,
           t * width,
+          t * flags,
           timeSteps == null ? 1.0 : timeSteps[t],
           perElement,
           lo,
@@ -900,18 +974,60 @@ final class BatchNetwork {
     Float64List data,
     Float64List? observed,
     int offset,
+    int observedOffset,
     double timeStep,
     bool perElement,
     int lo,
     int hi,
   ) {
     if (_k != 0) {
-      _tPropagate(data, observed, offset, timeStep, perElement, lo, hi);
+      _tPropagate(
+        data,
+        observed,
+        offset,
+        observedOffset,
+        timeStep,
+        perElement,
+        lo,
+        hi,
+      );
       return;
     }
     final predNode = _predNode, predStep = _predStep;
     for (var k = 0; k < predNode.length; k++) {
       _dispatch(predStep[k], predNode[k], timeStep, lo, hi);
+    }
+    _observe(data, observed, offset, observedOffset, perElement, lo, hi);
+    final updNode = _updNode, updStep = _updStep;
+    for (var k = 0; k < updNode.length; k++) {
+      _dispatch(updStep[k], updNode[k], timeStep, lo, hi);
+    }
+  }
+
+  /// The observations of one time slice into the input nodes, for elements
+  /// `[lo, hi)`.
+  @pragma('vm:prefer-inline')
+  @pragma('vm:unsafe:no-bounds-checks')
+  void _observe(
+    Float64List data,
+    Float64List? observed,
+    int offset,
+    int observedOffset,
+    bool perElement,
+    int lo,
+    int hi,
+  ) {
+    if (_hasVectorInputs) {
+      _observeVectors(
+        data,
+        observed,
+        offset,
+        observedOffset,
+        perElement,
+        lo,
+        hi,
+      );
+      return;
     }
     final inputs = _inputs, b = _b, mean = _mean, obs = _observed;
     for (var k = 0; k < inputs.length; k++) {
@@ -931,9 +1047,44 @@ final class BatchNetwork {
         }
       }
     }
-    final updNode = _updNode, updStep = _updStep;
-    for (var k = 0; k < updNode.length; k++) {
-      _dispatch(updStep[k], updNode[k], timeStep, lo, hi);
+  }
+
+  /// [_observe] with ef-state or categorical inputs: each takes its columns
+  /// into its vector mean (and the first into the scalar mean), as
+  /// [Network]'s `_observeVectors` does.
+  @pragma('vm:never-inline')
+  void _observeVectors(
+    Float64List data,
+    Float64List? observed,
+    int offset,
+    int observedOffset,
+    bool perElement,
+    int lo,
+    int hi,
+  ) {
+    final inputs = _inputs, b = _b, mean = _mean, obs = _observed;
+    final x = _vMean;
+    for (var q = 0; q < inputs.length; q++) {
+      final idx = inputs[q], base = idx * b, col = _inputCol[q];
+      final kind = _kind[idx];
+      final vector = kind == _kindEf || kind == _kindCategorical;
+      final dim = _inputDim[q], v0 = vector ? _vMeanStart[idx] : 0;
+      // Column c of element e is at `src + c * stride`.
+      final stride = perElement ? b : 1;
+      for (var e = lo; e < hi; e++) {
+        final src = perElement ? offset + col * b + e : offset + col;
+        mean[base + e] = data[src];
+        if (vector) {
+          for (var j = 0; j < dim; j++) {
+            x[(v0 + j) * b + e] = data[src + j * stride];
+          }
+        }
+        obs[base + e] = observed == null
+            ? 1.0
+            : perElement
+            ? observed[observedOffset + q * b + e]
+            : observed[observedOffset + q];
+      }
     }
   }
 
@@ -960,6 +1111,8 @@ final class BatchNetwork {
         _bPredictionErrorContinuous(node, lo, hi);
       case _kPredictionErrorBinary:
         _bPredictionErrorBinary(node, lo, hi);
+      default:
+        _bDispatchVector(step, node, lo, hi);
     }
   }
 }

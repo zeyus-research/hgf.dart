@@ -11,6 +11,7 @@ import 'types.dart';
 part 'batch/batch_network.dart';
 part 'batch/batch_tangents.dart';
 part 'batch/batch_updates.dart';
+part 'batch/batch_vectors.dart';
 part 'network_json.dart';
 part 'update_sequence.dart';
 part 'updates/categorical.dart';

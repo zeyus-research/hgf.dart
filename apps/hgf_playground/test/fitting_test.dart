@@ -13,15 +13,15 @@ import 'package:hgf_playground/src/ui/fit_card.dart';
 Future<FitWorkers> _inline([int? _]) => FitWorkers.spawn(count: 0);
 
 void main() {
-  test('candidates per preset; vector node kinds are not fitted', () {
+  test('candidates per preset; dp and ef nodes are not fitted', () {
     for (final p in presets) {
       final f = Fitting(
         Playground(presetId: p.id, nTrials: 50),
         spawnWorkers: _inline,
       );
-      final vector = p.addTo != null;
-      expect(f.unsupported != null, vector, reason: p.id);
-      if (vector) continue;
+      final skipped = p.id == 'dp' || p.id == 'ef';
+      expect(f.unsupported != null, skipped, reason: p.id);
+      if (skipped) continue;
       // Every non-input continuous node's ω is free by default.
       expect(f.free, isNotEmpty, reason: p.id);
       expect(f.free.every((id) => id.startsWith('omega_')), isTrue);
@@ -146,7 +146,7 @@ void main() {
     // The probe ran once and is remembered.
     await f.fit();
     expect(probes, 1);
-    expect(f.gpu!.device, isNull);
+    expect(f.gpu!.adapter, isNull);
     // Auto stays on the CPU for MAP and few chains.
     f.configure(const FitConfig());
     expect(f.wantsGpu, isFalse);
@@ -259,6 +259,60 @@ void main() {
     }
     expect(find.textContaining('R̂'), findsNWidgets(3));
   });
+
+  test(
+    'categorical: fit to the observations and to an agent\'s choices',
+    () async {
+      final pg = Playground(presetId: 'categorical3', nTrials: 300);
+      final f = Fitting(
+        pg,
+        spawnWorkers: _inline,
+        config: const FitConfig(restarts: 0),
+      );
+      expect(f.unsupported, isNull);
+      // ω of the three logits and of the shared volatility parent (x₇).
+      expect(f.free, {'omega_4', 'omega_5', 'omega_6', 'omega_7'});
+      f
+        ..toggle('omega_4', false)
+        ..toggle('omega_5', false)
+        ..toggle('omega_6', false);
+      await f.fit();
+      expect(f.error, isNull);
+      expect(f.result!.estimates.single.estimate.isFinite, isTrue);
+      expect(f.result!.logEvidence!.isFinite, isTrue);
+
+      // A simulated agent picks categories 0-2; β is recovered roughly.
+      f
+        ..setAgent(beta: 5)
+        ..simulateAgent(seed: 4);
+      final r = f.responses!;
+      expect(
+        r.where((v) => v.isFinite).every((v) => v == 0 || v == 1 || v == 2),
+        isTrue,
+      );
+      expect(f.free, contains('beta'));
+      await f.fit();
+      expect(f.error, isNull);
+      final beta = f.result!.estimates.firstWhere((e) => e.param.id == 'beta');
+      expect(beta.truth, 5);
+      expect(beta.truth, inInclusiveRange(beta.lower, beta.upper));
+
+      // Loaded choices must be category indices.
+      expect(
+        () => f.loadResponses(Float64List.fromList(List.filled(300, 3.0)), 'r'),
+        throwsFormatException,
+      );
+
+      // And a recovery.
+      f.setRecoveryAgents(50);
+      await f.recover(seed: 2);
+      expect(f.error, isNull);
+      final rec = f.recovery!;
+      expect(rec.agents + rec.dropped, 50);
+      final b = rec.params.indexWhere((p) => p.id == 'beta');
+      expect(rec.stats[b].r, greaterThan(0.7));
+    },
+  );
 
   testWidgets('vector node presets explain why they can\'t be fitted', (
     tester,

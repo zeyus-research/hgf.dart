@@ -404,9 +404,176 @@ final class BinarySoftmaxReadout extends ResponseModel {
   }
 }
 
+/// Choices among the categories of a categorical node, made with the
+/// probabilities the agent predicts, sharpened by an inverse temperature:
+/// category `k` with probability `pₖ = μ̂ₖ^β / Σⱼ μ̂ⱼ^β`, where `μ̂ₖ` is
+/// the prediction of category `k`'s binary node. With two categories and
+/// `μ̂₂ = 1 − μ̂₁` this is [BinarySoftmaxReadout].
+///
+/// A response is the chosen category's index (`0`, `1`, …; NaN: no
+/// response). Parameter: `inverseTemperature` (default
+/// [inverseTemperature]); `β = 0` chooses at random, large `β` the most
+/// expected category.
+final class CategoricalSoftmaxReadout extends ResponseModel {
+  const CategoricalSoftmaxReadout({
+    this.node = 0,
+    this.inverseTemperature = 1.0,
+  });
+
+  /// The categorical node.
+  final int node;
+
+  /// Default β when it isn't fitted.
+  final double inverseTemperature;
+
+  @override
+  Map<String, double> get parameters => {
+    'inverseTemperature': inverseTemperature,
+  };
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'CategoricalSoftmaxReadout',
+    'node': node,
+    'inverseTemperature': jsonDouble(inverseTemperature),
+  };
+
+  @override
+  void prepare(Network network) {
+    _checkNode(network, node);
+    if (network.kindOf(node) != NodeKind.categoricalState) {
+      throw ArgumentError.value(node, 'node', 'Not a categorical node');
+    }
+  }
+
+  /// `log Σⱼ μ̂ⱼ^β` (stably) and the category count, with the choice
+  /// probabilities in [p] if given.
+  static double _logNormaliser(
+    BatchNetwork network,
+    int element,
+    int node,
+    double beta, [
+    Float64List? p,
+  ]) {
+    final n = network.valueParentCount(node);
+    var top = double.negativeInfinity;
+    for (var k = 0; k < n; k++) {
+      final m = network.get(
+        element,
+        network.valueParent(node, k),
+        NodeField.expectedMean,
+      );
+      final z = beta * math.log(m);
+      if (z > top) top = z;
+    }
+    if (!top.isFinite) return top;
+    var sum = 0.0;
+    for (var k = 0; k < n; k++) {
+      final m = network.get(
+        element,
+        network.valueParent(node, k),
+        NodeField.expectedMean,
+      );
+      final w = math.exp(beta * math.log(m) - top);
+      if (p != null) p[k] = w;
+      sum += w;
+    }
+    if (p != null) {
+      for (var k = 0; k < n; k++) {
+        p[k] /= sum;
+      }
+    }
+    return top + math.log(sum);
+  }
+
+  double _expected(BatchNetwork network, int element, int k) => network.get(
+    element,
+    network.valueParent(node, k),
+    NodeField.expectedMean,
+  );
+
+  @override
+  double surprise(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    Float64List params,
+    int offset,
+  ) {
+    if (response.isNaN) return 0.0;
+    final beta = params[offset];
+    final r = response.toInt();
+    final s =
+        _logNormaliser(network, element, node, beta) -
+        beta * math.log(_expected(network, element, r));
+    return _nanToInf(s);
+  }
+
+  @override
+  bool get supportsGradients => true;
+
+  @override
+  double surprisePartials(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    Float64List params,
+    int offset,
+    ResponsePartials partials,
+  ) {
+    if (response.isNaN) return 0.0;
+    final beta = params[offset];
+    final r = response.toInt();
+    final n = network.valueParentCount(node);
+    final p = Float64List(n);
+    final s =
+        _logNormaliser(network, element, node, beta, p) -
+        beta * math.log(_expected(network, element, r));
+    // S = log Σ μ̂ⱼ^β − β log μ̂ᵣ: ∂S/∂μ̂ₖ = β (pₖ − [k = r]) / μ̂ₖ,
+    // ∂S/∂β = Σ pⱼ log μ̂ⱼ − log μ̂ᵣ.
+    var dBeta = 0.0;
+    for (var k = 0; k < n; k++) {
+      final m = _expected(network, element, k);
+      final indicator = k == r ? 1.0 : 0.0;
+      partials.add(
+        network.valueParent(node, k),
+        NodeField.expectedMean,
+        beta * (p[k] - indicator) / m,
+      );
+      dBeta += (p[k] - indicator) * math.log(m);
+    }
+    partials.addParameter(0, dBeta);
+    return _nanToInf(s);
+  }
+
+  @override
+  double sample(
+    BatchNetwork network,
+    int element,
+    int t,
+    Float64List params,
+    int offset,
+    math.Random rng,
+  ) {
+    final n = network.valueParentCount(node);
+    final p = Float64List(n);
+    final z = _logNormaliser(network, element, node, params[offset], p);
+    if (!z.isFinite) return double.nan;
+    var u = rng.nextDouble();
+    for (var k = 0; k < n - 1; k++) {
+      u -= p[k];
+      if (u < 0) return k.toDouble();
+    }
+    return (n - 1).toDouble();
+  }
+}
+
 /// The surprise of the observations themselves under the network's
 /// predictions, from a parameter-free `ResponseFunction` such as
-/// `TotalGaussianSurprise` or `FirstLevelBinarySurprise`. Fitting with it
+/// `TotalGaussianSurprise`, `FirstLevelBinarySurprise` or
+/// `CategoricalSurprise`. Fitting with it
 /// tunes the perceptual model to the data; subjects need no responses.
 final class ObservationSurprise extends ResponseModel {
   const ObservationSurprise(this.function);
@@ -425,6 +592,7 @@ final class ObservationSurprise extends ResponseModel {
       FirstLevelGaussianSurprise() => 'FirstLevelGaussianSurprise',
       TotalGaussianSurprise() => 'TotalGaussianSurprise',
       FirstLevelBinarySurprise() => 'FirstLevelBinarySurprise',
+      CategoricalSurprise() => 'CategoricalSurprise',
       _ => throw UnsupportedError(
         'Cannot serialise ${function.runtimeType}: name it in '
         'FitCodec.responseFunctions',

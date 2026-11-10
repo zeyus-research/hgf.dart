@@ -13,6 +13,7 @@ import 'fit_card.dart';
 import 'frame_stats.dart';
 import 'panels.dart';
 import 'playback_bar.dart';
+import 'recovery_card.dart';
 import 'settings_panel.dart';
 
 class HomePage extends StatefulWidget {
@@ -256,6 +257,8 @@ class _HomePageState extends State<HomePage>
     DataCard(playground: pg, settings: widget.settings),
     const SizedBox(height: 12),
     FitCard(fitting: fit, onOpenSettings: _openSettings),
+    const SizedBox(height: 12),
+    RecoveryCard(fitting: fit, onOpenSettings: _openSettings),
     const SizedBox(height: 12),
     const AboutCard(),
   ];

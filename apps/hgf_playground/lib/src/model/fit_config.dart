@@ -3,7 +3,8 @@ import 'package:flutter/foundation.dart' show immutable;
 /// Where the fits run.
 enum FitDevice {
   /// Whichever is faster for the job: the CPU, except NUTS with many
-  /// chains ([FitConfig.autoGpuChains]).
+  /// chains ([FitConfig.autoGpuChains]) and large parameter recoveries
+  /// ([FitConfig.autoGpuMapRuns]).
   auto,
 
   /// The CPU (f64), on the worker pool.
@@ -56,6 +57,15 @@ class FitConfig {
   /// - playground, Wasm + WebGPU (binary 3-level, 400 trials): 4 chains
   ///   30 vs 12 s, 64 chains 37 vs 89 s.
   static const int autoGpuChains = 32;
+
+  /// With [FitDevice.auto], a parameter recovery runs on the GPU from this
+  /// many L-BFGS runs on (agents × starts). Measured MAP, one start per
+  /// agent, binary 2-level, 320 trials (`fit_gpu --only map`, RX 7600 XT,
+  /// 8 AOT isolates): 100 agents 22 ms CPU vs 25 ms GPU, 200: 37 vs 31,
+  /// 1000: 180 vs 51. In Chromium each GPU round trip costs ~2.5 ms more
+  /// (~30 per fit), and Wasm workers are ~1.6× slower than AOT, so the
+  /// crossover there is about the same.
+  static const int autoGpuMapRuns = 256;
 
   static const chainChoices = [1, 2, 4, 8, 16, 32, 64, 128, 256];
   static const iterationChoices = [100, 200, 300, 500, 1000, 2000, 4000];

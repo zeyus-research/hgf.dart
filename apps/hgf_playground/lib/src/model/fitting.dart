@@ -7,153 +7,38 @@ import 'package:hgf_fit/hgf_fit.dart';
 import 'package:hgf_widgets/hgf_widgets.dart';
 
 import 'fit_config.dart';
+import 'fit_engine.dart';
+import 'fit_jobs.dart';
 import 'gpu/open_gpu.dart';
 import 'playground.dart';
 import 'presets.dart';
 
-/// What a fit explains.
-enum FitTarget {
-  /// The observations themselves: the parameters under which they are
-  /// least surprising (the perceptual model on its own).
-  observations,
-
-  /// An agent's responses, read out from its beliefs by a response model.
-  responses,
-}
-
-/// How a fit summarises the posterior.
-enum FitMethod {
-  /// The mode (L-BFGS from a few starts) and the Laplace approximation
-  /// around it.
-  map,
-
-  /// Draws from the full posterior (NUTS, [FitConfig.chains] chains),
-  /// started at the mode.
-  nuts,
-}
-
-/// One parameter the fit can estimate.
-class FreeParam {
-  FreeParam({
-    required this.id,
-    required this.symbol,
-    required this.help,
-    required this.target,
-    required this.prior,
-    required this.priorText,
-    this.defaultFree = false,
-  });
-
-  /// Stable id (also the parameter's name in the `HgfModel`).
-  final String id;
-
-  /// Short label, e.g. `ω x₂`.
-  final String symbol;
-  final String help;
-
-  /// What it sets; null for the response model's parameter.
-  final ParameterTarget? target;
-  final Prior prior;
-
-  /// The prior in words, e.g. `N(−4, 2²)`.
-  final String priorText;
-  final bool defaultFree;
-
-  bool get isResponse => target == null;
-}
-
-/// One parameter's estimate.
-class ParamEstimate {
-  ParamEstimate({
-    required this.param,
-    required this.estimate,
-    required this.lower,
-    required this.upper,
-    required this.truth,
-    required this.density,
-    this.draws,
-    this.rhat,
-    this.ess,
-  });
-
-  final FreeParam param;
-
-  /// MAP estimate, or posterior mean (NUTS).
-  final double estimate;
-
-  /// A 95 % interval (Laplace) or the 2.5–97.5 % quantiles (NUTS).
-  final double lower, upper;
-
-  /// The value that generated simulated responses, if known.
-  final double? truth;
-
-  /// Approximate posterior density on the natural scale (Laplace), as a
-  /// function for plotting; null if the Hessian wasn't positive definite.
-  final double Function(double x)? density;
-
-  /// Pooled posterior draws (NUTS).
-  final Float64List? draws;
-  final double? rhat, ess;
-}
-
-/// A finished fit.
-class FitOutcome {
-  FitOutcome({
-    required this.method,
-    required this.target,
-    required this.estimates,
-    required this.millis,
-    required this.where,
-    this.logEvidence,
-    this.converged = true,
-    this.divergences,
-    this.chains,
-    this.note,
-    this.deviceNote,
-  });
-
-  final FitMethod method;
-  final FitTarget target;
-  final List<ParamEstimate> estimates;
-  final int millis;
-
-  /// Where it ran ("4 Wasm workers", "the main thread", …).
-  final String where;
-  final double? logEvidence;
-  final bool converged;
-  final int? divergences;
-
-  /// NUTS chains that ran.
-  final int? chains;
-
-  /// A warning to show with the results.
-  final String? note;
-
-  /// Why the fit didn't run where [FitConfig.device] asked.
-  final String? deviceNote;
-}
+export 'fit_engine.dart' show FitEngine, GpuInfo, spawnPlaygroundWorkers;
+export 'fit_jobs.dart';
 
 /// Parameter estimation for the playground: which parameters are free, the
-/// responses (simulated from an agent, or loaded), and the running or last
-/// fit. Fits run on a [FitWorkers] pool spawned on first use (isolates on
-/// desktop, Web Workers on the web), or, if none can be spawned, on the
-/// calling thread in slices between frames; or on the GPU ([config]).
+/// responses (simulated from an agent, or loaded), the running or last fit,
+/// and parameter recovery. Jobs run on a [FitEngine]: by default a
+/// [LocalFitEngine] on this isolate (a [FitWorkers] pool spawned on first
+/// use, isolates on desktop or Web Workers on the web, and the GPU), or the
+/// given [engine], such as a host isolate (`spawnFitHost`).
 class Fitting extends ChangeNotifier {
   Fitting(
     this.pg, {
+    FitEngine? engine,
     Future<FitWorkers> Function(int? count)? spawnWorkers,
     Future<GpuOpened> Function()? openGpu,
     FitConfig config = const FitConfig(),
-  }) : _spawnWorkers = spawnWorkers ?? spawnPlaygroundWorkers,
-       _openGpu = openGpu ?? _openPlatformGpu,
+  }) : _engine =
+           engine ??
+           LocalFitEngine(spawnWorkers: spawnWorkers, openGpu: openGpu),
        _config = config {
     _sync();
     pg.addListener(_onPlayground);
   }
 
   final Playground pg;
-  final Future<FitWorkers> Function(int? count) _spawnWorkers;
-  final Future<GpuOpened> Function() _openGpu;
+  final FitEngine _engine;
 
   /// The device, pool and sampler settings the next fit uses.
   FitConfig get config => _config;
@@ -195,6 +80,12 @@ class Fitting extends ChangeNotifier {
   Map<String, double>? truth;
 
   bool get binary => pg.preset.input == InputKind.binary;
+
+  bool get categorical => pg.preset.input == InputKind.categorical;
+
+  /// Whether the agent's responses are choices (binary or categorical,
+  /// with an inverse temperature β) rather than continuous reports.
+  bool get choices => binary || categorical;
 
   void setTarget(FitTarget t) {
     if (t == target) return;
@@ -287,6 +178,15 @@ class Fitting extends ChangeNotifier {
     if (binary && values.any((v) => v.isFinite && v != 0 && v != 1)) {
       throw const FormatException('Binary responses must be 0 or 1');
     }
+    final k = pg.nCategories;
+    if (categorical &&
+        values.any(
+          (v) => v.isFinite && (v != v.roundToDouble() || v < 0 || v >= k),
+        )) {
+      throw FormatException(
+        'Categorical responses must be category indices, 0 to ${k - 1}',
+      );
+    }
     truth = null;
     _setResponses(values, name);
   }
@@ -325,23 +225,23 @@ class Fitting extends ChangeNotifier {
 
   bool get running => _job != null;
 
+  /// What is running (null if nothing).
+  FitJob? runningJob;
+
+  /// The last job started (whose [error] it is).
+  FitJob? lastJob;
+
   /// NUTS progress while [running] (null for MAP).
-  SamplingProgress? progress;
+  JobProgress? progress;
 
   /// What the running job is doing.
   String? stage;
 
   Object? _job;
-  FitWorkers? _workers;
-  int? _workersAsked;
-  String _where = '';
 
-  // The GPU, opened on first use (or by [probeGpu]).
-  Future<GpuOpened>? _gpuOpening;
-  GpuRunner? _gpuRunner;
-
-  /// The GPU, once probed: the device (null if there is none) and why not.
-  GpuOpened? gpu;
+  /// The GPU, once probed: its adapter, or why there is none.
+  GpuInfo? gpu;
+  Future<GpuInfo>? _gpuProbe;
 
   /// Whether the next [method] fit runs on the GPU (if there is one).
   bool get wantsGpu => switch (_config.device) {
@@ -352,8 +252,13 @@ class Fitting extends ChangeNotifier {
   };
 
   /// Opens the GPU if that hasn't been tried yet; [gpu] holds the outcome.
-  Future<GpuOpened> probeGpu() => _gpuOpening ??= () async {
-    final g = await _openGpu();
+  Future<GpuInfo> probeGpu() => _gpuProbe ??= () async {
+    GpuInfo g;
+    try {
+      g = await _engine.probeGpu();
+    } catch (e) {
+      g = (adapter: null, reason: '$e');
+    }
     gpu = g;
     notifyListeners();
     return g;
@@ -367,201 +272,69 @@ class Fitting extends ChangeNotifier {
   Future<void> fit() async {
     if (_catchUp()) notifyListeners();
     if (!canFit || running) return;
-    final job = Object();
-    _job = job;
-    error = null;
-    result = null;
-    progress = null;
-    stage = 'Starting workers…';
-    notifyListeners();
-    final sw = Stopwatch()..start();
-    final config = _config;
-    try {
-      final pool = await _pool();
-      if (_job != job) return;
-      String? deviceNote;
-      PassRunner workers = pool;
-      var where = _where;
-      GpuRunner? gpuFitter;
-      if (wantsGpu) {
-        stage = 'Opening the GPU…';
-        notifyListeners();
-        final g = await probeGpu();
-        if (_job != job) return;
-        final device = g.device;
-        if (device == null) {
-          if (config.device == FitDevice.gpu) {
-            deviceNote = 'No GPU (${g.reason}): ran on the CPU.';
-          }
-        } else {
-          gpuFitter = _gpuRunner = device.runner(pool);
-          workers = gpuFitter;
-          where = 'the GPU';
-        }
-      }
-      final gpuPasses0 = gpuFitter?.gpuPasses ?? 0;
-      String whereNow() {
-        final f = gpuFitter;
-        if (f == null || f.gpuPasses > gpuPasses0) return where;
-        // Every pass fell back: the kernel doesn't cover this model.
-        deviceNote ??= f.fallbackReason == null
-            ? null
-            : 'No GPU kernel for this model (${f.fallbackReason}): ran on '
-                  'the CPU.';
-        return _where;
-      }
-
-      final params = [
-        for (final c in offered)
-          if (free.contains(c.id)) c,
-      ];
-      final model = _model(params);
-      final subject = _subject(includeResponses: target == FitTarget.responses);
-      stage = 'Finding the mode (MAP)…';
+    final params = [
+      for (final c in offered)
+        if (free.contains(c.id)) c,
+    ];
+    final outcome = await _run(
+      FitJob.fit,
+      ParameterFitJob(
+        config: _config,
+        gpu: wantsGpu,
+        method: method,
+        target: target,
+        params: params,
+        model: _model(params),
+        subject: _subject(includeResponses: target == FitTarget.responses),
+        truth: truth,
+      ),
+      () => result = null,
+    );
+    if (outcome != null) {
+      result = outcome;
       notifyListeners();
-      final map = await workers.fitMap(
-        model,
-        [subject],
-        restarts: config.restarts,
-        random: math.Random(1),
-      );
-      if (_job != job) return;
-      final best = map.results.single;
-      if (method == FitMethod.map) {
-        stage = 'Laplace approximation…';
-        notifyListeners();
-        final lap = (await workers.laplace(model, map)).results.single;
-        if (_job != job) return;
-        final (lo, hi) = lap.interval();
-        final se = lap.unconstrainedStandardErrors;
-        result = FitOutcome(
-          method: FitMethod.map,
-          target: target,
-          millis: sw.elapsedMilliseconds,
-          where: whereNow(),
-          logEvidence: lap.logEvidence,
-          converged: best.converged,
-          deviceNote: deviceNote,
-          note: !best.negLogPosterior.isFinite
-              ? 'No finite fit: the beliefs diverge everywhere tried.'
-              : !lap.positiveDefinite
-              ? 'The posterior is not curved at the mode (a ridge or a '
-                    'bound): no intervals. Free fewer parameters?'
-              : !best.converged
-              ? 'The optimiser stopped before converging: '
-                    '${best.optimization.message}'
-              : null,
-          estimates: [
-            for (var i = 0; i < params.length; i++)
-              ParamEstimate(
-                param: params[i],
-                estimate: best.x[i],
-                lower: lo[i],
-                upper: hi[i],
-                truth: truth?[params[i].id],
-                density: lap.positiveDefinite
-                    ? _laplaceDensity(
-                        model.parameters[i].transform,
-                        best.y[i],
-                        se[i],
-                      )
-                    : null,
-              ),
-          ],
-        );
-      } else {
-        final p = progress = SamplingProgress();
-        stage =
-            'Sampling (NUTS, ${config.chains} '
-            '${config.chains == 1 ? 'chain' : 'chains'}'
-            '${gpuFitter != null ? ' on the GPU' : ''})…';
-        notifyListeners();
-        final timer = Timer.periodic(
-          const Duration(milliseconds: 100),
-          (_) => notifyListeners(),
-        );
-        final NutsFit nuts;
-        try {
-          nuts = await workers.sampleNuts(
-            model,
-            [subject],
-            sampler: Nuts(
-              targetAccept: config.targetAccept,
-              maxTreeDepth: config.maxTreeDepth,
-            ),
-            chains: config.chains,
-            warmup: config.warmup,
-            draws: config.draws,
-            start: [
-              if (best.negLogPosterior.isFinite) best.x else model.start(),
-            ],
-            jitter: 0.5,
-            progress: p,
-          );
-        } finally {
-          timer.cancel();
+    }
+  }
+
+  /// Runs [job] as [kind] on the engine; its outcome, or null if it failed
+  /// or a newer job or a data change took over.
+  Future<R?> _run<R>(
+    FitJob kind,
+    FitJobSpec<R> job,
+    void Function() clear,
+  ) async {
+    final token = Object();
+    _job = token;
+    runningJob = lastJob = kind;
+    error = null;
+    clear();
+    progress = null;
+    stage = 'Starting…';
+    notifyListeners();
+    // The GPU's adapter for the settings, if this job opens it.
+    if (job.gpu) unawaited(probeGpu());
+    try {
+      final r = await _engine.run(job, (e) {
+        if (_job != token) return;
+        switch (e) {
+          case JobStage(:final text):
+            stage = text;
+          case JobProgress p:
+            progress = p;
         }
-        if (_job != job) return;
-        final draws = nuts.results.single;
-        final summary = draws.summary();
-        final rhatMax = summary.fold(0.0, (m, s) => math.max(m, s.rhat));
-        final essMin = summary.fold(
-          double.infinity,
-          (m, s) => math.min(m, s.essBulk),
-        );
-        result = FitOutcome(
-          method: FitMethod.nuts,
-          target: target,
-          millis: sw.elapsedMilliseconds,
-          where: whereNow(),
-          chains: draws.nChains,
-          deviceNote: deviceNote,
-          divergences: draws.divergences,
-          // draws.converged() would compute the summary again (~0.2 s
-          // at 64 chains × 500 draws).
-          converged:
-              draws.divergences == 0 &&
-              summary.every(
-                (s) => s.rhat <= 1.01 && s.essBulk >= 400 && s.essTail >= 400,
-              ),
-          note: draws.nChains == 0
-              ? 'No chain found a finite starting point.'
-              : draws.divergences > 0
-              ? '${draws.divergences} divergent transitions: the posterior '
-                    'has regions the sampler can\'t explore reliably.'
-              : !(rhatMax <= 1.01 && essMin >= 400)
-              ? 'Not converged yet (R̂ ${rhatMax.toStringAsFixed(3)}, '
-                    'ESS ${essMin.toStringAsFixed(0)}): take the '
-                    'estimates with care.'
-              : null,
-          estimates: [
-            for (var i = 0; i < params.length; i++)
-              () {
-                final all = draws.parameter(i).expand((c) => c).toList()
-                  ..sort();
-                final sorted = Float64List.fromList(all);
-                return ParamEstimate(
-                  param: params[i],
-                  estimate: summary[i].mean,
-                  lower: quantileOf(sorted, 0.025),
-                  upper: quantileOf(sorted, 0.975),
-                  truth: truth?[params[i].id],
-                  density: null,
-                  draws: sorted,
-                  rhat: summary[i].rhat,
-                  ess: summary[i].essBulk,
-                );
-              }(),
-          ],
-        );
-      }
+        notifyListeners();
+      });
+      return _job == token ? r : null;
     } on FitCancelled {
       // A newer job or a data change took over.
+      return null;
     } catch (e) {
-      if (_job == job) error = '$e';
+      if (_job == token) error = '$e';
+      return null;
     } finally {
-      if (_job == job) {
+      if (_job == token) {
         _job = null;
+        runningJob = null;
         stage = null;
         progress = null;
         notifyListeners();
@@ -569,7 +342,7 @@ class Fitting extends ChangeNotifier {
     }
   }
 
-  /// Stop the running fit.
+  /// Stop the running fit or recovery.
   void cancel() {
     if (!running) return;
     _cancel();
@@ -579,10 +352,10 @@ class Fitting extends ChangeNotifier {
   void _cancel() {
     if (_job == null) return;
     _job = null;
+    runningJob = null;
     stage = null;
     progress = null;
-    _workers?.cancel();
-    _gpuRunner?.cancel();
+    _engine.cancel();
   }
 
   /// Set the playground's sliders to the estimates.
@@ -603,33 +376,76 @@ class Fitting extends ChangeNotifier {
     }
   }
 
-  /// The worker pool, (re)spawned when [FitConfig.workers] changed. Only
-  /// called between jobs.
-  Future<FitWorkers> _pool() async {
-    final asked = _config.workers == 0 ? null : _config.workers;
-    final w = _workers;
-    if (w != null && asked == _workersAsked) return w;
-    if (w != null) {
-      _workers = null;
-      _gpuRunner = null;
-      await w.close();
-    }
-    final pool = await _spawnWorkers(asked);
-    _workers = pool;
-    _workersAsked = asked;
-    _where = pool.count == 0
-        ? 'the main thread'
-        : '${pool.count} ${kIsWeb ? (kIsWasm ? 'Wasm workers' : 'JS workers') : 'isolates'}';
-    return pool;
-  }
-
   @override
   void dispose() {
     pg.removeListener(_onPlayground);
     _cancel();
-    gpu?.device?.close();
-    _workers?.close();
+    _engine.close();
     super.dispose();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Parameter recovery
+  // ---------------------------------------------------------------------------
+
+  /// How many agents a recovery simulates and fits.
+  int recoveryAgents = 200;
+
+  static const recoveryAgentChoices = [50, 200, 1000, 2000];
+
+  /// The last recovery, until the network or the data change.
+  RecoveryOutcome? recovery;
+
+  void setRecoveryAgents(int n) {
+    if (n == recoveryAgents) return;
+    recoveryAgents = n;
+    notifyListeners();
+  }
+
+  /// Whether the next recovery runs on the GPU (if there is one).
+  bool get recoveryWantsGpu => switch (_config.device) {
+    FitDevice.cpu => false,
+    FitDevice.gpu => true,
+    FitDevice.auto =>
+      recoveryAgents * (_config.restarts + 1) >= FitConfig.autoGpuMapRuns,
+  };
+
+  /// A recovery fits agents' responses: it needs the response target and
+  /// a free parameter, but no responses of its own.
+  bool get canRecover =>
+      unsupported == null &&
+      target == FitTarget.responses &&
+      free.any((id) => offered.any((c) => c.id == id));
+
+  /// Simulates [recoveryAgents] agents on the playground's observations,
+  /// each with its free parameters drawn from their priors (the others at
+  /// the sliders' values), fits every agent's responses by MAP in one
+  /// batched job, and keeps truth and estimate per agent in [recovery]
+  /// (see [RecoveryJob]).
+  Future<void> recover({int? seed}) async {
+    if (_catchUp()) notifyListeners();
+    if (!canRecover || running) return;
+    final params = [
+      for (final c in offered)
+        if (free.contains(c.id)) c,
+    ];
+    final outcome = await _run(
+      FitJob.recovery,
+      RecoveryJob(
+        config: _config,
+        gpu: recoveryWantsGpu,
+        params: params,
+        model: _model(params),
+        base: _subject(includeResponses: false),
+        agents: recoveryAgents,
+        seed: seed ?? math.Random().nextInt(1 << 30),
+      ),
+      () => recovery = null,
+    );
+    if (outcome != null) {
+      recovery = outcome;
+      notifyListeners();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -663,6 +479,7 @@ class Fitting extends ChangeNotifier {
   void _sync() {
     if (_data != null) _cancel();
     result = null;
+    recovery = null;
     if (!identical(_data, pg.observations) && responses != null) {
       responses = null;
       responsesSource = null;
@@ -681,20 +498,19 @@ class Fitting extends ChangeNotifier {
   void _buildCandidates() {
     final net = pg.network;
     final kinds = {for (var i = 0; i < net.nNodes; i++) net.kindOf(i)};
-    final vector = kinds.where(
-      (k) =>
-          k == NodeKind.efState ||
-          k == NodeKind.categoricalState ||
-          k == NodeKind.dpState,
-    );
-    if (vector.isNotEmpty) {
+    if (kinds.contains(NodeKind.dpState)) {
       unsupported =
           'Fitting runs on the batched engine, which doesn\'t support '
-          '${switch (vector.first) {
-            NodeKind.categoricalState => 'categorical',
-            NodeKind.dpState => 'Dirichlet process',
-            _ => 'exponential-family',
-          }} nodes yet.';
+          'Dirichlet process nodes yet.';
+      candidates = const [];
+      return;
+    }
+    if (kinds.contains(NodeKind.efState)) {
+      // pyhgf scores no observation at a fixed-rate ef-state node (its
+      // node surprise is undefined), so there is nothing to fit to.
+      unsupported =
+          'A fixed-rate exponential-family node defines no surprise for its '
+          'observations, so there is nothing to fit its learning rate to.';
       candidates = const [];
       return;
     }
@@ -758,7 +574,7 @@ class Fitting extends ChangeNotifier {
       }
     }
     out.add(
-      binary
+      choices
           ? FreeParam(
               id: 'beta',
               symbol: 'β',
@@ -803,11 +619,18 @@ class Fitting extends ChangeNotifier {
       return ObservationSurprise(
         binary
             ? const FirstLevelBinarySurprise()
+            : categorical
+            ? const CategoricalSurprise()
             : const TotalGaussianSurprise(),
       );
     }
     return binary
         ? BinarySoftmaxReadout(inverseTemperature: agentBeta)
+        : categorical
+        ? CategoricalSoftmaxReadout(
+            node: pg.network.inputIdxs.single,
+            inverseTemperature: agentBeta,
+          )
         : GaussianReadout(precision: 1 / (agentNoise * agentNoise));
   }
 
@@ -830,10 +653,10 @@ class Fitting extends ChangeNotifier {
     );
   }
 
-  // Categorical inputs (one-hot) never get here: see [unsupported].
   Subject _subject({required bool includeResponses}) {
     return Subject(
-      inputs: pg.observations,
+      // One-hot rows for a categorical input.
+      inputs: pg.networkInput,
       observed: pg.observed,
       responses: includeResponses ? responses : null,
     );
@@ -860,17 +683,6 @@ class Fitting extends ChangeNotifier {
       );
 }
 
-/// The Laplace posterior `y ~ N(ŷ, s²)` as a density on the natural scale.
-double Function(double) _laplaceDensity(Transform t, double yHat, double s) {
-  final c = 1 / (s * math.sqrt(2 * math.pi));
-  return (x) {
-    final y = t.toUnconstrained(x);
-    if (!y.isFinite) return 0;
-    final z = (y - yHat) / s;
-    return c * math.exp(-0.5 * z * z - t.logAbsJacobian(y));
-  };
-}
-
 /// A log-normal prior in words: its median and central 95 %.
 String _logNormalText(double mu, double sigma) =>
     'log-normal, median ${_n(math.exp(mu))} '
@@ -882,27 +694,3 @@ String _n(double v) => v.abs() >= 1e4 || (v != 0 && v.abs() < 1e-2)
     : v == v.roundToDouble()
     ? v.toStringAsFixed(0)
     : v.toStringAsFixed(2);
-
-Future<GpuOpened> _openPlatformGpu() => openGpu();
-
-/// The pool the playground fits on (default: one worker per logical
-/// processor): Web Workers running the compiled
-/// `fit_worker` next to the page (Wasm or JS, like the page), isolates on
-/// desktop. If the workers can't start (e.g. the worker wasn't built), the
-/// fits run on the main thread, a slice per frame.
-Future<FitWorkers> spawnPlaygroundWorkers(int? count) async {
-  try {
-    return await FitWorkers.spawn(
-      count: count,
-      // A single subject's passes are small: split none of them.
-      minSliceTrials: 1 << 30,
-      script: kIsWasm
-          ? const FitWorkerScript.wasm('fit_worker.wasm')
-          : const FitWorkerScript.js('fit_worker.js'),
-    );
-  } catch (e) {
-    debugPrint('No fit workers ($e); fitting on the main thread.');
-    return await FitWorkers.spawn(count: 0)
-      ..yieldInterval = const Duration(milliseconds: 12);
-  }
-}

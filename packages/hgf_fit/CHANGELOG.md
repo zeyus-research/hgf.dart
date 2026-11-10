@@ -1,5 +1,18 @@
 ## Unreleased
 
+- `Lbfgs` and `NelderMead` run as explicit state machines instead of
+  `sync*` bodies, with bit-identical iterates. On the JIT VM (`dart run`,
+  `dart test`, Flutter debug) every live `sync*` run compiled its own
+  on-stack-replacement copy of the loop once the function got hot,
+  10–25 ms each: `fitMap` on 200 subjects took 4.2 s instead of 0.14 s.
+  AOT, dart2wasm and dart2js were unaffected.
+- Categorical models: `CategoricalSoftmaxReadout` (choices among a
+  categorical node's categories, `pₖ ∝ μ̂ₖ^β`, with exact gradients and
+  sampling) and `ObservationSurprise(CategoricalSurprise())`; both in
+  `FitCodec`.
+- `Subject.inputs` has `network.nInputColumns` columns per trial (one-hot
+  rows for categorical inputs); `observed` one flag per trial and input.
+
 - `FitWorkers.defaultCount`: the logical processors `spawn` uses by
   default (`Platform.numberOfProcessors` / `navigator.hardwareConcurrency`).
 

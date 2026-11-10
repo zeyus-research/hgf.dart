@@ -1,5 +1,21 @@
 ## Unreleased
 
+- `BatchNetwork` runs ef-state and categorical-state nodes (batched kernels
+  in `batch/batch_vectors.dart`, a per-element vector side store
+  `[offset][element]`, multi-column inputs; `getVector`). Each element
+  matches `Network` bit for bit on the 11 ef-state and 7 categorical
+  fixtures (VM, dart2js, dart2wasm, `-O4`), trial by trial and per
+  element. With tangents, exact gradients through them match finite
+  differences on the 7 categorical and 7 HGF-learning ef-state fixtures.
+  dp-state nodes are still refused.
+- `CategoricalSurprise`: the surprise of the observations at categorical
+  inputs (the node's `surprise`, `Σ binarySurprise(xₖ, μ̂ₖ)` over its
+  categories), batched and differentiable.
+- `BatchNetwork.valueParentCount` / `valueParent`: a node's value parents
+  without allocating (for response functions).
+- `BatchNetwork` data rows are `nInputColumns` wide (the observed flags
+  stay one per input node), as for `Network`.
+
 - `CouplingFn.tanh` uses Cephes' scheme (a rational approximation below
   0.625, `1 − 2/(e^{2|x|}+1)` above): within 1.3 ulp of mpmath (was 4.5) and
   1.8× faster (one exp instead of an exp and a log).

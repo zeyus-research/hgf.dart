@@ -11,9 +11,12 @@ import 'response_model.dart';
 /// response models that score behaviour, the subject's responses.
 final class Subject {
   /// [inputs] is laid out as for `Network.inputData` (row-major
-  /// `nTime x nInputs`); [observed] has the same shape (`0` marks a missing
-  /// observation); [timeSteps] has one entry per trial; [responses] has at
-  /// least one per trial (NaN marks a missed response).
+  /// `nTime x nInputColumns`: one column per input node, `dimension` for an
+  /// ef-state input and one per category for a categorical one);
+  /// [observed] has one flag per trial and input node (`0` marks a missing
+  /// observation; the shape of [inputs] when every input is scalar);
+  /// [timeSteps] has one entry per trial; [responses] has at least one per
+  /// trial (NaN marks a missed response).
   Subject({
     required this.inputs,
     this.responses,
@@ -426,21 +429,22 @@ final class HgfModel {
       flat.setRange(s * k, (s + 1) * k, x[s]);
     }
     final out = <Float64List>[
-      for (final s in subjects) Float64List(s.inputs.length ~/ _nInputs),
+      for (final s in subjects) Float64List(s.inputs.length ~/ _nColumns),
     ];
     for (final g in _group(subjects, subjectOf, needResponses: false)) {
       final b = g.elements.length;
       final batch = _batch(b);
       final (params, _) = _applyParameters(batch, g.elements, flat);
       final (data, observed, perElement) = _data(subjects, subjectOf, g);
-      final nIn = _nInputs, width = nIn * (perElement ? b : 1);
+      final per = perElement ? b : 1;
+      final width = _nColumns * per, flags = _nInputs * per;
       final row = Float64List(width);
-      final rowObs = observed == null ? null : Float64List(width);
+      final rowObs = observed == null ? null : Float64List(flags);
       batch.reset();
       final p = _responseNames.length;
       for (var t = 0; t < g.nTime; t++) {
         row.setRange(0, width, data, t * width);
-        rowObs?.setRange(0, width, observed!, t * width);
+        rowObs?.setRange(0, flags, observed!, t * flags);
         batch.step(
           row,
           observed: rowObs,
@@ -462,7 +466,11 @@ final class HgfModel {
     return out;
   }
 
+  /// Input nodes (observed flags per trial).
   int get _nInputs => network.inputIdxs.length;
+
+  /// Data columns per trial.
+  int get _nColumns => network.nInputColumns;
 
   BatchNetwork _batch(int b, {bool tangents = false}) {
     final key = (b, tangents);
@@ -567,18 +575,23 @@ final class HgfModel {
           identical(s.observed, first.observed);
     });
     if (shared) return (first.inputs, first.observed, false);
-    final b = g.elements.length, nIn = _nInputs, n = g.nTime * nIn;
+    final b = g.elements.length;
+    final n = g.nTime * _nColumns, nObs = g.nTime * _nInputs;
     final anyObserved = g.elements.any(
       (e) => subjects[subjectOf[e]].observed != null,
     );
     final data = Float64List(n * b);
-    final observed = anyObserved ? Float64List(n * b) : null;
+    final observed = anyObserved ? Float64List(nObs * b) : null;
     for (var j = 0; j < b; j++) {
       final s = subjects[subjectOf[g.elements[j]]];
       final u = s.inputs, o = s.observed;
       for (var r = 0; r < n; r++) {
         data[r * b + j] = u[r];
-        if (observed != null) observed[r * b + j] = o == null ? 1.0 : o[r];
+      }
+      if (observed != null) {
+        for (var r = 0; r < nObs; r++) {
+          observed[r * b + j] = o == null ? 1.0 : o[r];
+        }
       }
     }
     return (data, observed, true);
@@ -590,7 +603,7 @@ final class HgfModel {
     Int32List subjectOf, {
     bool needResponses = true,
   }) {
-    final nIn = _nInputs;
+    final nCols = _nColumns;
     final checked = <int>{};
     final groups = <_Group>[];
     for (var e = 0; e < subjectOf.length; e++) {
@@ -599,8 +612,8 @@ final class HgfModel {
         throw RangeError.index(si, subjects, 'subjectOf[$e]');
       }
       final s = subjects[si];
-      if (checked.add(si)) _validate(s, nIn, needResponses);
-      final nTime = s.inputs.length ~/ nIn;
+      if (checked.add(si)) _validate(s, nCols, needResponses);
+      final nTime = s.inputs.length ~/ nCols;
       _Group? g;
       for (final c in groups) {
         if (c.nTime == nTime && _sameSteps(c.timeSteps, s.timeSteps)) {
@@ -613,15 +626,18 @@ final class HgfModel {
     return groups;
   }
 
-  void _validate(Subject s, int nIn, bool needResponses) {
-    if (s.inputs.length % nIn != 0) {
+  void _validate(Subject s, int nCols, bool needResponses) {
+    if (s.inputs.length % nCols != 0) {
       throw ArgumentError(
-        '$s: ${s.inputs.length} inputs is not a multiple of $nIn input nodes',
+        '$s: ${s.inputs.length} inputs is not a multiple of $nCols input '
+        'columns',
       );
     }
-    final nTime = s.inputs.length ~/ nIn;
-    if (s.observed case final o? when o.length != s.inputs.length) {
-      throw ArgumentError('$s: observed must have the shape of inputs');
+    final nTime = s.inputs.length ~/ nCols;
+    if (s.observed case final o? when o.length != nTime * _nInputs) {
+      throw ArgumentError(
+        '$s: observed must have one flag per trial and input node',
+      );
     }
     if (s.timeSteps case final ts? when ts.length != nTime) {
       throw ArgumentError('$s: timeSteps must have one entry per trial');

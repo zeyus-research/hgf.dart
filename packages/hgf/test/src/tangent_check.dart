@@ -160,13 +160,16 @@ bool _same(double a, double b) => a == b || (a.isNaN && b.isNaN);
   final spec = NetworkSpec.fromJson(fixture['spec'] as Map<String, Object?>);
   final template = spec.build(couplings: testCouplings)..build();
   for (var i = 0; i < template.nNodes; i++) {
-    final kind = template.kindOf(i);
-    if (kind != NodeKind.continuousState &&
-        kind != NodeKind.binaryState &&
-        kind != NodeKind.constantState) {
-      return null;
-    }
+    if (template.kindOf(i) == NodeKind.dpState) return null;
   }
+  // Nothing to differentiate in a lone (fixed-rate ef-state) node.
+  if (!List.generate(
+    template.nNodes,
+    template.kindOf,
+  ).contains(NodeKind.continuousState)) {
+    return null;
+  }
+  final nIn = template.inputIdxs.length, nCols = template.nInputColumns;
   var data = flatten(fixture['inputs']);
   var observed = fixture['observed'] == null
       ? null
@@ -175,9 +178,8 @@ bool _same(double a, double b) => a == b || (a.isNaN && b.isNaN);
       ? null
       : Float64List.fromList(series(fixture['time_steps']));
   if (maxTrials != null) {
-    final nIn = template.inputIdxs.length;
-    if (maxTrials * nIn < data.length) {
-      data = Float64List.sublistView(data, 0, maxTrials * nIn);
+    if (maxTrials * nCols < data.length) {
+      data = Float64List.sublistView(data, 0, maxTrials * nCols);
       if (observed != null) {
         observed = Float64List.sublistView(observed, 0, maxTrials * nIn);
       }
@@ -186,11 +188,12 @@ bool _same(double a, double b) => a == b || (a.isNaN && b.isNaN);
       }
     }
   }
-  final response =
-      template.kindOf(template.inputIdxs.first) == NodeKind.binaryState
-      ? const FirstLevelBinarySurprise() as ResponseFunction
-      : const TotalGaussianSurprise();
-  final nTime = data.length ~/ template.inputIdxs.length;
+  final response = switch (template.kindOf(template.inputIdxs.first)) {
+    NodeKind.binaryState => const FirstLevelBinarySurprise(),
+    NodeKind.categoricalState => const CategoricalSurprise(),
+    _ => const TotalGaussianSurprise() as ResponseFunction,
+  };
+  final nTime = data.length ~/ nCols;
 
   final dirs = _directions(template);
   final k = dirs.length;

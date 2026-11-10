@@ -72,17 +72,12 @@ List<String> batchMismatches(Map<String, Object?> fixture) {
       : Float64List.fromList(series(fixture['time_steps']));
 
   final template = build();
-  final unbatched =
-      {
-        NodeKind.efState,
-        NodeKind.categoricalState,
-        NodeKind.dpState,
-      }.intersection({
-        for (var i = 0; i < template.nNodes; i++) template.kindOf(i),
-      });
+  final unbatched = {NodeKind.dpState}.intersection({
+    for (var i = 0; i < template.nNodes; i++) template.kindOf(i),
+  });
   if (unbatched.isNotEmpty) {
-    // No batched kernels for the vector-valued kinds yet: the batch must
-    // refuse the network.
+    // No batched kernels for dp-state nodes yet: the batch must refuse the
+    // network.
     try {
       BatchNetwork(template, batchElements);
       return ['$name: BatchNetwork accepted a network with $unbatched'];
@@ -115,14 +110,50 @@ List<String> batchMismatches(Map<String, Object?> fixture) {
   batch.reset();
 
   final failures = <String>[];
+  // Data rows have a column per input, `dimension` for vector inputs;
+  // observed rows one flag per input.
   final nIn = template.inputIdxs.length;
-  final nTime = data.length ~/ nIn;
+  bool isVector(int i) =>
+      template.kindOf(i) == NodeKind.efState ||
+      template.kindOf(i) == NodeKind.categoricalState;
+  final dims = [
+    for (final i in template.inputIdxs)
+      isVector(i) ? template.vectorLength(i, VectorField.mean) : 1,
+  ];
+  final nCols = dims.fold(0, (a, d) => a + d);
+  final nTime = data.length ~/ nCols;
   final n = template.nNodes;
+  const vectorFields = [
+    VectorField.mean,
+    VectorField.xis,
+    VectorField.observationSs,
+    VectorField.alpha,
+  ];
+
+  /// The first field of node [i] where element [e] differs, or null.
+  String? differs(Network net, int e, int i) {
+    for (final f in NodeField.values) {
+      final want = net.get(i, f), got = batch.get(e, i, f);
+      if (!_same(want, got)) {
+        return '${f.name}: Network $want, BatchNetwork $got';
+      }
+    }
+    for (final f in vectorFields) {
+      final want = net.getVector(i, f), got = batch.getVector(e, i, f);
+      if (want.length != got.length) return '${f.name} length';
+      for (var j = 0; j < want.length; j++) {
+        if (!_same(want[j], got[j])) {
+          return '${f.name}[$j]: Network ${want[j]}, BatchNetwork ${got[j]}';
+        }
+      }
+    }
+    return null;
+  }
 
   // Trial by trial.
   outer:
   for (var t = 0; t < nTime; t++) {
-    final obs = Float64List.sublistView(data, t * nIn, (t + 1) * nIn);
+    final obs = Float64List.sublistView(data, t * nCols, (t + 1) * nCols);
     final flags = observed == null
         ? null
         : Float64List.sublistView(observed, t * nIn, (t + 1) * nIn);
@@ -131,25 +162,29 @@ List<String> batchMismatches(Map<String, Object?> fixture) {
     for (var e = 0; e < batchElements; e++) {
       nets[e].step(obs, observed: flags, timeStep: dt);
       for (var i = 0; i < n; i++) {
-        for (final f in NodeField.values) {
-          final want = nets[e].get(i, f), got = batch.get(e, i, f);
-          if (!_same(want, got)) {
-            failures.add(
-              '$name step: t=$t element $e node $i ${f.name}: '
-              'Network $want, BatchNetwork $got',
-            );
-            break outer;
-          }
+        if (differs(nets[e], e, i) case final d?) {
+          failures.add('$name step: t=$t element $e node $i $d');
+          break outer;
         }
       }
     }
   }
 
   // Whole series in blocks, with a response model.
-  final response =
-      template.kindOf(template.inputIdxs.first) == NodeKind.binaryState
-      ? const FirstLevelBinarySurprise() as ResponseFunction
-      : const TotalGaussianSurprise();
+  final firstInput = template.kindOf(template.inputIdxs.first);
+  final response = switch (firstInput) {
+    NodeKind.binaryState => const FirstLevelBinarySurprise(),
+    NodeKind.categoricalState => const CategoricalSurprise(),
+    _ when n < 2 =>
+      // A lone node (a fixed-rate ef-state): no surprise is defined, so
+      // sum its state instead.
+      ResponseFunction.fn(
+        (net, t) => net.get(0, NodeField.mean) + net.get(0, NodeField.nus),
+        batch: (net, t, e) =>
+            net.get(e, 0, NodeField.mean) + net.get(e, 0, NodeField.nus),
+      ),
+    _ => const TotalGaussianSurprise() as ResponseFunction,
+  };
   final perTrial = Float64List(nTime * batchElements);
   final totals = batch.surprise(
     data,
@@ -184,12 +219,8 @@ List<String> batchMismatches(Map<String, Object?> fixture) {
         }
       }
       for (var i = 0; i < n; i++) {
-        for (final f in NodeField.values) {
-          if (!_same(nets[e].get(i, f), batch.get(e, i, f))) {
-            failures.add(
-              '$name $what: final state element $e node $i ${f.name}',
-            );
-          }
+        if (differs(nets[e], e, i) case final d?) {
+          failures.add('$name $what: final state element $e node $i $d');
         }
       }
     }
@@ -197,19 +228,22 @@ List<String> batchMismatches(Map<String, Object?> fixture) {
 
   compareRuns('shared data', (_) => data, (_) => observed);
 
-  // Each element its own series: continuous inputs shifted by 0.01 e, and
-  // input k of element e also missing where (t + 2e + k) % 7 == 0, so the
-  // elements differ in which children they observe.
-  final binary = [
-    for (final i in template.inputIdxs)
-      template.kindOf(i) == NodeKind.binaryState,
+  // Each element its own series: continuous (and ef-state) inputs shifted
+  // by 0.01 e, and input k of element e also missing where
+  // (t + 2e + k) % 7 == 0, so the elements differ in which children they
+  // observe.
+  final shift = [
+    for (final (k, i) in template.inputIdxs.indexed)
+      for (var j = 0; j < dims[k]; j++)
+        template.kindOf(i) == NodeKind.continuousState ||
+            template.kindOf(i) == NodeKind.efState,
   ];
   final own = [
     for (var e = 0; e < batchElements; e++)
       Float64List.fromList([
         for (var t = 0; t < nTime; t++)
-          for (var k = 0; k < nIn; k++)
-            data[t * nIn + k] + (binary[k] ? 0.0 : 0.01 * e),
+          for (var c = 0; c < nCols; c++)
+            data[t * nCols + c] + (shift[c] ? 0.01 * e : 0.0),
       ]),
   ];
   final ownObserved = [
@@ -223,8 +257,9 @@ List<String> batchMismatches(Map<String, Object?> fixture) {
       ]),
   ];
   Float64List interleave(List<Float64List> perElement) {
-    final out = Float64List(nTime * nIn * batchElements);
-    for (var r = 0; r < nTime * nIn; r++) {
+    final width = perElement.first.length;
+    final out = Float64List(width * batchElements);
+    for (var r = 0; r < width; r++) {
       for (var e = 0; e < batchElements; e++) {
         out[r * batchElements + e] = perElement[e][r];
       }

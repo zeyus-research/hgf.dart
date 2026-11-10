@@ -418,12 +418,12 @@ void main() {
     });
   });
 
-  group('not supported yet', () {
-    test('BatchNetwork', () {
-      final net = Network()..addCategoricalState(nCategories: 2);
-      expect(() => BatchNetwork(net, 4), throwsUnsupportedError);
-    });
+  test('BatchNetwork accepts categorical nodes (parity: batch_test)', () {
+    final net = Network()..addCategoricalState(nCategories: 2);
+    expect(BatchNetwork(net, 4).batchSize, 4);
+  });
 
+  group('not supported yet', () {
     test('sample()', () {
       final net = Network()..addCategoricalState(nCategories: 2);
       expect(() => net.sample(5), throwsUnsupportedError);

@@ -124,7 +124,7 @@ final class Pass extends Step {
   List<int> partition(int parts, int minCost) {
     final n = length;
     if (n == 0) return const [0];
-    final nIn = model.network.inputIdxs.length;
+    final nIn = model.network.nInputColumns;
     final cost = Float64List(n + 1);
     for (var e = 0; e < n; e++) {
       cost[e + 1] = cost[e] + subjects[subjectOf[e]].inputs.length / nIn;

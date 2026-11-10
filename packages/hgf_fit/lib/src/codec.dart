@@ -177,10 +177,15 @@ final class FitCodec {
         node: (json['node'] as num).toInt(),
         inverseTemperature: readJsonDouble(json['inverseTemperature']),
       ),
+      'CategoricalSoftmaxReadout' => CategoricalSoftmaxReadout(
+        node: (json['node'] as num).toInt(),
+        inverseTemperature: readJsonDouble(json['inverseTemperature']),
+      ),
       'ObservationSurprise' => ObservationSurprise(switch (json['function']) {
         'FirstLevelGaussianSurprise' => const FirstLevelGaussianSurprise(),
         'TotalGaussianSurprise' => const TotalGaussianSurprise(),
         'FirstLevelBinarySurprise' => const FirstLevelBinarySurprise(),
+        'CategoricalSurprise' => const CategoricalSurprise(),
         final name =>
           responseFunctions[name] ??
               (throw ArgumentError(

@@ -239,8 +239,8 @@ class _GpuStatus extends StatelessWidget {
             theme.colorScheme.onSurfaceVariant,
             'Looking for a GPU…',
           )
-        : g.device != null
-        ? (Icons.memory, theme.colorScheme.primary, g.device!.description)
+        : g.adapter != null
+        ? (Icons.memory, theme.colorScheme.primary, g.adapter!)
         : (Icons.block, theme.colorScheme.error, 'No GPU: ${g.reason}');
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,

@@ -282,6 +282,97 @@ void main() {
       );
     });
 
+    test('categorical (3 categories): choices and observation surprise', () {
+      // Nodes: 0 categorical, 1-3 binary, 4-6 their logits, 7 the shared
+      // volatility parent.
+      Network net() => Network()
+        ..addCategoricalState(nCategories: 3, volatilityTonicVolatility: -6);
+      // Drifting category probabilities; one-hot rows, a few missing.
+      final rng = math.Random(9);
+      const nTime = 160;
+      final picks = [
+        for (var t = 0; t < nTime; t++)
+          () {
+            final likely = (t ~/ 40) % 3;
+            final r = rng.nextDouble();
+            return r < 0.7 ? likely : (likely + 1 + (r < 0.85 ? 0 : 1)) % 3;
+          }(),
+      ];
+      final u = Float64List.fromList([
+        for (final k in picks)
+          for (var c = 0; c < 3; c++) c == k ? 1.0 : 0.0,
+      ]);
+      final observed = Float64List.fromList([
+        for (var t = 0; t < nTime; t++) t % 37 == 5 ? 0.0 : 1.0,
+      ]);
+      final logits = Parameter(
+        'omega_logits',
+        targets: [
+          for (final i in [4, 5, 6]) NodeTarget(i, NodeField.tonicVolatility),
+        ],
+        prior: const Normal(-2, 2),
+      );
+      final volatility = Parameter.node(
+        'omega_vol',
+        7,
+        NodeField.tonicVolatility,
+        prior: const Normal(-6, 2),
+      );
+      final choices = HgfModel(
+        network: net(),
+        response: const CategoricalSoftmaxReadout(),
+        parameters: [
+          logits,
+          volatility,
+          Parameter.response(
+            'inverseTemperature',
+            prior: const LogNormal(0.7, 1),
+          ),
+        ],
+      );
+      expect(choices.hasExactGradients, isTrue);
+      final r = choices
+          .simulate(
+            [Subject(inputs: u)],
+            [
+              [-2.0, -6.0, 3.0],
+            ],
+            math.Random(2),
+          )
+          .single;
+      // Choices are category indices; a sharp agent mostly picks the most
+      // expected one.
+      expect(r.every((v) => v == 0 || v == 1 || v == 2), isTrue);
+      final rMissed = Float64List.fromList(r)..[7] = double.nan;
+      _checkGradients(
+        choices,
+        [
+          Subject(inputs: u, responses: r),
+          Subject(inputs: u, responses: rMissed, observed: observed),
+        ],
+        // Not ω ≈ −1: the gradient there is ~3e3 and so curved that the
+        // h = 1e-4 differences are off by 1.4e-6 (relative; at h = 1e-5
+        // they match the exact gradient to 1e-10).
+        [
+          [-2.0, -6.0, 3.0],
+          [-1.5, -5.0, 0.7],
+        ],
+      );
+      final perceptual = HgfModel(
+        network: net(),
+        response: const ObservationSurprise(CategoricalSurprise()),
+        parameters: [logits, volatility],
+      );
+      _checkGradients(
+        perceptual,
+        [Subject(inputs: u)],
+        [
+          [-2.0, -6.0],
+          [-3.0, -4.5],
+        ],
+      );
+    });
+
     test('a parameter whose target a later one overwrites gets only its '
         'prior gradient', () {
       final model = HgfModel(

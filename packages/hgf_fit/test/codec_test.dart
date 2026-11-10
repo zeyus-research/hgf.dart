@@ -161,6 +161,52 @@ void main() {
     );
   });
 
+  test('categorical models: choices and observation surprise', () {
+    final picks = [
+      for (var t = 0; t < 90; t++) (t ~/ 30 + (t % 7 == 0 ? 1 : 0)) % 3,
+    ];
+    final u = Float64List.fromList([
+      for (final k in picks)
+        for (var c = 0; c < 3; c++) c == k ? 1.0 : 0.0,
+    ]);
+    final parameters = [
+      Parameter.node(
+        'omega_vol',
+        7,
+        NodeField.tonicVolatility,
+        prior: const Normal(-6, 2),
+      ),
+    ];
+    for (final response in <ResponseModel>[
+      const CategoricalSoftmaxReadout(inverseTemperature: 2),
+      const ObservationSurprise(CategoricalSurprise()),
+    ]) {
+      final model = HgfModel(
+        network: Network()..addCategoricalState(nCategories: 3),
+        response: response,
+        parameters: [
+          ...parameters,
+          if (response is CategoricalSoftmaxReadout)
+            Parameter.response(
+              'beta',
+              responseName: 'inverseTemperature',
+              prior: const LogNormal(0.7, 1),
+            ),
+        ],
+      );
+      final copy = _roundTrip(model);
+      expect(copy.response.toJson(), response.toJson());
+      _sameObjective(model, copy, [
+        Subject(
+          inputs: u,
+          responses: Float64List.fromList([
+            for (final k in picks) (k + 1) % 3 == 0 ? double.nan : k.toDouble(),
+          ]),
+        ),
+      ]);
+    }
+  });
+
   test('continuous model with a Gaussian readout and couplings', () {
     final model = HgfModel(
       network: Network(volatilityUpdates: VolatilityUpdates.eHGF)

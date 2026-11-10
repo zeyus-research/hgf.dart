@@ -109,7 +109,7 @@ class FitCard extends StatelessWidget {
         ),
         _configRow(context),
         _runRow(context),
-        if (f.error != null)
+        if (f.error != null && f.lastJob == FitJob.fit)
           Padding(
             padding: const EdgeInsets.only(top: 6),
             child: Text(
@@ -133,23 +133,27 @@ class FitCard extends StatelessWidget {
             ? 'Recover an agent\'s parameters from its choices: each '
                   'trial it predicts outcome 1 with the probability μ̂ of '
                   'x₀, sharpened by β.'
+            : f.categorical
+            ? 'Recover an agent\'s parameters from its choices: each '
+                  'trial it picks category k with probability ∝ μ̂ₖ^β, '
+                  'μ̂ₖ what it predicts for category k.'
             : 'Recover an agent\'s parameters from its responses: each '
                   'trial it reports its prediction μ̂ of x₀, plus noise.',
         style: small,
       ),
       LabeledSlider(
-        label: f.binary ? 'agent β' : 'agent noise sd',
-        help: f.binary
+        label: f.choices ? 'agent β' : 'agent noise sd',
+        help: f.choices
             ? 'The simulated agent\'s inverse temperature.'
             : 'The standard deviation of the simulated agent\'s responses '
                   'around its prediction.',
-        value: math.log(f.binary ? f.agentBeta : f.agentNoise) / math.ln10,
-        min: f.binary ? -1 : -2.5,
-        max: f.binary ? 1.5 : 0,
-        display: fmt(f.binary ? f.agentBeta : f.agentNoise),
+        value: math.log(f.choices ? f.agentBeta : f.agentNoise) / math.ln10,
+        min: f.choices ? -1 : -2.5,
+        max: f.choices ? 1.5 : 0,
+        display: fmt(f.choices ? f.agentBeta : f.agentNoise),
         onChanged: (v) {
           final x = math.pow(10, v).toDouble();
-          f.binary ? f.setAgent(beta: x) : f.setAgent(noise: x);
+          f.choices ? f.setAgent(beta: x) : f.setAgent(noise: x);
         },
       ),
       Row(
@@ -215,7 +219,7 @@ class FitCard extends StatelessWidget {
               '(${c.warmup} + ${c.draws})';
     final where = !f.wantsGpu
         ? 'CPU'
-        : f.gpu != null && f.gpu!.device == null
+        : f.gpu != null && f.gpu!.adapter == null
         ? 'CPU (no GPU)'
         : 'GPU';
     return Row(
@@ -233,18 +237,20 @@ class FitCard extends StatelessWidget {
   Widget _runRow(BuildContext context) {
     final f = fitting;
     final theme = Theme.of(context);
-    if (!f.running) {
+    if (f.runningJob != FitJob.fit) {
       return Row(
         children: [
           FilledButton.icon(
-            onPressed: f.canFit ? f.fit : null,
+            onPressed: f.canFit && !f.running ? f.fit : null,
             icon: const Icon(Icons.play_arrow, size: 18),
             label: const Text('Fit'),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Text(
-              f.free.isEmpty
+              f.running
+                  ? 'A recovery is running.'
+                  : f.free.isEmpty
                   ? 'Free at least one parameter.'
                   : f.target == FitTarget.responses && f.responses == null
                   ? 'Simulate or load responses first.'

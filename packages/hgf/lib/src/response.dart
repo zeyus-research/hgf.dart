@@ -321,6 +321,71 @@ final class FirstLevelBinarySurprise extends ResponseFunction {
   }
 }
 
+/// The surprise of the observations at the categorical input nodes: for
+/// each, `Σ binarySurprise(xₖ, μ̂ₖ)` over its categories, the indicator
+/// `xₖ` under the probability its binary node predicted (the node's
+/// [NodeField.surprise], as pyhgf computes it in the categorical posterior).
+/// Other input nodes are ignored.
+final class CategoricalSurprise extends ResponseFunction {
+  const CategoricalSurprise();
+
+  @override
+  void prepare(Network network, int nTime) {
+    if (!network.inputIdxs.any(
+      (i) => network.kindOf(i) == NodeKind.categoricalState,
+    )) {
+      throw ArgumentError('CategoricalSurprise needs a categorical input');
+    }
+  }
+
+  @override
+  double surprise(Network network, int t) {
+    var s = 0.0;
+    for (final i in network.inputIdxs) {
+      if (network.kindOf(i) != NodeKind.categoricalState) continue;
+      s += network.get(i, NodeField.surprise);
+    }
+    return _nanToInf(s);
+  }
+
+  @override
+  double batchSurprise(BatchNetwork network, int t, int element) {
+    var s = 0.0;
+    for (final i in network.inputIdxs) {
+      if (network.kindOf(i) != NodeKind.categoricalState) continue;
+      s += network.get(element, i, NodeField.surprise);
+    }
+    return _nanToInf(s);
+  }
+
+  @override
+  bool get supportsGradients => true;
+
+  @override
+  double batchSurprisePartials(
+    BatchNetwork network,
+    int t,
+    int element,
+    SurprisePartials partials,
+  ) {
+    var s = 0.0;
+    for (final i in network.inputIdxs) {
+      if (network.kindOf(i) != NodeKind.categoricalState) continue;
+      // The node's surprise, summed as its posterior step sums it.
+      var node = 0.0;
+      for (var k = 0, n = network.valueParentCount(i); k < n; k++) {
+        final b = network.valueParent(i, k);
+        final x = network.get(element, b, NodeField.mean);
+        final m = network.get(element, b, NodeField.expectedMean);
+        node += binarySurprise(x, m);
+        partials.add(b, NodeField.expectedMean, binarySurpriseDerivative(x, m));
+      }
+      s += node;
+    }
+    return _nanToInf(s);
+  }
+}
+
 /// Binary decisions (`1` or `0`) made with the probability the agent
 /// predicts at [node]: `binarySurprise(responses[t], μ̂_node)`.
 ///

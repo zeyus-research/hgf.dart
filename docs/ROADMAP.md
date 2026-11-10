@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, HGF neural networks on the CPU and GPU, and GPU ensembles of sequential fits)
+## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, HGF neural networks on the CPU and GPU, GPU ensembles of sequential fits, and the playground's parameter recovery, fit host isolate and categorical fitting)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -18,7 +18,8 @@ supersedes its phase list.
   - `inputData`, `predict`/`step`, `setInitial`, `Trajectories`,
     `NetworkSpec`;
   - `BatchNetwork`: lock-step batches with per-element parameters and
-    data, bit-identical to `Network` (W4);
+    data, bit-identical to `Network` (W4); ef-state and categorical nodes
+    too since 2026-11-10 (dp-state not yet);
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`.
 - 632 engine tests pass (plus 112 fitting, 16 widget and 27 playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
@@ -126,6 +127,14 @@ From `benchmark/bin/runtime_probe.dart` (re-run it on new Dart releases):
   the switch to flip.)
 - **`-O4` helps Wasm** by about 10% on the engine, and 15–40% on plain
   typed-data loops.
+- **Many live `sync*` generators are slow on the JIT VM** (`dart run`,
+  `dart test`, Flutter debug and `flutter test`; not AOT, Wasm or JS). A
+  suspended frame resumes in the code it started in, so once the
+  function is hot, each live generator compiles its own OSR copy of its
+  loop at its next back edge, 10–25 ms apiece (`--trace-compiler` showed
+  197 OSR compiles of `Lbfgs.minimize` in one `fitMap`; `--no-use-osr`
+  removed the cost). Hundreds of optimisers or chains alive at once must be
+  explicit state machines (`Lbfgs`, `NelderMead`, `NutsEnsemble`).
 - The cost is set by transcendental calls. Per 4-node trial on AOT, the
   standard/eHGF updates take about 200 ns and the unbounded update about
   1 µs.
@@ -969,7 +978,8 @@ First part done 2026-11-06: MAP estimation.
     and the Pages workflow; 166 KB Wasm, 236 KB JS), isolates on desktop.
     If the worker doesn't load, on the main thread with `yieldInterval`.
   - Vector node presets (categorical, dp, ef) say why they can't be fitted
-    (no batched kernels yet).
+    (no batched kernels yet). Since 2026-11-10 the categorical preset can
+    be (Phase 8); dp and ef still say why not.
   - For it, `hgf_fit` gained `FitWorkers.cancel()` / `FitCancelled`,
     `FitWorkers.yieldInterval` and `SamplingProgress`.
   - Found: a coalescing `Playground` swaps in new data at once but
@@ -988,8 +998,8 @@ First part done 2026-11-06: MAP estimation.
     Every true value fell inside its 95 % interval. The UI keeps 60 fps
     either way (max frame 80–120 ms, once).
 - [ ] Next:
-  - tangents for the vector node kinds, once they have batched kernels
-    (then the categorical, dp and ef presets can be fitted);
+  - [x] batched kernels and tangents for ef-state and categorical nodes
+    (2026-11-10, see Phase 8); dp-state still has none;
   - NUTS in the playground takes 11–18 s: fewer iterations by default,
     or more chains than workers;
   - responses in the same CSV as the observations (a second column);
@@ -1292,7 +1302,9 @@ rest is the sampler's own host work per chain and leapfrog step.
 - [ ] `GpuFitter` with `ResponseModel.fn`: needs a way to express the
   response in WGSL (an `Ex` builder callback?).
 - [ ] Vector node kinds on the GPU (ef-state first). dp-state's
-  data-dependent branching is the hard one.
+  data-dependent branching is the hard one. (The CPU batch runs ef-state
+  and categorical since 2026-11-10; `GpuFitter` falls back to it for
+  them.)
 - [ ] Platform coverage still to measure:
   - Intel and Apple GPUs, and Android (Vulkan) and iOS (Metal) through
     wgpu-native;
@@ -1614,10 +1626,56 @@ the apps.
   `diagnostics.dart` could share the z-scaled draws between R̂ and bulk
   ESS, or the summary could move off the UI thread.
 
-**Next (Phase 8):** fit host isolate (above); a multi-agent parameter
-recovery view (simulate N agents, fit all, true-vs-estimated scatter), which
-is where the GPU shines (MAP on 2000 agents in 89 ms); the remaining
-items above.
+#### Recovery view, fit host isolate, categorical fitting (2026-11-10): done
+
+- **Parameter recovery** (`RecoveryCard`, `RecoveryJob`): simulates 50–2000
+  agents on the playground's observations, each with its free parameters
+  drawn from their priors (the others at the sliders' values), fits every
+  agent by MAP in one batched job, and plots truth against estimate per
+  parameter (log axes for positive parameters) with r and RMSE. Agents
+  whose beliefs diverge at their drawn values (a P17 runaway) are redrawn
+  up to three times; the count is shown. Auto puts it on the GPU from 256
+  L-BFGS runs (agents × starts, `FitConfig.autoGpuMapRuns`); measured MAP,
+  one start per agent (`fit_gpu --only map`, 8 isolates vs RX 7600 XT):
+  100 agents 22 vs 25 ms, 200 37 vs 31, 1000 180 vs 51.
+  In the app's test VM, 2000 agents × 4 starts, 400 trials: binary 3-level
+  28 s on 8 isolates vs 2.1 s on the GPU; continuous 2-level 3.3 vs 0.83 s.
+  Recovery of the binary 3-level preset at 2000 agents: r 0.92 (ω₁),
+  0.70 (ω₂), 0.95 (β).
+- **Fit host isolate** (`fit_engine.dart`, `fit_jobs.dart`,
+  `fit_host_io.dart`): fits and recoveries are sendable job objects
+  (`ParameterFitJob`, `RecoveryJob`) run by a `FitEngine`: a
+  `LocalFitEngine` (pool + GPU on the calling isolate: the web, tests) or,
+  on desktop, a host isolate that owns its own `LocalFitEngine` (pool,
+  `WgpuIsolateFitter`) and sends back only stages, progress and the
+  outcome (closures included: same isolate group). `HGF_FIT_HOST=false`
+  keeps the old path. Linux desktop app, a frame every vsync, 64 NUTS
+  chains (`HGF_FITBENCH`):
+
+  | fit | UI isolate | host isolate |
+  |---|--:|--:|
+  | NUTS, GPU, binary 3-level | 52.8 s | 14.5 s (3.6×) |
+  | NUTS, GPU, continuous 3-level | 35.2 s | 10.4 s (3.4×) |
+  | NUTS, 4 CPU workers, binary 3-level | 99.3 s | 67.1 s (1.5×) |
+  | NUTS, 4 CPU workers, continuous 3-level | 64.1 s | 44.1 s (1.45×) |
+  | MAP, GPU / CPU, binary 3-level | 133 / 80 ms | 71 / 26 ms |
+
+  The worst frame during a fit fell from 0.5–0.76 s (the NUTS summary on
+  the UI thread) to 36–67 ms; median 16.7 ms in all. GPU NUTS in the app
+  (14.5 s) now beats the plain VM run (19 s).
+- **Categorical fitting**: `BatchNetwork` runs ef-state and categorical
+  nodes (bit-identical to `Network` on their 18 fixtures, exact tangents
+  checked on 14), `CategoricalSurprise` (hgf) and `CategoricalSoftmaxReadout`
+  (hgf_fit: choose `k` with probability `∝ μ̂ₖ^β`). The categorical preset
+  fits to the observations or to an agent's choices, and recovers. ef is
+  not offered: pyhgf defines no surprise for a fixed-rate ef-state node,
+  so there is nothing to fit its ν to. dp-state needs batched kernels.
+- **Found:** hgf_fit's L-BFGS / Nelder–Mead were 30× slower on the JIT
+  VM (see "Measured runtime facts"); fixed by making them state machines.
+
+**Next (Phase 8):** the remaining items above; on the web, a host Web
+Worker for the drivers (nested workers for the pool); dp-state batched
+kernels; a categorical readout on the GPU.
 
 ## Upstream issues
 
@@ -1717,8 +1775,9 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
 Phase W is done apart from the optional SIMD variant and W5 (both AOT
 only). Phase 4's node kinds are all done: ef-state (2026-11-05),
 categorical-state and dp-state (2026-11-06). Left in Phase 4: per-child
-coupling functions (only if needed), and batched kernels / `sample` for the
-vector kinds (`BatchNetwork` rejects them). Phase 5's first version is
+coupling functions (only if needed), `sample` for the vector kinds, and
+batched kernels for dp-state (`BatchNetwork` runs ef-state and categorical
+since 2026-11-10, and rejects dp-state). Phase 5's first version is
 done (2026-11-06): `packages/hgf_widgets` and `apps/hgf_playground`, with
 views and presets for every node kind; see its open items. CI runs on
 every push, and the playground deploys to
@@ -1727,8 +1786,8 @@ started: `packages/hgf_fit` does MAP estimation, the Laplace
 approximation, NUTS, exact gradients and hierarchical models
 (2026-11-06), and runs them on worker pools (`FitWorkers`: isolates, and
 Web Workers on the web, 2026-11-06). The playground has a fitting view on
-those workers (2026-11-07). See Phase 6's open items: next are batched
-kernels and tangents for the vector node kinds. Phase 7's GPU probe is
+those workers (2026-11-07), and fits categorical networks since
+2026-11-10. See Phase 6's open items. Phase 7's GPU probe is
 done and a go (2026-11-07, `packages/hgf_gpu`); its follow-ups (HGF neural
 networks, GPU tangents and a GPU transport for hgf_fit) are listed there.
 The HGF neural networks have a CPU baseline (`packages/hgf_deep`,
@@ -1736,8 +1795,10 @@ The HGF neural networks have a CPU baseline (`packages/hgf_deep`,
 (`GpuDeepNetwork`, 2026-11-10), and the sequential `fit` runs on the GPU
 for ensembles (`GpuDeepEnsemble`, 2026-11-10). Open there: workgroup
 memory for the sequential kernel (one network is still CPU-speed), tile
-sizes for small batches, and a browser benchmark. Phase 8's next items:
-the fit host isolate and a parameter-recovery view.
+sizes for small batches, and a browser benchmark. Phase 8: the parameter
+recovery view, the fit host isolate (desktop) and categorical fitting are
+done (2026-11-10); next are the app's remaining Phase 8 items, a host Web
+Worker on the web, and dp-state batched kernels.
 
 ```sh
 cd hgf.dart

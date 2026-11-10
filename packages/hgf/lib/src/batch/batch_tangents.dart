@@ -84,6 +84,7 @@ extension on BatchNetwork {
     Float64List data,
     Float64List? observed,
     int offset,
+    int observedOffset,
     double timeStep,
     bool perElement,
     int lo,
@@ -93,25 +94,11 @@ extension on BatchNetwork {
     for (var s = 0; s < predNode.length; s++) {
       _tDispatch(predStep[s], predNode[s], timeStep, lo, hi);
     }
-    final inputs = _inputs, b = _b, k = _k, mean = _mean, obs = _observed;
-    final dMean = _dMean;
+    _observe(data, observed, offset, observedOffset, perElement, lo, hi);
+    // Observations don't depend on the parameters.
+    final inputs = _inputs, b = _b, k = _k, dMean = _dMean;
     for (var q = 0; q < inputs.length; q++) {
-      final node = inputs[q], base = node * b;
-      if (perElement) {
-        final src = offset + q * b;
-        for (var e = lo; e < hi; e++) {
-          mean[base + e] = data[src + e];
-          obs[base + e] = observed == null ? 1.0 : observed[src + e];
-        }
-      } else {
-        final x = data[offset + q];
-        final o = observed == null ? 1.0 : observed[offset + q];
-        for (var e = lo; e < hi; e++) {
-          mean[base + e] = x;
-          obs[base + e] = o;
-        }
-      }
-      // Observations don't depend on the parameters.
+      final node = inputs[q];
       for (var ad = 0; ad < _nActive; ad++) {
         final d = _activeDirs[ad];
         final t0 = (node * k + d) * b;
@@ -146,6 +133,8 @@ extension on BatchNetwork {
         _tPredictionErrorContinuous(node, lo, hi);
       case _kPredictionErrorBinary:
         _tPredictionErrorBinary(node, lo, hi);
+      default:
+        _tDispatchVector(step, node, lo, hi);
     }
   }
 

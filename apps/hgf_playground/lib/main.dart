@@ -5,6 +5,7 @@ import 'package:hgf_fit/hgf_fit.dart';
 import 'src/app.dart';
 import 'src/bench.dart';
 import 'src/model/fit_config.dart';
+import 'src/model/fit_host.dart';
 import 'src/model/fitting.dart';
 import 'src/model/playground.dart';
 import 'src/settings.dart';
@@ -38,10 +39,19 @@ Future<void> main() async {
       chains: int.tryParse(chains) ?? 4,
     );
   }
+  // Desktop: fits run in a host isolate (pool, GPU and drivers), so the
+  // UI isolate only gets progress and results. `HGF_FIT_HOST=false` (a
+  // dart-define) keeps them on the UI isolate, for comparison.
+  final mainThread = query['workers'] == '0';
   final fitting = Fitting(
     playground,
     config: fitConfig,
-    spawnWorkers: query['workers'] == '0'
+    engine:
+        mainThread ||
+            !const bool.fromEnvironment('HGF_FIT_HOST', defaultValue: true)
+        ? null
+        : spawnFitHost(),
+    spawnWorkers: mainThread
         ? (_) async => await FitWorkers.spawn(count: 0)
             ..yieldInterval = const Duration(milliseconds: 12)
         : null,

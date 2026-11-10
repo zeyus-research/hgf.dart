@@ -245,11 +245,11 @@ void main() {
     });
   });
 
-  group('not supported yet', () {
-    test('BatchNetwork', () {
-      expect(() => BatchNetwork(mixed(), 4), throwsUnsupportedError);
-    });
+  test('BatchNetwork accepts ef-state nodes (parity: batch_test)', () {
+    expect(BatchNetwork(mixed(), 4).batchSize, 4);
+  });
 
+  group('not supported yet', () {
     test('sample()', () {
       expect(() => mixed().sample(10), throwsUnsupportedError);
     });

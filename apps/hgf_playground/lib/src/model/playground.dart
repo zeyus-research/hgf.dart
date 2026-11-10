@@ -77,6 +77,10 @@ class Playground extends ChangeNotifier {
   /// categorical input ([Network.nInputColumns] values per trial).
   Float64List _input = Float64List(0);
 
+  /// What the network takes, row-major `nTrials x nInputColumns`:
+  /// [observations], or their one-hot rows for a categorical input.
+  Float64List get networkInput => _input;
+
   /// `1` observed / `0` missing, per trial (null: all observed).
   Float64List? observed;
 
