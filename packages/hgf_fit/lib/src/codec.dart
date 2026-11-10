@@ -85,7 +85,7 @@ final class FitCodec {
     for (final p in parameters)
       {
         'name': p.name,
-        'targets': [for (final t in p.targets) _encodeTarget(t)],
+        'targets': [for (final t in p.targets) encodeTarget(t)],
         'prior': encodePrior(p.prior),
         'transform': encodeTransform(p.transform),
         if (p.initial case final x?) 'initial': jsonDouble(x),
@@ -100,7 +100,7 @@ final class FitCodec {
           p['name'] as String,
           targets: [
             for (final t in p['targets'] as List<Object?>)
-              _decodeTarget(t as Map<String, Object?>),
+              decodeTarget(t as Map<String, Object?>),
           ],
           prior: decodePrior(p['prior'] as Map<String, Object?>),
           transform: decodeTransform(p['transform'] as Map<String, Object?>),
@@ -218,7 +218,8 @@ final class FitCodec {
     return decode(json, this);
   }
 
-  static Map<String, Object?> _encodeTarget(ParameterTarget t) => switch (t) {
+  /// [t] as JSON.
+  static Map<String, Object?> encodeTarget(ParameterTarget t) => switch (t) {
     NodeTarget(:final node, :final field) => {
       'type': 'node',
       'node': node,
@@ -237,7 +238,8 @@ final class FitCodec {
     ResponseTarget(:final name) => {'type': 'response', 'name': name},
   };
 
-  static ParameterTarget _decodeTarget(Map<String, Object?> t) {
+  /// A target from [encodeTarget]'s output.
+  static ParameterTarget decodeTarget(Map<String, Object?> t) {
     int i(String key) => (t[key] as num).toInt();
     return switch (t['type']) {
       'node' => NodeTarget(i('node'), NodeField.parse(t['field'] as String)),

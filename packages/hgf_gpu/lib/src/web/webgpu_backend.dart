@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
 import 'dart:typed_data';
@@ -21,10 +22,26 @@ extension type _Adapter._(JSObject _) implements JSObject {
 }
 
 extension type _AdapterInfo._(JSObject _) implements JSObject {
-  external String get vendor;
-  external String get architecture;
-  external String get device;
-  external String get description;
+  external String? get vendor;
+  external String? get architecture;
+  external String? get device;
+  external String? get description;
+  external bool? get isFallbackAdapter;
+}
+
+@JS('navigator.userAgent')
+external String? get _userAgent;
+
+@JS('MessageChannel')
+extension type _MessageChannel._(JSObject _) implements JSObject {
+  external factory _MessageChannel();
+  external _MessagePort get port1;
+  external _MessagePort get port2;
+}
+
+extension type _MessagePort._(JSObject _) implements JSObject {
+  external set onmessage(JSFunction? handler);
+  external void postMessage(JSAny? message);
 }
 
 extension type _Limits._(JSObject _) implements JSObject {
@@ -155,20 +172,43 @@ final class WebGpuBackend implements GpuBackend {
               as JSObject,
         )
         .toDart;
-    final info = adapter.info;
-    final description = [
-      info.vendor,
-      info.architecture,
-      info.device,
-      info.description,
-    ].where((s) => s.isNotEmpty).join(' / ');
     final maxBytes = device.limits.maxStorageBufferBindingSize;
     final maxBuffer = device.limits.maxBufferSize;
     return WebGpuBackend._(
       device,
-      'WebGPU: $description',
+      _describe(adapter),
       (maxBytes < maxBuffer ? maxBytes : maxBuffer).toInt(),
     );
+  }
+
+  /// `WebGPU: vendor / architecture / …`. Firefox leaves every field of
+  /// `GPUAdapterInfo` empty (fingerprinting protection), so the adapter
+  /// may have no name at all.
+  static String _describe(_Adapter adapter) {
+    final info = adapter.info;
+    final parts = [
+      info.vendor,
+      info.architecture,
+      info.device,
+      info.description,
+    ].whereType<String>().where((s) => s.isNotEmpty).toList();
+    final fallback = info.isFallbackAdapter ?? false;
+    if (parts.isEmpty) {
+      final ua = _userAgent ?? '';
+      final browser = ua.contains('Firefox/')
+          ? 'Firefox'
+          : ua.contains('Safari/') && !ua.contains('Chrome/')
+          ? 'Safari'
+          : 'the browser';
+      parts.add(
+        fallback
+            ? 'a software adapter'
+            : 'a hardware adapter ($browser doesn\'t name it)',
+      );
+    } else if (fallback) {
+      parts.add('software');
+    }
+    return 'WebGPU: ${parts.join(' / ')}';
   }
 
   final _Device _device;
@@ -376,7 +416,7 @@ final class WebGpuBackend implements GpuBackend {
       staging.bytes,
     );
     _flush();
-    await staging.buffer.mapAsync(_mapRead).toDart;
+    await _poked(staging.buffer.mapAsync(_mapRead).toDart);
     // A JS-side copy (slice) before unmap detaches the mapped range.
     final mapped = JSFloat32Array(
       staging.buffer.getMappedRange(),
@@ -393,7 +433,81 @@ final class WebGpuBackend implements GpuBackend {
   @override
   Future<void> idle() {
     _flush();
-    return _device.queue.onSubmittedWorkDone().toDart;
+    return _poked(_device.queue.onSubmittedWorkDone().toDart);
+  }
+
+  /// Whether [read] and [idle] keep the queue polled while they wait (see
+  /// [_poked]). On by default; off only to measure the difference.
+  bool pokeQueue = true;
+
+  /// [done], with the GPU queue polled until it completes.
+  ///
+  /// Browsers resolve `mapAsync` and `onSubmittedWorkDone` only when they
+  /// next poll the device. Firefox polls on a 100 ms timer (`POLL_TIME_MS`
+  /// in `WebGPUParent.cpp`, bug 1870699) and otherwise only on a submit,
+  /// so every readback took 100 ms; Chromium's fence polling took
+  /// ~2.5 ms in a worker. A submit, even an empty one, polls: so while
+  /// waiting, this yields to the event loop (a task through a
+  /// `MessageChannel`, unclamped unlike `setTimeout`) and submits nothing
+  /// every 8th yield. Measured round trip (4 KB write, dispatch, readback;
+  /// RX 7600 XT): Firefox 159 100 → 0.25 ms, Chromium 156 1.8–2.5 →
+  /// 0.25–0.35 ms; poking at every yield floods the GPU process (3–9 ms).
+  /// After [_spinFor] it polls once per timer tick (clamped to 4 ms)
+  /// instead of keeping the thread busy; spinning 4 ms instead of 20 made
+  /// 64k-element passes 10–30 % slower.
+  Future<void> _poked(Future<JSAny?> done) async {
+    if (!pokeQueue) {
+      await done;
+      return;
+    }
+    var settled = false;
+    Object? error;
+    StackTrace? stack;
+    done.then(
+      (_) => settled = true,
+      onError: (Object e, StackTrace st) {
+        error = e;
+        stack = st;
+        settled = true;
+      },
+    );
+    final queue = _device.queue;
+    final sw = Stopwatch()..start();
+    var yields = 0;
+    while (!settled) {
+      if (sw.elapsed < _spinFor) {
+        await _nextTask();
+        if (!settled && ++yields % 8 == 0) queue.submit(_noCommands);
+      } else {
+        await Future<void>.delayed(Duration.zero);
+        if (!settled) queue.submit(_noCommands);
+      }
+    }
+    if (error case final e?) Error.throwWithStackTrace(e, stack!);
+  }
+
+  static const _spinFor = Duration(milliseconds: 20);
+  static final _noCommands = <JSObject>[].toJS;
+
+  // One channel for every yield: a message to port2 wakes port1.
+  static final _MessageChannel _channel = () {
+    final c = _MessageChannel();
+    c.port1.onmessage = ((JSAny? _) {
+      final w = _wake;
+      _wake = null;
+      w?.complete();
+    }).toJS;
+    return c;
+  }();
+  static Completer<void>? _wake;
+
+  /// Completes in a new event-loop task (after rendering, if due).
+  static Future<void> _nextTask() {
+    final w = _wake;
+    if (w != null) return w.future;
+    final c = _wake = Completer<void>();
+    _channel.port2.postMessage(null);
+    return c.future;
   }
 
   @override

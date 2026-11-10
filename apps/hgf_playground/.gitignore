@@ -49,3 +49,4 @@ app.*.map.json
 
 # Built by tool/build_worker.sh
 /web/fit_worker.*
+/web/fit_host.*

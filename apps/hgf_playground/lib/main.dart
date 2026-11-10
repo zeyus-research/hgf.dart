@@ -39,15 +39,17 @@ Future<void> main() async {
       chains: int.tryParse(chains) ?? 4,
     );
   }
-  // Desktop: fits run in a host isolate (pool, GPU and drivers), so the
-  // UI isolate only gets progress and results. `HGF_FIT_HOST=false` (a
-  // dart-define) keeps them on the UI isolate, for comparison.
+  // Fits run in a host (pool, GPU and drivers): an isolate on desktop, a
+  // Web Worker on the web, so the UI only gets progress and results.
+  // `HGF_FIT_HOST=false` (a dart-define) or `&fithost=0` (web) keeps them
+  // on the UI thread, for comparison.
   final mainThread = query['workers'] == '0';
   final fitting = Fitting(
     playground,
     config: fitConfig,
     engine:
         mainThread ||
+            query['fithost'] == '0' ||
             !const bool.fromEnvironment('HGF_FIT_HOST', defaultValue: true)
         ? null
         : spawnFitHost(),

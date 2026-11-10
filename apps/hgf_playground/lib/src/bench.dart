@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:hgf/hgf.dart';
 
+import 'bench_report.dart';
 import 'model/fitting.dart';
 import 'model/playground.dart';
 
@@ -139,6 +140,7 @@ Future<void> runFitBench(Playground pg, Fitting fit) async {
         last = now;
       }
       await job;
+      final wall = sw.elapsedMilliseconds;
       frames.sort();
       final r = fit.result;
       runs.add({
@@ -146,6 +148,8 @@ Future<void> runFitBench(Playground pg, Fitting fit) async {
         'method': method.name,
         'error': fit.error,
         'ms': r?.millis,
+        // Including the messages to and from a fit host.
+        'wall_ms': wall,
         'where': r?.where,
         'frames': frames.length,
         'frame_median_ms': frames.isEmpty ? null : frames[frames.length ~/ 2],
@@ -160,6 +164,12 @@ Future<void> runFitBench(Playground pg, Fitting fit) async {
   final target = kIsWeb
       ? (kIsWasm ? 'wasm' : 'js')
       : defaultTargetPlatform.name;
+  final json = jsonEncode({'target': target, 'runs': runs});
   // ignore: avoid_print
-  print('HGF_FITBENCH ${jsonEncode({'target': target, 'runs': runs})}');
+  print('HGF_FITBENCH $json');
+  if (kIsWeb) {
+    if (Uri.base.queryParameters['report'] case final url?) {
+      postReport(url, json);
+    }
+  }
 }

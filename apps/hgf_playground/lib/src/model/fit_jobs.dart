@@ -75,7 +75,7 @@ class ParamEstimate {
     required this.lower,
     required this.upper,
     required this.truth,
-    required this.density,
+    this.laplace,
     this.draws,
     this.rhat,
     this.ess,
@@ -92,9 +92,13 @@ class ParamEstimate {
   /// The value that generated simulated responses, if known.
   final double? truth;
 
-  /// Approximate posterior density on the natural scale (Laplace), as a
-  /// function for plotting; null if the Hessian wasn't positive definite.
-  final double Function(double x)? density;
+  /// The Laplace approximation of the marginal posterior; null for NUTS,
+  /// or if the Hessian wasn't positive definite.
+  final LaplaceMarginal? laplace;
+
+  /// Approximate posterior density on the natural scale (Laplace), for
+  /// plotting.
+  double Function(double x)? get density => laplace?.density;
 
   /// Pooled posterior draws (NUTS).
   final Float64List? draws;
@@ -286,8 +290,9 @@ abstract interface class JobContext {
 }
 
 /// A unit of fitting work with all its inputs. Sendable to a host isolate
-/// (isolates spawned from this program share its code), where [execute]
-/// runs against that isolate's pool and GPU.
+/// (isolates spawned from this program share its code), or encoded for the
+/// web's host worker (`fit_wire.dart`); [execute] runs it against the
+/// host's pool and GPU.
 sealed class FitJobSpec<R> {
   const FitJobSpec({required this.config, required this.gpu});
 
@@ -364,8 +369,8 @@ final class ParameterFitJob extends FitJobSpec<FitOutcome> {
               lower: lo[i],
               upper: hi[i],
               truth: truth?[params[i].id],
-              density: lap.positiveDefinite
-                  ? laplaceDensity(
+              laplace: lap.positiveDefinite
+                  ? LaplaceMarginal(
                       model.parameters[i].transform,
                       best.y[i],
                       se[i],
@@ -450,7 +455,6 @@ final class ParameterFitJob extends FitJobSpec<FitOutcome> {
               lower: quantileOf(sorted, 0.025),
               upper: quantileOf(sorted, 0.975),
               truth: truth?[params[i].id],
-              density: null,
               draws: sorted,
               rhat: summary[i].rhat,
               ess: summary[i].essBulk,
@@ -632,13 +636,20 @@ final class RecoveryJob extends FitJobSpec<RecoveryOutcome> {
   }
 }
 
-/// The Laplace posterior `y ~ N(ŷ, s²)` as a density on the natural scale.
-double Function(double) laplaceDensity(Transform t, double yHat, double s) {
-  final c = 1 / (s * math.sqrt(2 * math.pi));
-  return (x) {
-    final y = t.toUnconstrained(x);
+/// One parameter's Laplace posterior, `y ~ N(mode, sd²)` on the
+/// unconstrained scale `y = transform.toUnconstrained(x)`.
+class LaplaceMarginal {
+  const LaplaceMarginal(this.transform, this.mode, this.sd);
+
+  final Transform transform;
+  final double mode, sd;
+
+  /// The density on the natural scale.
+  double density(double x) {
+    final y = transform.toUnconstrained(x);
     if (!y.isFinite) return 0;
-    final z = (y - yHat) / s;
-    return c * math.exp(-0.5 * z * z - t.logAbsJacobian(y));
-  };
+    final z = (y - mode) / sd;
+    return math.exp(-0.5 * z * z - transform.logAbsJacobian(y)) /
+        (sd * math.sqrt(2 * math.pi));
+  }
 }

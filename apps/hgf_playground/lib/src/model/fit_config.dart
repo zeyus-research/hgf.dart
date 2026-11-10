@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart' show immutable;
+import 'package:meta/meta.dart' show immutable;
 
 /// Where the fits run.
 enum FitDevice {
@@ -49,7 +49,7 @@ class FitConfig {
 
   /// With [FitDevice.auto], NUTS runs on the GPU from this many chains on.
   /// One series is too small a batch for the GPU: each leapfrog round
-  /// costs a round trip (~0.4 ms native, ~2.5 ms in Chromium), which a
+  /// costs a round trip (~0.4 ms native, 0.3–1 ms in browsers), which a
   /// few chains on CPU workers beat. Measured on one subject, 500 + 500
   /// iterations (RX 7600 XT, i7-7700, 4 workers):
   /// - native (AOT isolates): 4 chains 2.5 s GPU vs 1.3 s CPU, 64 chains
@@ -62,7 +62,7 @@ class FitConfig {
   /// many L-BFGS runs on (agents × starts). Measured MAP, one start per
   /// agent, binary 2-level, 320 trials (`fit_gpu --only map`, RX 7600 XT,
   /// 8 AOT isolates): 100 agents 22 ms CPU vs 25 ms GPU, 200: 37 vs 31,
-  /// 1000: 180 vs 51. In Chromium each GPU round trip costs ~2.5 ms more
+  /// 1000: 180 vs 51. In browsers each GPU round trip costs up to ~1 ms more
   /// (~30 per fit), and Wasm workers are ~1.6× slower than AOT, so the
   /// crossover there is about the same.
   static const int autoGpuMapRuns = 256;

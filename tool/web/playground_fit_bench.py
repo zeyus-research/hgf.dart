@@ -1,8 +1,10 @@
 """Fitting in the playground's web build (Phase 6 fitting view).
 
 Serves apps/hgf_playground/build/web like playground_bench.py, opens
-`?fitbench` (fits on the Web Workers) and `?fitbench&workers=0` (on the
-main thread, a slice per frame) in headless Chromium, and prints each fit's
+`?fitbench` (fits in the fit host worker, passes on its nested Web
+Workers), `?fitbench&fithost=0` (drivers on the page's thread, passes on
+Web Workers) and `?fitbench&workers=0` (all on the main thread, a slice per
+frame) in headless Chromium, and prints each fit's
 wall time, the frame intervals while it ran, and the estimates against the
 simulated agent's truth.
 
@@ -74,7 +76,7 @@ def main(queries: list[str]) -> None:
                     print(f"  {run['preset']:12} {run['method']:5} error: {run['error']}")
                     continue
                 print(
-                    f"  {run['preset']:12} {run['method']:5} {run['ms']:>6} ms on {run['where']}; "
+                    f"  {run['preset']:12} {run['method']:5} {run['ms']:>6} ms ({run.get('wall_ms')} ms wall) on {run['where']}; "
                     f"frames during the fit: {run['frames']}, median "
                     f"{run['frame_median_ms']:.1f} ms, max {run['frame_max_ms']:.1f} ms"
                 )
@@ -87,4 +89,4 @@ def main(queries: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:] or ["fitbench", "fitbench&workers=0"])
+    main(sys.argv[1:] or ["fitbench", "fitbench&fithost=0", "fitbench&workers=0"])

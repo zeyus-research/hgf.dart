@@ -3,7 +3,8 @@
 /// console as `HGF_GPU {json}` lines and to `globalThis.hgfResults` (see
 /// `tool/gpu_bench.py`). URL parameters: `sizes=1000,4000,...`,
 /// `trials=1000`, `scenarios=c2_unbounded,...`, `chunk=0` (trials per
-/// dispatch), `repeat=5`, `cpuRepeat=3`.
+/// dispatch), `repeat=5`, `cpuRepeat=3`, `poke=0` (no queue polling while
+/// waiting, see `WebGpuBackend.pokeQueue`).
 library;
 
 import 'dart:convert';
@@ -46,12 +47,12 @@ Future<void> main() async {
                 ).toDart).text().toDart).toDart,
               )
               as Map<String, Object?>;
-      await runProbe(
-        backend,
-        inputs,
-        Uri.splitQueryString(_search.isEmpty ? '' : _search.substring(1)),
-        emit,
+      final params = Uri.splitQueryString(
+        _search.isEmpty ? '' : _search.substring(1),
       );
+      backend.pokeQueue = params['poke'] != '0';
+      emit({'adapter': backend.description, 'poke': backend.pokeQueue});
+      await runProbe(backend, inputs, params, emit);
     }
   } catch (e, st) {
     emit({'error': '$e', 'stack': '$st'});

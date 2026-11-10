@@ -304,7 +304,9 @@ final class GpuBatch {
       dispatches++;
     }
     // No idle(): mapping the results waits for the work, and each wait is a
-    // round trip to the GPU process (~2.5 ms in Chromium).
+    // round trip to the GPU process (0.25–1 ms in browsers with
+    // WebGpuBackend's queue polling, 2.5 ms in Chromium and 100 ms in
+    // Firefox without).
     final raw = await backend.read(
       _stateBuffer,
       offset: kernel.resultSlot * b * 4,

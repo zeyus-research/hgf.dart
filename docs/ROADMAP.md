@@ -5,7 +5,7 @@ Picks up after the feasibility spike (phases 1–3, see
 `~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
 supersedes its phase list.
 
-## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, HGF neural networks on the CPU and GPU, GPU ensembles of sequential fits, and the playground's parameter recovery, fit host isolate and categorical fitting)
+## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, HGF neural networks on the CPU and GPU, GPU ensembles of sequential fits, and the playground's parameter recovery, fit host isolate and worker, and categorical fitting)
 
 - `packages/hgf` covers:
   - continuous, binary, constant (bias), exponential-family (`ef-state`)
@@ -1063,7 +1063,9 @@ f64 `vmap` 133 ms, JAX f32 `vmap` 37.6 ms.
 | binary 3-level eHGF, native | 0.3 ms | 0.4 ms | 2.5 ms | 42 ms | 0.04 |
 
 Browser times vary between runs by about one fence-polling interval
-(2.7–4.0 ms at small B).
+(2.7–4.0 ms at small B). Since 2026-11-10 `WebGpuBackend` polls the queue
+while it waits (see Phase 8, Firefox): 2-level standard at B ≤ 1000 went
+from 2.7 to 1.0 ms in Chromium.
 
 - **Latency, not throughput, is the GPU's limit on small jobs.** One GPU
   thread runs one series at ~1.6 µs per trial (2-level unbounded). That is
@@ -1073,7 +1075,10 @@ Browser times vary between runs by about one fence-polling interval
 - **Browser fixed cost: ~2.5 ms per call.** It is one round trip to the GPU
   process, and it looks quantised by Chromium's fence polling. Waiting
   with `onSubmittedWorkDone` and then mapping cost two round trips, so now
-  only the map is awaited. Native has no such floor (0.3 ms).
+  only the map is awaited. Native has no such floor (0.3 ms). *Update
+  2026-11-10:* the floor was the browser's device polling, not the round
+  trip; submitting an empty command list polls, and with that the round
+  trip is 0.25–0.35 ms (Firefox: 100 ms → 0.25 ms; see Phase 8).
 - **dart2wasm pitfall:** `toJS` on Dart typed data copies element by
   element (~80 ns per byte here, so 228 ms for 2.8 MB). Host arrays that
   get uploaded are JS-backed (`JSFloat32Array.withLength(n).toDart`), which
@@ -1673,9 +1678,66 @@ the apps.
 - **Found:** hgf_fit's L-BFGS / Nelder–Mead were 30× slower on the JIT
   VM (see "Measured runtime facts"); fixed by making them state machines.
 
-**Next (Phase 8):** the remaining items above; on the web, a host Web
-Worker for the drivers (nested workers for the pool); dp-state batched
-kernels; a categorical readout on the GPU.
+#### Web fit host worker, WebGPU in Firefox (2026-11-10): done
+
+- **Fit host worker** (`fit_host_web.dart`, `fit_host_worker.dart`,
+  `fit_wire.dart`, `worker/fit_host.dart`): on the web, fit jobs run in a
+  Web Worker that owns the drivers, the pool (nested `fit_worker` Web
+  Workers) and WebGPU, the counterpart of the desktop host isolate. Jobs,
+  events and outcomes cross as JSON plus the `Float64List`s pulled out of
+  it (typed arrays; non-finite numbers as markers); models are `FitCodec`
+  JSON; a Laplace marginal is now data (`LaplaceMarginal`), not a closure.
+  `tool/build_worker.sh` builds `fit_host.wasm`/`.js` (437 / 493 KB) next
+  to `fit_worker`. If the host doesn't start, jobs run from the page as
+  before; `&fithost=0` forces that. `test/fit_wire_test.dart` runs MAP,
+  NUTS and recovery on three presets through the wire format: bit-identical
+  to local runs. The fit model (`fit_config`, `fit_engine`, `fit_jobs`) is
+  Flutter-free now (plain `dart compile`).
+- **Firefox's WebGPU** (reported: GPU fits "incredibly slow", adapter with
+  an empty name). Firefox 159 has WebGPU on the page and in workers, but:
+  - it resolves `mapAsync` / `onSubmittedWorkDone` only when it polls the
+    device, on a 100 ms timer (`POLL_TIME_MS`, `WebGPUParent.cpp`; bug
+    1870699) or at a submit. Every readback took exactly 100 ms (200 with
+    `onSubmittedWorkDone` first), so a NUTS fit's thousands of round trips
+    took minutes. `WebGpuBackend` now submits an empty command list every
+    8th event-loop task (`MessageChannel`, unclamped) while it waits, then
+    once per timer tick after 20 ms. Round trip, 4 KB write + dispatch +
+    readback: Firefox 100 → 0.25 ms, Chromium 1.8–2.5 → 0.25–0.35 ms
+    (page and worker alike). Submitting at every task floods the GPU
+    process (3–9 ms, 106 ms once in a Firefox worker); every 2nd–16th task
+    is flat.
+  - `GPUAdapterInfo` is all empty strings (fingerprinting protection); the
+    description now says "a hardware adapter (Firefox doesn't name it)".
+    WebGL's renderer string is sanitised too ("Radeon R9 200 Series, or
+    similar" for an RX 7600 XT), so it isn't used.
+  - `melos run test:gpu-firefox` (`tool/firefox_webgpu.sh` adds the WebGPU
+    prefs to package:test's profile): every GPU parity suite passes on
+    Firefox's WebGPU on the RX 7600 XT.
+  - Flutter's Wasm build falls back to its JS build in Firefox, so there
+    the page, host and pool are JS.
+- Measured with `melos run bench:playground-fit` (Chromium 156, Wasm) and
+  the same page in headless Firefox 159 (JS); i7-7700, RX 7600 XT, 400
+  trials, 4 workers; wall time including messages, worst frame during the
+  fit (host worker / drivers on the page):
+
+  | fit | Chromium | worst frame | Firefox | worst frame |
+  |---|--:|--:|--:|--:|
+  | binary 3-level, MAP + Laplace | 78 / 95 ms | 37 / 29 ms | 220 / 342 ms | 41 / 37 ms |
+  | binary 3-level, NUTS 4 chains | 11.9 / 12.7 s | 24 / 80 ms | 63 / 111 s | 68 / 122 ms |
+  | continuous 3-level, MAP + Laplace | 34 / 73 ms | 28 / 21 ms | 342 / 392 ms | 136 / 111 ms |
+  | continuous 3-level, NUTS 4 chains | 7.9 / 7.9 s | 24 / 43 ms | 49 / 79 s | 29 / 102 ms |
+  | binary 3-level, NUTS 64 chains, GPU | 23.7 / 26.1 s | 44 / 674 ms | 33.5 / 36.1 s | 48 / 1886 ms |
+  | continuous 3-level, NUTS 64 chains, GPU | 12.7 / 13.6 s | 21 / 556 ms | 19.4 / 18.0 s | 24 / 1793 ms |
+
+  The host takes the end-of-fit NUTS summary off the page (the 0.5–1.9 s
+  frames) and in Firefox keeps the median frame at 16–17 ms during GPU
+  fits (41–83 ms from the page). With queue polling, GPU NUTS at 64 chains
+  in Chromium went from 37 s (Phase 8 quick wins) to 24–26 s; in Firefox
+  it now beats its CPU workers (33 vs 63 s).
+
+**Next (Phase 8):** the remaining items above; dp-state batched kernels;
+a categorical readout on the GPU; re-measure `FitConfig.autoGpuChains` /
+`autoGpuMapRuns` in browsers now that a round trip is ~0.3 ms.
 
 ## Upstream issues
 
@@ -1796,9 +1858,10 @@ The HGF neural networks have a CPU baseline (`packages/hgf_deep`,
 for ensembles (`GpuDeepEnsemble`, 2026-11-10). Open there: workgroup
 memory for the sequential kernel (one network is still CPU-speed), tile
 sizes for small batches, and a browser benchmark. Phase 8: the parameter
-recovery view, the fit host isolate (desktop) and categorical fitting are
-done (2026-11-10); next are the app's remaining Phase 8 items, a host Web
-Worker on the web, and dp-state batched kernels.
+recovery view, the fit host isolate (desktop), categorical fitting, the
+web's fit host worker and WebGPU queue polling (Firefox: 100 ms → 0.25 ms
+per round trip) are done (2026-11-10); next are the app's remaining Phase 8
+items and dp-state batched kernels.
 
 ```sh
 cd hgf.dart
@@ -1815,6 +1878,7 @@ melos run bench:web-parallel                      # ... and their speed-ups (~10
 melos run bench:playground-fit                    # the playground's fits (~3 min)
 melos run fixtures:deep && melos run bench:deep   # hgf_deep: fixtures, speed vs pyhgf
 melos run test:gpu && melos run bench:gpu-deep    # GPU kernels incl. GpuDeepNetwork
+melos run test:gpu-firefox                        # the same in Firefox (WebGPU on the real GPU)
 melos run bench:gpu-ensemble                      # GpuDeepEnsemble (sequential fit)
 (cd apps/hgf_playground && flutter run -d chrome --wasm)   # try it
 dart compile exe packages/hgf/benchmark/bin/profile_modes.dart -o /tmp/pm && \

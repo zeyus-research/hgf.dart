@@ -1,16 +1,20 @@
-import 'package:flutter/foundation.dart';
 import 'package:hgf_fit/hgf_fit.dart';
 
 import 'fit_config.dart';
 import 'fit_jobs.dart';
 import 'gpu/open_gpu.dart';
 
+// Flutter-free, like the rest of the fit model: the web's fit host worker
+// (worker/fit_host.dart) is compiled with plain `dart compile`.
+const _isWeb = bool.fromEnvironment('dart.library.js_interop');
+const _isWasm = bool.fromEnvironment('dart.tool.dart2wasm');
+
 /// The GPU as the settings show it: its adapter, or why there is none.
 typedef GpuInfo = ({String? adapter, String? reason});
 
-/// Runs fit jobs: on this isolate ([LocalFitEngine]), or in a host isolate
-/// that owns the pool and the GPU, so that only progress and results reach
-/// the UI (`spawnFitHost`, desktop).
+/// Runs fit jobs: on this isolate ([LocalFitEngine]), or in a host (an
+/// isolate on desktop, a Web Worker on the web) that owns the pool and the
+/// GPU, so that only progress and results reach the UI (`spawnFitHost`).
 abstract interface class FitEngine {
   /// Opens the GPU if that hasn't been tried yet.
   Future<GpuInfo> probeGpu();
@@ -97,7 +101,7 @@ class LocalFitEngine implements FitEngine {
     final pool = _workers = await spawning;
     _where = pool.count == 0
         ? 'the main thread'
-        : '${pool.count} ${kIsWeb ? (kIsWasm ? 'Wasm workers' : 'JS workers') : 'isolates'}';
+        : '${pool.count} ${_isWeb ? (_isWasm ? 'Wasm workers' : 'JS workers') : 'isolates'}';
     return pool;
   }
 }
@@ -148,18 +152,25 @@ Future<GpuOpened> _openPlatformGpu() => openGpu();
 /// page (Wasm or JS, like the page), isolates on desktop. If the workers
 /// can't start (e.g. the worker wasn't built), the fits run on the calling
 /// thread, a slice per frame.
-Future<FitWorkers> spawnPlaygroundWorkers(int? count) async {
+///
+/// [base] is the URL the worker script is resolved against (default: the
+/// page's); the fit host worker passes the page's, since its own URL is a
+/// `blob:` one.
+Future<FitWorkers> spawnPlaygroundWorkers(int? count, {String? base}) async {
+  String url(String file) =>
+      base == null ? file : Uri.parse(base).resolve(file).toString();
   try {
     return await FitWorkers.spawn(
       count: count,
       // A single subject's passes are small: split none of them.
       minSliceTrials: 1 << 30,
-      script: kIsWasm
-          ? const FitWorkerScript.wasm('fit_worker.wasm')
-          : const FitWorkerScript.js('fit_worker.js'),
+      script: _isWasm
+          ? FitWorkerScript.wasm(url('fit_worker.wasm'))
+          : FitWorkerScript.js(url('fit_worker.js')),
     );
   } catch (e) {
-    debugPrint('No fit workers ($e); fitting on the main thread.');
+    // ignore: avoid_print
+    print('No fit workers ($e); fitting on the calling thread.');
     return await FitWorkers.spawn(count: 0)
       ..yieldInterval = const Duration(milliseconds: 12);
   }

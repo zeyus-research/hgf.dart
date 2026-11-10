@@ -1,5 +1,7 @@
 ## Unreleased
 
+- `FitCodec.encodeTarget` / `decodeTarget` are public (a parameter's
+  target as JSON on its own).
 - `Lbfgs` and `NelderMead` run as explicit state machines instead of
   `sync*` bodies, with bit-identical iterates. On the JIT VM (`dart run`,
   `dart test`, Flutter debug) every live `sync*` run compiled its own

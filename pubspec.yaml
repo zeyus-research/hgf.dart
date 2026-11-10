@@ -96,6 +96,17 @@ melos:
       packageFilters:
         fileExists: tool/parity_check.dart
       description: Run the parity suite on a dart2wasm -O4 (release) build under Node.
+    test:gpu-firefox:
+      # Firefox's WebGPU on the machine's GPU (headless; tool/firefox_webgpu.sh
+      # adds the WebGPU prefs to package:test's profile). Linux and macOS.
+      exec:
+        command: >-
+          FIREFOX_EXECUTABLE=$MELOS_PACKAGE_PATH/tool/firefox_webgpu.sh
+          dart test -p firefox -c dart2wasm --tags gpu 2>&1
+        concurrency: 1
+      packageFilters:
+        fileExists: tool/firefox_webgpu.sh
+      description: The GPU parity suites (test:gpu's web half) in Firefox.
     test:gpu:
       # Native: wgpu-native through dart:ffi (skips without the library).
       # Web: Chromium's WebGPU, on SwiftShader (dart test passes --disable-gpu).
@@ -131,7 +142,7 @@ melos:
       run: >-
         apps/hgf_playground/tool/build_worker.sh &&
         cd apps/hgf_playground && flutter build web --wasm -O4
-      description: Build the playground for the web (Wasm, the primary target), with its fit worker.
+      description: Build the playground for the web (Wasm, the primary target), with its fit host and fit workers.
     bench:playground:
       run: >-
         cd apps/hgf_playground && flutter build web --wasm -O4 &&

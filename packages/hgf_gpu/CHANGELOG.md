@@ -1,5 +1,17 @@
 ## Unreleased
 
+- `WebGpuBackend` polls the GPU queue while `read` and `idle` wait (an
+  empty `queue.submit` every 8th event-loop task through a
+  `MessageChannel`, then once per timer tick after 20 ms; `pokeQueue =
+  false` turns it off). Firefox resolves `mapAsync` only on a 100 ms
+  timer otherwise, so every readback took 100 ms; now 0.25 ms. Chromium's
+  round trip went from 1.8–2.5 ms to 0.25–0.35 ms.
+- `WebGpuBackend.description` names the adapter even when the browser
+  hides `GPUAdapterInfo` (Firefox leaves every field empty): "a hardware
+  adapter (Firefox doesn't name it)", or "a software adapter".
+- `tool/firefox_webgpu.sh`: Firefox with WebGPU for `dart test -p firefox`
+  (`melos run test:gpu-firefox`); every GPU parity suite passes there.
+
 - `GpuDeepEnsemble`: hgf_deep's sequential `fit` for many networks of one
   shape at once (one workgroup per member runs the sample loop in one
   kernel, `SequentialFitKernel.sequentialFit` on
