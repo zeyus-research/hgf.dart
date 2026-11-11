@@ -328,8 +328,46 @@ melos:
         Phase 7 probe on wgpu-native (AOT, dart:ffi); needs libwgpu_native
         (installed, or tool/fetch_wgpu.sh + WGPU_LIB).
     bench:
-      run: dart run tool/bench_compare.dart --rust
+      run: dart run tool/bench_compare.dart --rust --gpu
       description: >-
-        Run the same scenarios on Dart (AOT, JIT, JS, Wasm), pyhgf (JAX and
-        rshgf via Python) and rshgf linked natively; print a comparison table
-        and write docs/benchmark_results.md.
+        Run the same scenarios on Dart (AOT, JIT, JS, Wasm, GPU native and
+        WebGPU), pyhgf (JAX and rshgf via Python) and rshgf linked natively;
+        print a comparison table and write docs/benchmark_results.md. For
+        JAX on the GPU too, add `--jax-gpu tool/parity/.venv-rocm/python-rocm`
+        (tool/parity/jax_rocm.sh setup). Then `melos run bench:plot`.
+    bench:nuts-sweep:
+      # ~1.5-2 h. JAX on the GPU needs tool/parity/jax_rocm.sh setup.
+      run: >-
+        cd packages/hgf_gpu &&
+        dart compile exe benchmark/bin/nuts_sweep.dart -o .dart_tool/nuts_sweep &&
+        .dart_tool/nuts_sweep --out ../../.dart_tool/nuts_sweep &&
+        cd ../../tool/parity &&
+        rm -f ../../.dart_tool/nuts_sweep/python.jsonl &&
+        uv run --with numpyro python nuts_sweep.py all ../../.dart_tool/nuts_sweep
+        $(test -x .venv-rocm/python-rocm && echo --gpu-python .venv-rocm/python-rocm)
+      description: >-
+        NUTS on binary and continuous 2- and 3-level models, 20 and 200
+        agents, 1/4/16 chains: hgf_fit (1 core, 8 isolates, GPU) against
+        NumPyro (1 core; GPU) and PyMC, on the same models (hgf_fit's
+        pyhgf export). Then `melos run bench:plot`.
+    bench:deep-sweep:
+      run: >-
+        cd packages/hgf_gpu &&
+        dart compile exe benchmark/bin/deep_sweep.dart -o .dart_tool/deep_sweep &&
+        taskset -c 0 .dart_tool/deep_sweep --out ../../.dart_tool/deep_sweep.json &&
+        cd ../../tool/parity &&
+        rm -f ../../.dart_tool/deep_sweep_rows.jsonl &&
+        taskset -c 0 uv run python bench_deep.py ../../.dart_tool/deep_sweep.json --sweep ../../.dart_tool/deep_sweep_rows.jsonl &&
+        JAX_PLATFORMS=cpu taskset -c 0 uv run python bench_deep.py ../../.dart_tool/deep_sweep.json --sweep ../../.dart_tool/deep_sweep_rows.jsonl --f32 --no-rs &&
+        if test -x .venv-rocm/python-rocm; then
+        .venv-rocm/python-rocm bench_deep.py ../../.dart_tool/deep_sweep.json --sweep ../../.dart_tool/deep_sweep_rows.jsonl --f32 --no-rs &&
+        .venv-rocm/python-rocm bench_deep.py ../../.dart_tool/deep_sweep.json --sweep ../../.dart_tool/deep_sweep_rows.jsonl --no-rs; fi
+      description: >-
+        Deep HGF networks [4, H, H, 16] for H = 8..512: hgf_deep (1 core) and
+        GpuDeepNetwork against pyhgf JAX (CPU f64/f32, GPU f32/f64) and
+        rshgf. Then `melos run bench:plot`.
+    bench:plot:
+      run: cd tool/parity && uv run python bench_plot.py
+      description: >-
+        Redraw docs/benchmark*.svg from the last bench, bench:nuts-sweep and
+        bench:deep-sweep runs.

@@ -31,6 +31,18 @@ hgf.reset();
 hgf.step(Float64List.fromList([1.02]));            // or one trial at a time
 ```
 
+## Performance
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmark-dark.svg">
+  <img alt="Benchmark: hgf.dart (AOT, JIT, Wasm, JS, GPU) against pyhgf's JAX (CPU and GPU) and rshgf" src="docs/benchmark.svg">
+</picture>
+
+Full tables, NUTS sampling (hgf_fit against NumPyro and PyMC) and deep HGF
+networks (hgf_deep against pyhgf's JAX and rshgf): [docs/benchmark_results.md](docs/benchmark_results.md).
+Reproduce with `melos run bench`, `bench:nuts-sweep`, `bench:deep-sweep`
+and `bench:plot`.
+
 ## Repository layout
 
 A [melos](https://melos.invertase.dev) / pub workspace monorepo, laid out like

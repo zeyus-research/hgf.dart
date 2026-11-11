@@ -8,6 +8,11 @@ if missing), and writes ``customSmallerIsBetter`` JSON:
 
 Every timing is the median of ``--repeat`` warm runs. JAX compile/trace time is
 reported separately as ``.../jax_first_call``.
+
+JAX runs on the CPU unless ``JAX_PLATFORMS`` says otherwise (``rocm``,
+``cuda``); then names get a ``_gpu`` tag. Timings end with the results in host
+memory (``jax.device_get``, on a GPU), and the batch takes its omegas from host memory,
+so a GPU pays for its transfers, as hgf_gpu's end-to-end timings do.
 """
 
 from __future__ import annotations
@@ -79,6 +84,10 @@ def median_ms(fn, repeat: int) -> float:
 
 
 def block(x):
+    """Wait for [x]; on a GPU, also bring it to host memory (the readback
+    hgf_gpu's timings include). On the CPU the arrays are already there."""
+    if jax.default_backend() != "cpu":
+        return jax.device_get(x)
     return jax.tree_util.tree_map(lambda a: a.block_until_ready() if hasattr(a, "block_until_ready") else a, x)
 
 
@@ -89,7 +98,8 @@ def block(x):
 
 # Result-name suffix for JAX runs: float64 is the like-for-like comparison
 # (the Dart port is float64); `JAX_ENABLE_X64=0` gives pyhgf's default float32.
-JAX_TAG = "" if jax.config.jax_enable_x64 else "_f32"
+JAX_EXTRA = f"JAX {jax.__version__}, {jax.devices()[0].device_kind}"
+JAX_TAG = ("" if jax.default_backend() == "cpu" else "_gpu") + ("" if jax.config.jax_enable_x64 else "_f32")
 
 
 def jax_series(spec: dict, data: np.ndarray, repeat: int, name: str, out: list):
@@ -101,12 +111,13 @@ def jax_series(spec: dict, data: np.ndarray, repeat: int, name: str, out: list):
     t0 = time.perf_counter()
     block(net.input_data(input_data=x).node_trajectories)
     first = (time.perf_counter() - t0) * 1e3
-    out.append({"name": f"{name}/jax_first_call{JAX_TAG}", "unit": "ms", "value": first})
+    out.append({"name": f"{name}/jax_first_call{JAX_TAG}", "unit": "ms", "extra": JAX_EXTRA, "value": first})
 
     out.append(
         {
             "name": f"{name}/jax_input_data{JAX_TAG}",
             "unit": "ms",
+            "extra": JAX_EXTRA,
             "value": median_ms(lambda: block(net.input_data(input_data=x).node_trajectories), repeat),
         }
     )
@@ -120,6 +131,7 @@ def jax_series(spec: dict, data: np.ndarray, repeat: int, name: str, out: list):
         {
             "name": f"{name}/jax_jit_scan{JAX_TAG}",
             "unit": "ms",
+            "extra": JAX_EXTRA,
             "value": median_ms(lambda: block(run(attrs, inputs)), repeat),
         }
     )
@@ -147,12 +159,12 @@ def jax_batch(spec: dict, data: np.ndarray, omegas: np.ndarray, repeat: int, nam
         return last[1]["mean"], last[2]["mean"]
 
     batched = jax.jit(jax.vmap(one))
-    om = jnp.asarray(omegas)
+    om = np.asarray(omegas, dtype=np.float64 if jax.config.jax_enable_x64 else np.float32)
     t0 = time.perf_counter()
     block(batched(om))
-    out.append({"name": f"{name}/jax_first_call{JAX_TAG}", "unit": "ms", "value": (time.perf_counter() - t0) * 1e3})
+    out.append({"name": f"{name}/jax_first_call{JAX_TAG}", "unit": "ms", "extra": JAX_EXTRA, "value": (time.perf_counter() - t0) * 1e3})
     out.append(
-        {"name": f"{name}/jax_vmap{JAX_TAG}", "unit": "ms", "value": median_ms(lambda: block(batched(om)), repeat)}
+        {"name": f"{name}/jax_vmap{JAX_TAG}", "unit": "ms", "extra": JAX_EXTRA, "value": median_ms(lambda: block(batched(om)), repeat)}
     )
 
 

@@ -105,6 +105,37 @@ one) and in 443 ms on Wasm. That is 2.1× faster than JAX f64 `vmap`
 (133 ms). JAX f32 `vmap` (37.6 ms) is still 1.65× faster. Each element is
 bit-identical to `Network`.
 
+**Update with the GPU (2026-11-11)**, same machine plus an RX 7600 XT
+([benchmark_results.md](benchmark_results.md), which also has the NUTS and
+deep-network comparisons). hgf_gpu runs the batch end to end in 2.6 ms on
+wgpu-native and 4.0 ms on WebGPU in Chromium, 15× faster than JAX f32
+`vmap` on the CPU (37.7 ms). pyhgf's JAX on the same GPU (ROCm,
+`tool/parity/jax_rocm.sh`) gains nothing: 39.8 ms in f32 and 49.5 ms in f64.
+Its `lax.scan` launches kernels for every trial (~40 µs each), while
+hgf_gpu runs the whole trial loop in one dispatch. Single series on JAX-GPU
+take 0.2–3.5 s for the same reason.
+
+- **NUTS** (`bench:nuts-sweep`, 500 + 500, the same models on both sides
+  through hgf_fit's pyhgf export):
+  - On the binary models hgf_fit leads in min-ESS/s at 20 agents: the GPU
+    by 4–9× over NumPyro on one core, and 1 core is on par with NumPyro or
+    ahead.
+  - At 200 agents, NumPyro's joint sampler takes over 15 min, while
+    hgf_fit's GPU run takes 8–15 s.
+  - NumPyro on the GPU needs ~40 ms per gradient (0.6 ms on the CPU):
+    19 min for the b2 cell that hgf_gpu samples in 6 s.
+  - **Open issue:** on the continuous models, hgf_fit's per-agent chains
+    mix worse than the joint samplers. At 20 agents its min ESS is 23–137
+    against NumPyro/PyMC's 310–400. At 200 agents it does not converge
+    (R̂ up to 1.4), though it is still ahead in ESS/s. Warmup adaptation on
+    weakly identified ω₂ is the first suspect.
+- **Deep networks** (`bench:deep-sweep`):
+  - hgf_gpu's batchUpdate stays at 0.4–1.6 ms from H = 8 to 512; JAX on the
+    GPU takes ~2 ms.
+  - JAX-GPU's predict is flat at 0.6 ms and beats hgf_gpu's from H = 128.
+  - On one core, hgf_deep trails JAX and rshgf beyond H ≈ 32 (scalar code,
+    no SIMD). It is fastest only at H = 8.
+
 Gate criteria (from the plan):
 
 | criterion | result |

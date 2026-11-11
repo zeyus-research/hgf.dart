@@ -15,6 +15,23 @@ uv run python bench_python.py --repeat 7    # JAX (float64) + rshgf timings
 JAX_ENABLE_X64=0 uv run python bench_python.py --jax-only   # JAX float32
 ```
 
+Benchmark figures: `uv run python bench_plot.py` redraws `docs/benchmark*.svg`
+from the last `melos run bench`, `bench:nuts-sweep` and `bench:deep-sweep`.
+`nuts_sweep.py` samples the problems of hgf_gpu's `nuts_sweep.dart` with
+NumPyro and PyMC, using the pyhgf code that hgf_fit's `PythonExport`
+generates for each Dart model, so both sides fit the same model.
+
+### JAX on an AMD GPU
+
+`jax_rocm.sh setup` builds `.venv-rocm`, JAX with AMD's ROCm plugin for
+RDNA3 (gfx110X) cards, from AMD's wheel index, with no system ROCm install
+(~4 GB). `.venv-rocm/python-rocm` is the interpreter for `bench_compare.dart
+--jax-gpu`, `nuts_sweep.py all --gpu-python` and `bench_deep.py`. The script
+explains the workarounds: the gfx110X wheels lag JAX (0.9.x), a shim
+provides the `hwloc` library the plugin links but no wheel ships, and
+gfx1101/gfx1102 need `HSA_OVERRIDE_GFX_VERSION=11.0.0`. On NVIDIA,
+`pip install "jax[cuda12]"` in a venv with pyhgf does the same job.
+
 ## Fixtures
 
 `gen_fixtures.py` writes `packages/hgf/test/fixtures/<scenario>.json`, each

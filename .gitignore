@@ -40,3 +40,6 @@ bench*.json
 # Native Rust benchmark (lockfile copied from ../pyhgf at build time)
 tool/rs_native_bench/Cargo.lock
 tool/rs_native_bench/target/
+
+# JAX on ROCm (tool/parity/jax_rocm.sh)
+tool/parity/.venv-rocm/
