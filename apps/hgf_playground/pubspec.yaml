@@ -20,6 +20,7 @@ dependencies:
   hgf_fit: ^0.1.0-dev.1
   hgf_gpu: ^0.1.0-dev.1
   hgf_widgets: ^0.1.0-dev.1
+  material_ui: ^1.11.0
   meta: ^1.16.0
 
 dev_dependencies:

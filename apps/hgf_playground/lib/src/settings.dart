@@ -1,7 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:easy_shared_preferences/easy_shared_preferences.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import 'model/fit_config.dart';
 

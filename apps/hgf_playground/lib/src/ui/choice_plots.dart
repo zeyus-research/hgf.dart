@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:hgf_widgets/hgf_widgets.dart';
 
 import '../model/playground.dart';
