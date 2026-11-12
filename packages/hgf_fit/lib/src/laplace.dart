@@ -164,10 +164,17 @@ final class LaplaceFit {
 /// evidence it implies.
 ///
 /// The Hessian is taken on the unconstrained scale with relative step
-/// [step] (see `BatchedObjective.hessians`). The approximation assumes the
+/// [step] (see `BatchedObjective.hessians`), or with [exactHessian] exactly
+/// by forward-over-reverse (`HgfModel.exactHessians`: `k` Hessian-vector
+/// products, each about twice a reverse-mode gradient; needs reverse mode,
+/// and runs on the calling isolate). The approximation assumes the
 /// estimate is a mode: check `FitResult.converged`.
-LaplaceFit laplace(HgfModel model, MapFit fit, {double step = 1e-4}) =>
-    runInline((o) => _laplace(model, fit, step, o));
+LaplaceFit laplace(
+  HgfModel model,
+  MapFit fit, {
+  double step = 1e-4,
+  bool exactHessian = false,
+}) => runInline((o) => _laplace(model, fit, step, exactHessian, o));
 
 /// [laplace] with the Hessian pass split across the pool's isolates.
 extension LaplaceOnWorkers on PassRunner {
@@ -176,27 +183,42 @@ extension LaplaceOnWorkers on PassRunner {
     HgfModel model,
     MapFit fit, {
     double step = 1e-4,
-  }) => run((o) => _laplace(model, fit, step, o));
+    bool exactHessian = false,
+  }) => run((o) => _laplace(model, fit, step, exactHessian, o));
 }
 
 Iterable<Step> _laplace(
   HgfModel model,
   MapFit fit,
   double step,
+  bool exactHessian,
   Out<LaplaceFit> result,
 ) sync* {
   final objective = BatchedObjective(model, [
     for (final r in fit.results) r.subject,
   ]);
   final n = fit.results.length, k = model.dimension;
-  final h = Out<(Float64List, List<Float64List>)>();
-  yield* objective.hessianPasses(
-    [for (var s = 0; s < n; s++) s],
-    [for (final r in fit.results) r.y],
-    h,
-    step: step,
-  );
-  final (_, hessians) = h.value;
+  final List<Float64List> hessians;
+  if (exactHessian) {
+    final y = Float64List(n * k);
+    for (var s = 0; s < n; s++) {
+      y.setRange(s * k, (s + 1) * k, fit.results[s].y);
+    }
+    hessians = model.exactHessians(
+      [for (final r in fit.results) r.subject],
+      Int32List.fromList([for (var s = 0; s < n; s++) s]),
+      y,
+    );
+  } else {
+    final h = Out<(Float64List, List<Float64List>)>();
+    yield* objective.hessianPasses(
+      [for (var s = 0; s < n; s++) s],
+      [for (final r in fit.results) r.y],
+      h,
+      step: step,
+    );
+    hessians = h.value.$2;
+  }
   result.value = LaplaceFit(
     [
       for (var s = 0; s < n; s++)

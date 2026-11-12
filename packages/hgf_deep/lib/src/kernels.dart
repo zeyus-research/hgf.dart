@@ -38,6 +38,7 @@ final class DeepSettings {
     required this.feedforwardUncertainty,
     required this.carryPrecision,
     required this.meanFieldUpdates,
+    this.updateInputLayer = false,
     this.fixes = DeepFixes.none,
   });
 
@@ -48,6 +49,12 @@ final class DeepSettings {
   final bool feedforwardUncertainty;
   final bool carryPrecision;
   final bool meanFieldUpdates;
+
+  /// Whether the sweeps reach the top (input) layer: its precision is
+  /// predicted (`vectorised_root_prediction`) and updated from the layer
+  /// below, its mean stays clamped to the predictors (pyhgf's
+  /// `update_input_layer`). Only volatile top layers take part.
+  final bool updateInputLayer;
 
   /// Corrections to upstream (pyhgf) behaviour in force.
   final DeepFixes fixes;
@@ -83,6 +90,11 @@ final class Layer {
   /// with a trailing bias column when [LayerConfig.addConstantInput]; `null`
   /// for the bottom layer.
   Matrix? weights;
+
+  /// The precision of each weight's belief above the prior (pyhgf's
+  /// `weights_precision_delta`), same shape as [weights]; `null` until a
+  /// belief is installed ([LearningKind.synapticUncertainty] installs one).
+  Float64List? weightsPrecisionDelta;
 
   int get size => config.size;
   LayerKind get kind => config.kind;
@@ -146,6 +158,10 @@ const _sMsg = 7;
 const _sSquared = 8;
 const _sHt = 9;
 const _sOuter = 10;
+const _sEvidence = 11;
+const _sEvidenceUp = 12;
+const _sImportance = 13;
+const _sSquaredH = 14;
 
 /// `g(μ)` of [parent] rows, with a trailing bias row of ones when
 /// [hasConstant]: `(nParent[+1]) × width`.
@@ -470,26 +486,21 @@ void predictLayer(
   }
 }
 
-/// `vectorised_layer_prediction` with `_predict_volatility_level`.
-void _predictVolatile(
+/// `_predict_volatility_level`: predict [c]'s volatility level and return
+/// the diffusion term Ω of its value level (per element), or, without
+/// [DeepSettings.predictPrecision], pass the frozen level through.
+Float64List _predictVolatilityLevel(
   LayerState c,
   Layer cl,
-  LayerState p,
-  Layer pl,
   Workspace ws,
   double t,
   DeepSettings settings,
 ) {
   final n = c.nodes;
   final b = c.width;
-  final np = p.nodes;
-  final w = pl.weights!;
-  final cols = w.cols;
   final predict = settings.predictPrecision;
   final meanField = settings.meanFieldUpdates;
   final tonic = cl.tonicVolatility;
-
-  // 1. Volatility level, and the diffusion term Ω of the value level.
   final predVol = ws.take(_sPredVol, n);
   if (predict) {
     if (cl.hasVolatility) {
@@ -525,6 +536,29 @@ void _predictVolatile(
     c.expectedMeanVol!.setAll(0, c.meanVol!);
     c.expectedPrecisionVol!.setAll(0, c.precisionVol!);
   }
+
+  return predVol;
+}
+
+/// `vectorised_layer_prediction` with `_predict_volatility_level`.
+void _predictVolatile(
+  LayerState c,
+  Layer cl,
+  LayerState p,
+  Layer pl,
+  Workspace ws,
+  double t,
+  DeepSettings settings,
+) {
+  final n = c.nodes;
+  final b = c.width;
+  final np = p.nodes;
+  final w = pl.weights!;
+  final cols = w.cols;
+  final predict = settings.predictPrecision;
+
+  // 1. Volatility level, and the diffusion term Ω of the value level.
+  final predVol = _predictVolatilityLevel(c, cl, ws, t, settings);
 
   // 2. Value level: the mean, W @ g(μ̂_parent).
   final coupled = _coupled(ws, p.expectedMean, np, pl.coupling, pl.hasConstant);
@@ -952,15 +986,18 @@ void _fusedPosteriorMessages(
 }
 
 /// `vectorised_layer_posterior_update`: the value-level posterior of
-/// [parent] from [child]'s prediction errors.
+/// [parent] from [child]'s prediction errors. With [precisionOnly] (the top
+/// layer under [DeepSettings.updateInputLayer]) only the precision moves,
+/// clipped at the prediction, and the value prediction error is zero.
 void posteriorUpdate(
   LayerState parent,
   Layer parentLayer,
   LayerState child,
   Layer childLayer,
   Workspace ws,
-  DeepSettings settings,
-) {
+  DeepSettings settings, {
+  bool precisionOnly = false,
+}) {
   final w = parentLayer.weights!;
   final stride = w.cols;
   final nc = child.nodes;
@@ -1002,11 +1039,59 @@ void posteriorUpdate(
     final ep = parent.expectedPrecision[k];
     final info = pc1[k] * (g1 * g1);
     final raw = ep + info + (-g2 * msg[k]);
+    if (precisionOnly) {
+      // `_top_precision_only`: the mean stays on the predictors, so there is
+      // no residual (and no curvature floor: the mean never moves).
+      parent.precision[k] = _clip(raw, ep, maxPp);
+      parent.valuePredictionError[k] = 0.0;
+      continue;
+    }
     final p = _clip(raw, curvatureFloor ? ep + info : ep, maxPp);
     parent.precision[k] = p;
     parent.mean[k] = x + msg[k] * g1 / p;
   }
 }
+
+/// `vectorised_root_prediction`: predict the precisions of the top layer,
+/// which no parent predicts (its expected mean stays on the predictors).
+/// Without value parents the conditional and the marginal predicted
+/// precision coincide.
+void _predictRoot(
+  LayerState s,
+  Layer l,
+  Workspace ws,
+  double t,
+  DeepSettings settings,
+) {
+  final predVol = _predictVolatilityLevel(s, l, ws, t, settings);
+  final nb = s.nodes * s.width;
+  final pi = s.precision;
+  final ep = s.expectedPrecision;
+  final cep = s.conditionalExpectedPrecision;
+  final eff = s.effectivePrecision;
+  if (settings.predictPrecision) {
+    for (var k = 0; k < nb; k++) {
+      final pv = predVol[k];
+      final e = 1.0 / (1.0 / pi[k] + pv);
+      ep[k] = e;
+      cep[k] = e;
+      eff[k] = pv * e;
+    }
+  } else {
+    ep.setAll(0, pi);
+    cep.setAll(0, pi);
+    eff.fillRange(0, nb, 0.0);
+  }
+}
+
+/// Whether the sweeps treat the top layer as part of the hierarchy
+/// (`_sweeps_reach_top`): [DeepSettings.updateInputLayer], a layer below it
+/// to send it a message, and a volatile top layer (a binary layer's
+/// precision follows its clamped mean).
+bool sweepsReachTop(List<Layer> layers, DeepSettings settings) =>
+    settings.updateInputLayer &&
+    layers.length > 1 &&
+    layers.last.kind == LayerKind.volatile;
 
 // ---------------------------------------------------------------------------
 // Sweeps
@@ -1038,6 +1123,10 @@ void predictionSweep(
     }
   }
   onStep?.call(TracePhase.clampInput, layers.length - 1);
+  if (sweepsReachTop(layers, settings)) {
+    _predictRoot(top, layers.last, ws, timeStep, settings);
+    onStep?.call(TracePhase.predict, layers.length - 1);
+  }
   for (var i = layers.length - 1; i > 0; i--) {
     predictLayer(
       states[i - 1],
@@ -1055,7 +1144,8 @@ void predictionSweep(
 /// Bottom-up sweep: clamp rows `[start, start + width)` of [y] on the
 /// bottom layer, then the leaf prediction error and, on every interior
 /// layer, the posterior update and its prediction error. The top layer
-/// stays clamped. [onStep] is called after each phase.
+/// stays clamped (with [DeepSettings.updateInputLayer] its precision is
+/// updated). [onStep] is called after each phase.
 void updateSweep(
   List<Layer> layers,
   List<LayerState> states,
@@ -1088,6 +1178,19 @@ void updateSweep(
     onStep?.call(TracePhase.posterior, i);
     predictionError(states[i], layers[i], timeStep, settings);
     onStep?.call(TracePhase.layerError, i);
+  }
+  if (sweepsReachTop(layers, settings)) {
+    final t = layers.length - 1;
+    posteriorUpdate(
+      states[t],
+      layers[t],
+      states[t - 1],
+      layers[t - 1],
+      ws,
+      settings,
+      precisionOnly: true,
+    );
+    onStep?.call(TracePhase.posterior, t);
   }
 }
 
@@ -1122,29 +1225,88 @@ void inputPredictionError(
 
 /// The descent weight gradient of every layer, averaged over the samples
 /// and added into [grads] (`grads[i]` matches `layers[i].weights`; the
-/// bottom entry is `null`): `Σ_s u[i][s]·h[j][s] / width`.
+/// bottom entry is `null`): `Σ_s u[i][s]·h[j][s] / width` (pyhgf's
+/// `_weight_quantities` and `_contract_factors`).
+///
+/// [sampleWeights] (normalised to sum to 1, one per sample) turn the plain
+/// mean into a weighted one. With [importance] (same shapes as [grads]) the
+/// curvature increments `Σ_s p[i][s]·h[j][s]²` of
+/// [LearningKind.synapticUncertainty] are added into it too, with the same
+/// weights. Under that kind the child-side factors read the evidence
+/// precision carried up from the clamped layer
+/// (`clamped_layer_evidence`, then `evidence_pullback` per layer).
+/// [factorMax], if given, receives each layer's largest `|u|` (before the
+/// sample weights; `check_gradient_health`).
 void accumulateGradients(
   List<Layer> layers,
   List<LayerState> states,
   Workspace ws,
   LearningKind kind,
-  List<Float64List?> grads,
-) {
+  List<Float64List?> grads, {
+  Float64List? sampleWeights,
+  List<Float64List?>? importance,
+  Float64List? factorMax,
+}) {
+  final synaptic = kind == LearningKind.synapticUncertainty;
+  assert(importance == null || synaptic, 'Importance is synaptic-only');
+  final b = states.first.width;
+  assert(sampleWeights == null || sampleWeights.length == b);
+  // The evidence ξ at the current child, [node][sample].
+  Float64List? evidence;
+  if (synaptic) {
+    final c = states.first;
+    final n = c.nodes * b;
+    evidence = ws.atLeast(_sEvidence, n);
+    final discrete = layers.first.kind != LayerKind.volatile;
+    for (var k = 0; k < n; k++) {
+      final double e;
+      if (discrete) {
+        final prob = c.expectedMean[k];
+        e = prob * (1.0 - prob);
+      } else {
+        e = c.precision[k];
+      }
+      evidence[k] = _finite(e) ? e : 0.0;
+    }
+  }
+  final divisor = sampleWeights == null ? b.toDouble() : 1.0;
   for (var l = 1; l < layers.length; l++) {
     final pl = layers[l];
     final cl = layers[l - 1];
     final p = states[l];
     final c = states[l - 1];
-    final b = c.width;
     final nc = c.nodes;
     final cols = pl.weights!.cols;
     final weighted =
         kind != LearningKind.standard && cl.kind != LayerKind.binary;
     final u = ws.take(_sGain, nc);
+    final imp = importance == null ? null : ws.atLeast(_sImportance, nc * b);
     for (var k = 0; k < nc * b; k++) {
       var v = c.mean[k] - c.expectedMean[k];
-      if (weighted) v = v * c.precision[k];
-      u[k] = -(_finite(v) ? v : 0.0);
+      var softening = 1.0;
+      double floored = 0.0;
+      if (synaptic) {
+        // Ω = γ/π̂ of the child; the evidence crossing it softens to
+        // ξ/(1 + Ω·ξ).
+        final noise =
+            c.effectivePrecision[k] / _floor(c.expectedPrecision[k], 1e-30);
+        floored = _floor(evidence![k], 0.0);
+        softening = 1.0 / (1.0 + noise * floored);
+      }
+      if (weighted) {
+        v = v * c.precision[k];
+        if (synaptic) v = v * softening;
+      }
+      var uk = -(_finite(v) ? v : 0.0);
+      if (imp != null) {
+        final pk = floored * softening;
+        var pf = _finite(pk) ? pk : 0.0;
+        if (sampleWeights != null) pf = pf * sampleWeights[k % b];
+        imp[k] = pf;
+      }
+      if (factorMax != null && uk.abs() > factorMax[l]) factorMax[l] = uk.abs();
+      if (sampleWeights != null) uk = uk * sampleWeights[k % b];
+      u[k] = uk;
     }
     final h = _coupled(
       ws,
@@ -1154,20 +1316,54 @@ void accumulateGradients(
       pl.hasConstant,
       sanitize: true,
     );
-    _addOuter(grads[l]!, u, h, nc, cols, b, ws);
+    _addOuter(grads[l]!, u, h, nc, cols, b, ws, divisor);
+    if (imp != null) {
+      final h2 = ws.atLeast(_sSquaredH, cols * b);
+      for (var k = 0; k < cols * b; k++) {
+        final q = h[k] * h[k];
+        h2[k] = _finite(q) ? q : 0.0;
+      }
+      _addOuter(importance![l]!, imp, h2, nc, cols, b, ws, divisor);
+    }
     if (!pl.config.fullyConnected) {
       // One-to-one: only the diagonal weights are edges (pyhgf #476).
-      final g = grads[l]!;
-      for (var i = 0; i < nc; i++) {
-        for (var j = 0; j < cols; j++) {
-          if (i != j) g[i * cols + j] = 0.0;
+      for (final g in [grads[l]!, ?importance?[l]]) {
+        for (var i = 0; i < nc; i++) {
+          for (var j = 0; j < cols; j++) {
+            if (i != j) g[i * cols + j] = 0.0;
+          }
         }
       }
+    }
+    if (synaptic && l + 1 < layers.length) {
+      // evidence_pullback: ξ_j = g'(μ̂_j)² Σ_a W_aj² ξ̃_a.
+      final np = p.nodes;
+      final softened = ws.atLeast(_sImportance, nc * b);
+      for (var k = 0; k < nc * b; k++) {
+        final noise =
+            c.effectivePrecision[k] / _floor(c.expectedPrecision[k], 1e-30);
+        final f = _floor(evidence![k], 0.0);
+        softened[k] = f / (1.0 + noise * f);
+      }
+      final up = ws.atLeast(_sEvidenceUp, np * b);
+      final w = pl.weights!;
+      _gemmT(up, _squared(ws, w), nc, np, cols, softened, b);
+      final g = pl.coupling;
+      for (var k = 0; k < np * b; k++) {
+        final d = g.df(p.expectedMean[k]);
+        final v = up[k] * (d * d);
+        up[k] = _finite(v) ? (v < 0.0 ? 0.0 : v) : 0.0;
+      }
+      // Swap the two evidence buffers.
+      final next = ws.atLeast(_sEvidence, np * b);
+      next.setRange(0, np * b, up);
+      evidence = next;
     }
   }
 }
 
-/// `g[i][j] += Σ_s u[i][s] · h[j][s] / b` (a batch-mean outer product).
+/// `g[i][j] += Σ_s u[i][s] · h[j][s] / divisor` (a batch-mean outer product;
+/// [divisor] defaults to `b`).
 ///
 /// Wider batches transpose `h` to `[s][j]` (padded to an even width) and
 /// run the sum as a [matMul] with the samples as its depth: each sum still
@@ -1182,9 +1378,11 @@ void _addOuter(
   int nc,
   int cols,
   int b,
-  Workspace ws,
-) {
+  Workspace ws, [
+  double? divisor,
+]) {
   assert(g.length >= nc * cols && u.length >= nc * b && h.length >= cols * b);
+  final div = divisor ?? b.toDouble();
   if (b == 1) {
     for (var i = 0; i < nc; i++) {
       final ui = u[i];
@@ -1214,7 +1412,7 @@ void _addOuter(
     final gi = i * cols;
     final si = i * width;
     for (var j = 0; j < cols; j++) {
-      g[gi + j] += sums[si + j] / b;
+      g[gi + j] += sums[si + j] / div;
     }
   }
 }
@@ -1243,6 +1441,52 @@ void carryPrecisions(
                   )
             : layer.priorPrecision[i];
       }
+    }
+  }
+}
+
+/// One step of the weight-belief rule on every layer
+/// (`_apply_synaptic_uncertainty_updates`): with `π = max(Δ + π_p, 1e-30)`,
+/// `w ← w − α·g/π + (π_p/(N·π))·(μ_p − w)` and `Δ ← Δ + c·H − Δ/N`, from the
+/// descent gradients [grads] and curvature increments [importance]. In a
+/// one-to-one layer only the diagonal beliefs move (the reversion would
+/// move every weight).
+void applySynapticUncertainty(
+  List<Layer> layers,
+  List<Float64List?> grads,
+  List<Float64List?> importance,
+  SynapticUncertainty settings,
+) {
+  final prior = settings.priorPrecision;
+  final window = settings.window;
+  final mu = settings.priorMean;
+  final lr = settings.learningRate;
+  final scale = settings.incrementScale;
+  for (var l = 0; l < layers.length; l++) {
+    final layer = layers[l];
+    final w = layer.weights;
+    final g = grads[l];
+    if (w == null || g == null) continue;
+    final delta = layer.weightsPrecisionDelta;
+    if (delta == null) {
+      throw StateError(
+        'Layer $l holds weights but no weight belief: install one with '
+        'installWeightBelief().',
+      );
+    }
+    final h = importance[l]!;
+    final d = w.data;
+    final cols = w.cols;
+    final dense = layer.config.fullyConnected;
+    for (var k = 0; k < d.length; k++) {
+      if (!dense && k ~/ cols != k % cols) continue;
+      final dk = delta[k];
+      final pi = _floor(dk + prior, 1e-30);
+      final reversion = (prior / (window * pi)) * (mu - d[k]);
+      final update = -lr * g[k] / pi + reversion;
+      final increment = scale * h[k];
+      delta[k] = dk + increment - dk / window;
+      d[k] = d[k] + update;
     }
   }
 }

@@ -10,10 +10,8 @@ library;
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:hgf/hgf.dart';
 import 'package:hgf_gpu/native.dart';
 import 'package:hgf_gpu/src/fit/grad_kernel.dart';
-import 'package:hgf_gpu/src/trial.dart';
 import 'package:test/test.dart';
 
 import '../benchmark/src/reverse_cases.dart';
@@ -103,20 +101,4 @@ void main() {
       expect(checked, greaterThan(batch * params.length));
     }, skip: backend == null ? 'no wgpu-native' : false);
   }
-
-  test('compileSsa: unbounded update has no SSA form', () {
-    final net = Network()
-      ..addNodes()
-      ..addNodes(valueChildren: [0])
-      ..addNodes(volatilityChildren: [1]);
-    expect(
-      () => GradKernel(
-        net,
-        GpuResponse.totalGaussianSurprise,
-        params: const ['tv1'],
-        mode: GradMode.reverseTape,
-      ),
-      throwsUnsupportedError,
-    );
-  });
 }

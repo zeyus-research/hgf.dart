@@ -75,6 +75,14 @@ Future<void> main(List<String> args) async {
       mode: GradMode.reverseCheckpoint,
       checkpoint: checkpoint,
     );
+    kernels['rev ckpt, no 0-guard'] = GradKernel(
+      rc.network(),
+      rc.response,
+      params: rc.params,
+      mode: GradMode.reverseCheckpoint,
+      checkpoint: checkpoint,
+      zeroGuard: false,
+    );
     print(
       '== ${rc.name}: $p parameters, '
       '${kernels['rev tape']!.tapeCarried} carried slots '

@@ -1,5 +1,12 @@
 ## Unreleased
 
+- The rest of pyhgf's learning: `LearningKind.synapticUncertainty`
+  (weight beliefs; `SynapticUncertainty` settings, `installWeightBelief`,
+  `weightPrecisionDeltas`, saved by `toJson` and `snapshot`),
+  `batchUpdate(sampleWeight:)`, `DeepNetwork(updateInputLayer:)` and
+  `checkGradientHealth` (`GradientHealth`). 16 new pyhgf fixtures, all
+  within 1e-9.
+
 - `DeepNetwork.toJson` / `DeepNetwork.fromJson`: save a network (settings,
   layers, weights, per-node parameters, current beliefs) and load it back
   bit for bit; custom couplings by name.

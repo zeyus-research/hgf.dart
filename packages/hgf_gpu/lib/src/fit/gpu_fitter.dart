@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:hgf/hgf.dart';
@@ -28,7 +29,30 @@ import 'fit_kernel.dart';
 /// a browser), and one GPU thread filters a trial more slowly than a CPU
 /// core.
 final class GpuFitter implements PassRunner {
-  GpuFitter(this.backend, {this.cpu, this.trialsPerDispatch = 0});
+  GpuFitter(
+    this.backend, {
+    this.cpu,
+    this.trialsPerDispatch = 0,
+    this.gradientMode = GpuGradientMode.auto,
+    this.reverseAbove = defaultReverseAbove,
+  });
+
+  /// How gradients are computed: forward-mode tangents, reverse mode, or
+  /// ([GpuGradientMode.auto]) reverse mode once the parameters times the
+  /// carried slots exceed [reverseAbove].
+  final GpuGradientMode gradientMode;
+
+  /// [GpuGradientMode.auto] switches to reverse mode above this many
+  /// `parameters × carried slots`: a forward-mode thread carries that many
+  /// tangents, and past a register budget they spill and the cost jumps
+  /// (DIFFERENTIATION.md §7). Measured (`benchmark/bin/fit_reverse_gpu.dart`,
+  /// Apple M3 Pro): at 170 reverse mode is 2× faster on the unbounded
+  /// update and ~1.4× slower on standard/eHGF; past ~300 it wins on every
+  /// model (19× at 2013).
+  final int reverseAbove;
+
+  /// The default [reverseAbove].
+  static const defaultReverseAbove = 150;
 
   final GpuBackend backend;
 
@@ -54,7 +78,7 @@ final class GpuFitter implements PassRunner {
   /// Why the last model that fell back to the CPU has no GPU kernel.
   String? fallbackReason;
 
-  final _models = <(Network, ResponseModel, String, bool), _Model?>{};
+  final _models = <(Network, ResponseModel, String, bool, int), _Model?>{};
   final _subjectData = Expando<Map<(int, bool), _SubjectData>>();
   bool _disposed = false;
 
@@ -122,27 +146,65 @@ final class GpuFitter implements PassRunner {
   Future<void> evaluatePass(Pass pass) async {
     if (_disposed) throw StateError('GpuFitter disposed');
     if (pass.precise || pass.length == 0) return _cpu(pass);
-    final m = await _model(pass.model, pass.gradient != null);
+    final m = await _model(pass.model, pass.gradient != null, pass.subjects);
     if (m == null) return _cpu(pass);
     gpuPasses++;
     gpuElements += pass.length;
     await m.evaluate(this, pass);
   }
 
-  Future<_Model?> _model(HgfModel model, bool gradients) async {
+  Future<_Model?> _model(
+    HgfModel model,
+    bool gradients,
+    List<Subject> subjects,
+  ) async {
     final sig = [
       for (final p in model.parameters) p.targets.join('|'),
     ].join(';');
-    final key = (model.network, model.response, sig, gradients);
+    // Reverse mode checkpoints every ~√T trials (rounded up to a multiple
+    // of 8, so similar lengths share a kernel).
+    var checkpoint = 0;
+    if (gradients && gradientMode != GpuGradientMode.forward) {
+      final t = _maxTime(subjects, model.network.inputIdxs.length);
+      checkpoint = math.max(8, (math.sqrt(t).ceil() + 7) ~/ 8 * 8);
+    }
+    final key = (model.network, model.response, sig, gradients, checkpoint);
     if (_models.containsKey(key)) return _models[key];
     _Model? m;
     try {
-      final kernel = FitKernel(model, gradients: gradients);
-      m = _Model(kernel, await backend.pipeline(kernel.source));
+      var reverse = false;
+      if (gradients) {
+        reverse = switch (gradientMode) {
+          GpuGradientMode.forward => false,
+          GpuGradientMode.reverse => true,
+          GpuGradientMode.auto =>
+            model.dimension * FitKernel(model).tapeCarried > reverseAbove,
+        };
+      }
+      final kernel = FitKernel(
+        model,
+        gradients: gradients,
+        reverse: reverse,
+        checkpoint: reverse ? checkpoint : 32,
+      );
+      m = _Model(
+        kernel,
+        await backend.pipeline(kernel.source),
+        reverse ? await backend.pipeline(kernel.reverseSource!) : null,
+      );
     } on UnsupportedError catch (e) {
       fallbackReason = e.message;
     }
     return _models[key] = m;
+  }
+
+  /// The longest series among [subjects] (trials).
+  static int _maxTime(List<Subject> subjects, int nIn) {
+    var t = 0;
+    for (final s in subjects) {
+      t = math.max(t, nIn == 0 ? 0 : s.inputs.length ~/ nIn);
+    }
+    return t;
   }
 
   _SubjectData _data(List<Subject> subjects, HgfModel model) {
@@ -244,31 +306,59 @@ final class _SubjectData {
   final int maxTime;
 }
 
+/// Which mode [GpuFitter] computes gradients in.
+enum GpuGradientMode {
+  /// Reverse mode for models whose forward tangents would not fit in
+  /// registers ([GpuFitter.reverseAbove]), forward mode otherwise.
+  auto,
+
+  /// Forward-mode tangents: cost grows with the number of parameters.
+  forward,
+
+  /// Reverse mode (adjoints, √T checkpoints): a fixed multiple of the
+  /// likelihood's cost.
+  reverse,
+}
+
 /// A compiled model and its per-pass buffers (grown as needed).
 final class _Model {
-  _Model(this.kernel, this.pipeline);
+  _Model(this.kernel, this.pipeline, this.reversePipeline);
 
   final FitKernel kernel;
   final GpuPipeline pipeline;
-  GpuBuffer? _state, _tangents, _job, _params;
-  int _capacity = 0;
 
-  void _ensure(GpuBackend backend, int b) {
-    if (b <= _capacity) return;
+  /// Reverse mode: the backward sweep.
+  final GpuPipeline? reversePipeline;
+  GpuBuffer? _state, _tangents, _job, _params, _tape, _seg, _adj;
+  int _capacity = 0, _tapeSegments = 0;
+
+  void _ensure(GpuBackend backend, int b, int maxTime) {
+    final segments = kernel.segments(maxTime);
+    if (b <= _capacity && segments <= _tapeSegments) return;
     release(backend);
     final cap = b < 64 ? 64 : b;
     final k = kernel.directions;
     final stateBytes = kernel.nSlots * cap * 4;
-    final tanBytes = kernel.tangentSlots * k * cap * 4;
+    final tanBytes = kernel.reverse ? 0 : kernel.tangentSlots * k * cap * 4;
+    final nC = math.max(1, kernel.tapeCarried);
+    final tapeBytes = segments * nC * cap * 4;
+    final segBytes = kernel.checkpoint * nC * cap * 4;
     final limit = backend.maxStorageBufferBytes;
-    if (stateBytes > limit || tanBytes > limit) {
+    final most = [stateBytes, tanBytes, tapeBytes, segBytes].reduce(math.max);
+    if (most > limit) {
       throw ArgumentError(
-        'A pass of $b elements needs ${stateBytes > tanBytes ? stateBytes : tanBytes} '
-        'bytes of state; the device allows $limit',
+        'A pass of $b elements needs a $most-byte buffer; the device allows '
+        '$limit',
       );
     }
     _state = backend.storage(stateBytes);
-    if (k > 0) _tangents = backend.storage(tanBytes);
+    if (k > 0 && !kernel.reverse) _tangents = backend.storage(tanBytes);
+    if (kernel.reverse) {
+      _tape = backend.storage(tapeBytes);
+      _seg = backend.storage(segBytes);
+      _adj = backend.storage(nC * cap * 4);
+      _tapeSegments = segments;
+    }
     _job = backend.storage(
       (cap + kernel.initial.length + (k > 0 ? 2 : 1) * _dim * cap) * 4,
     );
@@ -285,8 +375,8 @@ final class _Model {
     final model = pass.model;
     final k = model.dimension, b = pass.length, kd = kernel.directions;
     _dim = k;
-    _ensure(backend, b);
     final data = fitter._data(pass.subjects, model);
+    _ensure(backend, b, data.maxTime);
 
     // Job: each element's subject, the initial slots, then x and dx/dy.
     final nInit = kernel.initial.length;
@@ -328,6 +418,7 @@ final class _Model {
       _job!,
       data.table,
       ?_tangents,
+      ?_tape,
     ];
     for (var t0 = 0; t0 < (nTime == 0 ? 1 : nTime); t0 += chunk) {
       params
@@ -337,6 +428,36 @@ final class _Model {
       backend
         ..writeUints(_params!, params)
         ..dispatch(pipeline, bindings, groups);
+    }
+    final rp = reversePipeline;
+    if (rp != null) {
+      // The backward sweep, last segment first; a dispatch recomputes and
+      // reverses `perDispatch` segments (each ~4 primal trials' work per
+      // trial, so about as long as a forward dispatch).
+      final nSeg = kernel.segments(nTime);
+      final perDispatch = fitter.trialsPerDispatch <= 0
+          ? nSeg
+          : math.max(1, fitter.trialsPerDispatch ~/ (4 * kernel.checkpoint));
+      final rb = [
+        _state!,
+        data.data,
+        _params!,
+        _job!,
+        data.table,
+        _tape!,
+        _seg!,
+        _adj!,
+      ];
+      for (var hi = nSeg; hi > 0; hi -= perDispatch) {
+        params
+          ..[0] = b
+          ..[1] = hi
+          ..[2] = perDispatch
+          ..[3] = nSeg;
+        backend
+          ..writeUints(_params!, params)
+          ..dispatch(rp, rb, groups);
+      }
     }
     fitter
       ..prepareTime.stop()
@@ -377,10 +498,11 @@ final class _Model {
   }
 
   void release(GpuBackend backend) {
-    for (final buf in [_state, _tangents, _job, _params]) {
+    for (final buf in [_state, _tangents, _job, _params, _tape, _seg, _adj]) {
       if (buf != null) backend.release(buf);
     }
-    _state = _tangents = _job = _params = null;
+    _state = _tangents = _job = _params = _tape = _seg = _adj = null;
     _capacity = 0;
+    _tapeSegments = 0;
   }
 }

@@ -1,6 +1,7 @@
 /// Run every benchmark runtime on the same scenarios and print a comparison.
 ///
 ///     dart run tool/bench_compare.dart [--repeat 7] [--rust] [--gpu] [--no-python] [--no-web]
+///         [--out docs/benchmark_results.md]
 ///     dart run tool/bench_compare.dart --report-only   # rewrite the markdown
 ///                                                      # from the last JSON
 ///
@@ -39,6 +40,7 @@ Future<void> main(List<String> args) async {
   var python = true, web = true, rust = false, gpu = false;
   var reportOnly = false;
   String? jaxGpu;
+  var report = '$root/docs/benchmark_results.md';
   for (var i = 0; i < args.length; i++) {
     switch (args[i]) {
       case '--repeat':
@@ -55,6 +57,8 @@ Future<void> main(List<String> args) async {
         jaxGpu = File(args[++i]).absolute.path;
       case '--report-only':
         reportOnly = true;
+      case '--out':
+        report = File(args[++i]).absolute.path;
       default:
         stderr.writeln('Unknown argument ${args[i]}');
         exit(64);
@@ -70,7 +74,7 @@ Future<void> main(List<String> args) async {
         _gpuName ??= r['extra'] as String?;
       }
     }
-    await _writeReport(results, repeat: repeat, gpu: gpu);
+    await _writeReport(results, repeat: repeat, gpu: gpu, path: report);
     return;
   }
 
@@ -199,16 +203,17 @@ Future<void> main(List<String> args) async {
   File(
     '${out.path}/bench_all.json',
   ).writeAsStringSync(const JsonEncoder.withIndent(' ').convert(results));
-  await _writeReport(results, repeat: repeat, gpu: gpu);
+  await _writeReport(results, repeat: repeat, gpu: gpu, path: report);
 }
 
 Future<void> _writeReport(
   List<Map<String, Object?>> results, {
   required int repeat,
   required bool gpu,
+  required String path,
 }) async {
   final table = _table(results);
-  final md = File('$root/docs/benchmark_results.md');
+  final md = File(path);
   md.parent.createSync(recursive: true);
   md.writeAsStringSync(
     '# Benchmark results\n\n'
@@ -562,6 +567,13 @@ String _fmt(double v) => v >= 100
     : v.toStringAsFixed(2);
 
 Future<String> _cpu() async {
+  if (Platform.isMacOS) {
+    final name = (await _capture('sysctl', [
+      '-n',
+      'machdep.cpu.brand_string',
+    ])).trim();
+    if (name.isNotEmpty && name != 'n/a') return name;
+  }
   try {
     final info = File('/proc/cpuinfo').readAsLinesSync();
     final line = info.firstWhere((l) => l.startsWith('model name'));

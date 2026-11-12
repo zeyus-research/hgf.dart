@@ -130,6 +130,23 @@ Future<List<(String, double, int)>> compareNetworks(
   return out;
 }
 
+/// Whether the GPU kernels cover every feature [fixture] uses: not
+/// `update_input_layer`, the weight-belief rule (`synaptic_uncertainty`),
+/// weighted batches or the gradient-health probe (CPU only so far).
+bool gpuDeepSupported(Map<String, Object?> fixture) {
+  final settings = fixture['settings'] as Map<String, Object?>;
+  if (settings['update_input_layer'] == true) return false;
+  for (final o in fixture['ops'] as List<Object?>) {
+    final op = o as Map<String, Object?>;
+    if (op['op'] == 'health' ||
+        op['learning_kind'] == 'synaptic_uncertainty' ||
+        op['sample_weight'] != null) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /// Replays [fixture]'s operations on the CPU; before each `batch_update`
 /// and `predict`, the GPU takes the CPU's current state and runs the same
 /// operation (with a fresh optimiser on both sides). Returns one line per

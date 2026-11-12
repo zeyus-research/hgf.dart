@@ -51,7 +51,10 @@ void main() {
 
   setUpAll(() async {
     fixtures = await read('../hgf/test/fixtures');
-    deepFixtures = await read('../hgf_deep/test/fixtures');
+    deepFixtures = [
+      for (final f in await read('../hgf_deep/test/fixtures'))
+        if (deep.gpuDeepSupported(f)) f,
+    ];
     backend = await WebGpuBackend.create();
   });
 
@@ -70,6 +73,22 @@ void main() {
       return;
     }
     final fitter = GpuFitter(backend!);
+    final failures = await checkFitCases(fitter, log: print);
+    expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
+    expect(failures, isEmpty, reason: failures.take(20).join('\n'));
+  });
+
+  test('fit passes in reverse mode, split into dispatches: f32 GPU values '
+      'and gradients match f64 CPU', () async {
+    if (backend == null) {
+      markTestSkipped('No WebGPU adapter in this browser');
+      return;
+    }
+    final fitter = GpuFitter(
+      backend!,
+      gradientMode: GpuGradientMode.reverse,
+      trialsPerDispatch: 37,
+    );
     final failures = await checkFitCases(fitter, log: print);
     expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
     expect(failures, isEmpty, reason: failures.take(20).join('\n'));

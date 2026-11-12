@@ -157,6 +157,11 @@ final class DeepKernels {
       throw ArgumentError('A GPU deep network needs at least two layers.');
     }
     if (capacity < 1) throw ArgumentError.value(capacity, 'capacity');
+    if (settings.updateInputLayer) {
+      throw UnsupportedError(
+        'updateInputLayer has no GPU kernel yet: use the CPU DeepNetwork.',
+      );
+    }
     for (final l in layers) {
       if (l.coupling is! CouplingFn) {
         throw UnsupportedError(

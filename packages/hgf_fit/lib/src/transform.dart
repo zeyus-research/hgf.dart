@@ -42,6 +42,20 @@ abstract class Transform {
     return (logAbsJacobian(y + h) - logAbsJacobian(y - h)) / (2 * h);
   }
 
+  /// `d²x/dy²` at `y` (for exact Hessians). The default takes central
+  /// differences of [dToConstrained]; the built-in transforms are exact.
+  double d2ToConstrained(double y) {
+    final h = 1e-5 * (y.abs() > 1 ? y.abs() : 1.0);
+    return (dToConstrained(y + h) - dToConstrained(y - h)) / (2 * h);
+  }
+
+  /// `d² log |dx/dy| / dy²` at `y`. The default takes central differences
+  /// of [dLogAbsJacobian]; the built-in transforms are exact.
+  double d2LogAbsJacobian(double y) {
+    final h = 1e-5 * (y.abs() > 1 ? y.abs() : 1.0);
+    return (dLogAbsJacobian(y + h) - dLogAbsJacobian(y - h)) / (2 * h);
+  }
+
   /// This transform as JSON, with a `"type"` key, for `FitCodec` (e.g. to
   /// send a model to a Web Worker). The built-in ones are covered; a custom
   /// one overrides this and gives the `FitCodec` a decoder for its type.
@@ -69,6 +83,12 @@ final class IdentityTransform extends Transform {
 
   @override
   double dLogAbsJacobian(double y) => 0.0;
+
+  @override
+  double d2ToConstrained(double y) => 0.0;
+
+  @override
+  double d2LogAbsJacobian(double y) => 0.0;
 
   @override
   Map<String, Object?> toJson() => {'type': 'Identity'};
@@ -100,6 +120,12 @@ final class LowerBoundTransform extends Transform {
 
   @override
   double dLogAbsJacobian(double y) => 1.0;
+
+  @override
+  double d2ToConstrained(double y) => math.exp(y);
+
+  @override
+  double d2LogAbsJacobian(double y) => 0.0;
 }
 
 /// `y = log(upper − x)`.
@@ -128,6 +154,12 @@ final class UpperBoundTransform extends Transform {
 
   @override
   double dLogAbsJacobian(double y) => 1.0;
+
+  @override
+  double d2ToConstrained(double y) => -math.exp(y);
+
+  @override
+  double d2LogAbsJacobian(double y) => 0.0;
 }
 
 /// `y = logit((x − lower) / (upper − lower))`.
@@ -170,6 +202,20 @@ final class IntervalTransform extends Transform {
   /// `σ(−y) − σ(y)`.
   @override
   double dLogAbsJacobian(double y) => 1 - 2 * _sigmoid(y);
+
+  /// `(upper − lower) σ(y) σ(−y) (1 − 2σ(y))`.
+  @override
+  double d2ToConstrained(double y) {
+    final p = _sigmoid(y);
+    return (upper - lower) * p * (1 - p) * (1 - 2 * p);
+  }
+
+  /// `−2 σ(y) σ(−y)`.
+  @override
+  double d2LogAbsJacobian(double y) {
+    final p = _sigmoid(y);
+    return -2 * p * (1 - p);
+  }
 }
 
 double _sigmoid(double y) =>

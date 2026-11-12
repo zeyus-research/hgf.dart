@@ -207,4 +207,30 @@ void main() {
     expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
     expect(failures, isEmpty, reason: failures.take(20).join('\n'));
   });
+
+  for (final perDispatch in [0, 37]) {
+    test('fit passes in reverse mode'
+        '${perDispatch > 0 ? ', $perDispatch trials per dispatch' : ''}: '
+        'f32 GPU values and gradients match f64 CPU', () async {
+      final WgpuBackend? backend;
+      try {
+        backend = WgpuBackend.create();
+      } on ArgumentError catch (e) {
+        markTestSkipped('wgpu-native not available: ${e.message}');
+        return;
+      }
+      if (backend == null) {
+        markTestSkipped('No wgpu adapter');
+        return;
+      }
+      final fitter = GpuFitter(
+        backend,
+        gradientMode: GpuGradientMode.reverse,
+        trialsPerDispatch: perDispatch,
+      );
+      final failures = await checkFitCases(fitter, log: print);
+      expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
+      expect(failures, isEmpty, reason: failures.take(20).join('\n'));
+    });
+  }
 }

@@ -60,6 +60,8 @@ final class FitCodec {
     'response': encodeResponse(model.response),
     'parameters': encodeParameters(model.parameters),
     'block_size': model.blockSize,
+    'gradient_mode': model.gradientMode.name,
+    'reverse_above': model.reverseAbove,
   };
 
   /// A model from [encodeModel]'s output.
@@ -77,6 +79,13 @@ final class FitCodec {
       response: decodeResponse(json['response'] as Map<String, Object?>),
       parameters: decodeParameters(json['parameters'] as List<Object?>),
       blockSize: (json['block_size'] as num).toInt(),
+      gradientMode: switch (json['gradient_mode']) {
+        final String m => GradientMode.values.byName(m),
+        _ => GradientMode.auto,
+      },
+      reverseAbove:
+          (json['reverse_above'] as num?)?.toInt() ??
+          HgfModel.defaultReverseAbove,
     );
   }
 

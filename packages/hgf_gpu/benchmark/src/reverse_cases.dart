@@ -102,6 +102,22 @@ Network _wideBinary() {
   return net;
 }
 
+/// Two continuous inputs, a value parent each, one shared volatility parent:
+/// the unbounded update blends two Lambert W expansions.
+Network _twoChildrenUnbounded() =>
+    Network(volatilityUpdates: VolatilityUpdates.unbounded)
+      ..addNodes()
+      ..addNodes()
+      ..addNodes(valueChildren: [0])
+      ..addNodes(valueChildren: [1])
+      ..addNodes(volatilityChildren: [2, 3]);
+
+Network _binary3Unbounded() =>
+    Network(volatilityUpdates: VolatilityUpdates.unbounded)
+      ..addNodes(kind: NodeKind.binaryState)
+      ..addNodes(valueChildren: [0])
+      ..addNodes(volatilityChildren: [1]);
+
 const _c3Params = [
   'tv0', 'tv1', 'tv2', 'm1', 'p1', 'm2', 'p2', 'k2_1', 'td1', 'ac1', //
 ];
@@ -130,6 +146,30 @@ final reverseCases = <ReverseCase>[
     _c3Params,
     nInputs: 1,
     binary: false,
+  ),
+  ReverseCase(
+    'continuous3-unbounded',
+    () => _continuous3(VolatilityUpdates.unbounded),
+    GpuResponse.totalGaussianSurprise,
+    _c3Params,
+    nInputs: 1,
+    binary: false,
+  ),
+  ReverseCase(
+    'two-children-unbounded',
+    _twoChildrenUnbounded,
+    GpuResponse.totalGaussianSurprise,
+    const ['tv0', 'tv1', 'tv2', 'tv3', 'tv4', 'm4', 'p4', 'k4_2', 'k4_3'],
+    nInputs: 2,
+    binary: false,
+  ),
+  ReverseCase(
+    'binary3-unbounded',
+    _binary3Unbounded,
+    GpuResponse.firstLevelBinarySurprise,
+    const ['tv1', 'tv2', 'm1', 'p1', 'm2', 'k2_1'],
+    nInputs: 1,
+    binary: true,
   ),
   ReverseCase(
     'wide-binary-33',

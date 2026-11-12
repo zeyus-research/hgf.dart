@@ -67,7 +67,17 @@ enum LearningKind {
 
   /// The free-energy gradient, `δ·π_child ⊗ g(μ_parent)` (binary children
   /// stay unweighted). pyhgf's default.
-  precisionWeighted('precision_weighted');
+  precisionWeighted('precision_weighted'),
+
+  /// The weight-belief rule: every weight carries a Gaussian belief (its
+  /// value is the mean, [Layer.weightsPrecisionDelta] the precision above
+  /// the prior). The gradient is the precision-weighted one charged with
+  /// the child's process noise, `δ·π/(1 + Ω·ξ)`, and the step divides it by
+  /// the weight's precision, which grows with the curvature the data
+  /// impose (`ξ̃·g(μ)²`, the evidence ξ carried up from the clamped layer:
+  /// a Gauss–Newton diagonal). No optimiser: the settings are a
+  /// [SynapticUncertainty].
+  synapticUncertainty('synaptic_uncertainty');
 
   const LearningKind(this.pyhgfName);
 
@@ -78,12 +88,71 @@ enum LearningKind {
   static LearningKind parse(String name) => switch (name) {
     'standard' => standard,
     'precision_weighted' => precisionWeighted,
+    'synaptic_uncertainty' => synapticUncertainty,
     _ => throw ArgumentError.value(
       name,
       'name',
-      'Unknown learning kind. Choose from standard, precision_weighted',
+      'Unknown learning kind. Choose from standard, precision_weighted, '
+          'synaptic_uncertainty',
     ),
   };
+}
+
+/// Settings of [LearningKind.synapticUncertainty], pyhgf's
+/// `learning_kwargs` (`resolve_synaptic_uncertainty_settings`).
+///
+/// One step moves each weight `w` with precision `π = π_p + Δ` by
+/// `−α·g/π + (π_p/(N·π))·(μ_p − w)` and its precision by
+/// `Δ ← Δ + c·H − Δ/N`, where `g` is the descent gradient, `H` the
+/// curvature increment, `N` the [window], `π_p = 1/`[priorVariance], `μ_p`
+/// the [priorMean], `α` the [learningRate] and `c` the [incrementScale].
+/// Before any curvature accumulates, the rule is gradient descent at rate
+/// `α·priorVariance`.
+final class SynapticUncertainty {
+  SynapticUncertainty({
+    required this.window,
+    this.priorVariance = 1.0,
+    this.priorMean = 0.0,
+    this.learningRate = 1.0,
+    this.incrementScale = 1.0,
+  }) {
+    if (!(window >= 1)) {
+      throw ArgumentError.value(window, 'window', 'must be at least 1');
+    }
+    if (!(priorVariance > 0)) {
+      throw ArgumentError.value(priorVariance, 'priorVariance', 'must be > 0');
+    }
+    if (!(learningRate > 0)) {
+      throw ArgumentError.value(learningRate, 'learningRate', 'must be > 0');
+    }
+    if (!(incrementScale > 0)) {
+      throw ArgumentError.value(
+        incrementScale,
+        'incrementScale',
+        'must be > 0',
+      );
+    }
+  }
+
+  /// The memory window `N`, in update steps: importance older than about
+  /// `N` steps no longer protects a weight.
+  final double window;
+
+  /// Variance of the per-weight prior; also the step size before any
+  /// importance has accumulated.
+  final double priorVariance;
+
+  /// Mean the weights revert toward.
+  final double priorMean;
+
+  /// Multiplier `α` on the gradient part of the step.
+  final double learningRate;
+
+  /// Multiplier `c` on the importance increment.
+  final double incrementScale;
+
+  /// `1 / priorVariance`.
+  double get priorPrecision => 1.0 / priorVariance;
 }
 
 /// A belief field of a layer, for initial-state overrides and recording.

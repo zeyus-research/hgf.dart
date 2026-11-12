@@ -191,6 +191,7 @@ final class GpuDeepNetwork {
     double timeStep = 1.0,
     Optimiser? optimiser,
   }) {
+    _rejectSynaptic(learningKind);
     _u
       ..[0] = b
       ..[1] = start
@@ -413,5 +414,16 @@ final class GpuDeepNetwork {
     for (final b in [_params, _state, _uniform, _x, _y, _out]) {
       if (b != null) backend.release(b);
     }
+  }
+}
+
+/// [LearningKind.synapticUncertainty] (the weight-belief rule) has no GPU
+/// kernel yet.
+void _rejectSynaptic(LearningKind kind) {
+  if (kind == LearningKind.synapticUncertainty) {
+    throw UnsupportedError(
+      'LearningKind.synapticUncertainty has no GPU kernel yet: use the CPU '
+      'DeepNetwork.',
+    );
   }
 }

@@ -45,6 +45,7 @@ final class DeepNetwork {
     this.tonicVolatility = false,
     bool meanFieldUpdates = false,
     bool carryPrecision = true,
+    bool updateInputLayer = false,
     DeepFixes? fixes,
   }) : settings = DeepSettings(
          volatilityUpdates: volatilityUpdates,
@@ -54,6 +55,7 @@ final class DeepNetwork {
          feedforwardUncertainty: feedforwardUncertainty,
          carryPrecision: carryPrecision,
          meanFieldUpdates: meanFieldUpdates,
+         updateInputLayer: updateInputLayer,
          fixes: fixes ?? defaultFixes,
        ) {
     if (meanFieldUpdates && feedforwardUncertainty) {
@@ -277,6 +279,82 @@ final class DeepNetwork {
     }
   }
 
+  /// The accumulated precision of each weight's belief above the prior
+  /// (pyhgf's `weights_precision_delta`), bottom to top: `null` for the
+  /// bottom layer and for layers without a belief. Same shapes as
+  /// [weights]; the network's own (changes take effect).
+  List<Matrix?> get weightPrecisionDeltas => [
+    for (final l in _layers)
+      l.weightsPrecisionDelta == null
+          ? null
+          : Matrix(l.weights!.rows, l.weights!.cols, l.weightsPrecisionDelta!),
+  ];
+
+  /// Give the weights of [layers] (indices, 0 the bottom; default every
+  /// layer holding weights) a belief: its mean is the weight, its precision
+  /// above the prior starts at zero. Layers that already carry one keep it.
+  /// [LearningKind.synapticUncertainty] installs it itself.
+  DeepNetwork installWeightBelief({List<int>? layers}) {
+    _requireLayers();
+    if (layers != null) {
+      final unheld = [
+        for (final i in layers)
+          if (i < 0 || i >= _layers.length || _layers[i].weights == null) i,
+      ];
+      if (unheld.isNotEmpty) {
+        throw ArgumentError(
+          'Layers $unheld hold no weight matrix, so they cannot carry a '
+          'weight belief.',
+        );
+      }
+    }
+    for (var i = 0; i < _layers.length; i++) {
+      final l = _layers[i];
+      if (l.weights == null || l.weightsPrecisionDelta != null) continue;
+      if (layers != null && !layers.contains(i)) continue;
+      l.weightsPrecisionDelta = Float64List(l.weights!.data.length);
+    }
+    return this;
+  }
+
+  /// Check a learning request (pyhgf's `_resolve_learning`): the
+  /// weight-belief rule takes its settings instead of an optimiser.
+  /// Installs the weight belief when [kind] asks for it.
+  void _resolveLearning(
+    LearningKind kind,
+    SynapticUncertainty? synaptic,
+    Optimiser? optimiser,
+  ) {
+    if (kind != LearningKind.synapticUncertainty) {
+      if (synaptic != null) {
+        throw ArgumentError(
+          'synapticUncertainty settings are only used by '
+          'LearningKind.synapticUncertainty, not by ${kind.name}.',
+        );
+      }
+      return;
+    }
+    if (settings.meanFieldUpdates) {
+      throw ArgumentError(
+        'LearningKind.synapticUncertainty is derived from the relaxed '
+        'updates and is not available with meanFieldUpdates.',
+      );
+    }
+    if (synaptic == null) {
+      throw ArgumentError(
+        'LearningKind.synapticUncertainty needs its settings: pass '
+        'synapticUncertainty: SynapticUncertainty(window: N).',
+      );
+    }
+    if (optimiser != null) {
+      throw ArgumentError(
+        'LearningKind.synapticUncertainty takes its step size from the '
+        'weight belief: pass no optimiser.',
+      );
+    }
+    installWeightBelief();
+  }
+
   /// Draw every dense weight matrix from [strategy] (one-to-one layers keep
   /// the identity). The bias column is set to
   /// zero and left out of the fan-in. Each layer draws from its own stream,
@@ -324,18 +402,23 @@ final class DeepNetwork {
   /// without it they go back to their values before the fit after every
   /// sample. [record] names the fields to keep at every step, in
   /// [trajectories].
+  ///
+  /// [LearningKind.synapticUncertainty] learns with the weight-belief rule
+  /// instead of an optimiser: pass its settings as [synapticUncertainty].
   Matrix fit(
     Matrix x,
     Matrix y, {
     Optimiser? optimiser,
     LearningKind learningKind = LearningKind.precisionWeighted,
+    SynapticUncertainty? synapticUncertainty,
     bool weightUpdate = true,
     double timeStep = 1.0,
     bool updatePrecisions = true,
     Set<LayerField> record = const {},
   }) {
     _requireLayers(2);
-    if (weightUpdate && optimiser == null) {
+    _resolveLearning(learningKind, synapticUncertainty, optimiser);
+    if (weightUpdate && optimiser == null && synapticUncertainty == null) {
       throw ArgumentError('fit needs an optimiser (or weightUpdate: false).');
     }
     _checkColumns(x, _configs.last.size, 'x');
@@ -354,12 +437,17 @@ final class DeepNetwork {
     final traj = record.isEmpty ? null : DeepTrajectories._(record, _state, n);
     final grads = _gradBuffers();
     final weights = this.weights;
+    final learner = !weightUpdate
+        ? null
+        : synapticUncertainty == null
+        ? _Learner.optimiser(optimiser!)
+        : _Learner.synaptic(synapticUncertainty, _gradBuffers());
     for (var t = 0; t < n; t++) {
       _stepRow(
         x,
         y,
         t,
-        weightUpdate ? optimiser : null,
+        learner,
         learningKind,
         timeStep,
         template,
@@ -380,7 +468,7 @@ final class DeepNetwork {
     Matrix x,
     Matrix y,
     int t,
-    Optimiser? optimiser,
+    _Learner? learner,
     LearningKind learningKind,
     double timeStep,
     List<LayerState>? template,
@@ -396,12 +484,25 @@ final class DeepNetwork {
         : (TracePhase phase, int layer) => rec.record(phase, layer, _state);
     predictionSweep(_layers, _state, x, t, _ws1, timeStep, settings, hook);
     updateSweep(_layers, _state, y, t, _ws1, timeStep, settings, hook);
-    if (optimiser != null || rec != null) {
+    if (learner != null || rec != null) {
       for (final g in grads) {
         g?.fillRange(0, g.length, 0.0);
       }
-      accumulateGradients(_layers, _state, _ws1, learningKind, grads);
-      optimiser?.step(weights, grads);
+      final imp = learner?.importance;
+      if (imp != null) {
+        for (final g in imp) {
+          g?.fillRange(0, g.length, 0.0);
+        }
+      }
+      accumulateGradients(
+        _layers,
+        _state,
+        _ws1,
+        learningKind,
+        grads,
+        importance: imp,
+      );
+      learner?.step(_layers, weights, grads);
       rec?.record(
         TracePhase.weightUpdate,
         -1,
@@ -442,6 +543,7 @@ final class DeepNetwork {
     List<double>? y,
     Optimiser? optimiser,
     LearningKind learningKind = LearningKind.precisionWeighted,
+    SynapticUncertainty? synapticUncertainty,
     double timeStep = 1.0,
     bool updatePrecisions = true,
   }) {
@@ -465,12 +567,17 @@ final class DeepNetwork {
     }
     final ym = Matrix.row(y);
     _checkColumns(ym, _configs.first.size, 'y');
+    _resolveLearning(learningKind, synapticUncertainty, optimiser);
     final out = Matrix(1, _configs.first.size);
     _stepRow(
       xm,
       ym,
       0,
-      optimiser,
+      synapticUncertainty != null
+          ? _Learner.synaptic(synapticUncertainty, _gradBuffers())
+          : optimiser == null
+          ? null
+          : _Learner.optimiser(optimiser),
       learningKind,
       timeStep,
       updatePrecisions ? null : [for (final s in _state) s.copy()],
@@ -514,6 +621,12 @@ final class DeepNetwork {
   DeepSnapshot snapshot() => DeepSnapshot._(
     [for (final l in _layers) l.weights?.copy()],
     [for (final s in _state) s.copy()],
+    [
+      for (final l in _layers)
+        l.weightsPrecisionDelta == null
+            ? null
+            : Float64List.fromList(l.weightsPrecisionDelta!),
+    ],
   );
 
   /// Put the weights and beliefs back to [snap] (taken from this network,
@@ -525,6 +638,10 @@ final class DeepNetwork {
     for (var l = 0; l < _layers.length; l++) {
       final w = snap._weights[l];
       if (w != null) _layers[l].weights!.data.setAll(0, w.data);
+      final d = snap._deltas[l];
+      _layers[l].weightsPrecisionDelta = d == null
+          ? null
+          : Float64List.fromList(d);
       _state[l].setFrom(snap._states[l]);
     }
   }
@@ -626,15 +743,25 @@ final class DeepNetwork {
   ///
   /// Returns the per-sample error messages at the input layer
   /// (`samples × inputSize`), for whatever sits behind this network.
+  ///
+  /// [sampleWeight] (one non-negative weight per row) makes every batch
+  /// mean a weighted mean with denominator `sum(sampleWeight)`, so padded
+  /// or masked rows (weight 0) do not dilute the step. An all-zero mask
+  /// contributes nothing, but the optimiser still steps.
+  /// [LearningKind.synapticUncertainty] takes [synapticUncertainty] instead
+  /// of an optimiser.
   Matrix batchUpdate(
     Matrix x,
     Matrix y, {
     Optimiser? optimiser,
     LearningKind learningKind = LearningKind.precisionWeighted,
+    SynapticUncertainty? synapticUncertainty,
     double timeStep = 1.0,
     bool updatePrecisions = true,
+    List<double>? sampleWeight,
   }) {
     _requireLayers(2);
+    _resolveLearning(learningKind, synapticUncertainty, optimiser);
     _checkColumns(x, _configs.last.size, 'x');
     _checkColumns(y, _configs.first.size, 'y');
     if (x.rows != y.rows) {
@@ -644,46 +771,160 @@ final class DeepNetwork {
       );
     }
     final b = x.rows;
+    Float64List? weightsOfSamples;
+    if (sampleWeight != null) {
+      if (sampleWeight.length != b) {
+        throw ArgumentError(
+          'sampleWeight has ${sampleWeight.length} entries for $b samples.',
+        );
+      }
+      var total = 0.0;
+      for (final v in sampleWeight) {
+        total += v;
+      }
+      final denom = total > 0 ? total : 1.0;
+      weightsOfSamples = Float64List.fromList([
+        for (final v in sampleWeight) v / denom,
+      ]);
+    }
     final ws = _workspace(b);
     final states = _tiled(b);
     predictionSweep(_layers, states, x, 0, ws, timeStep, settings);
     updateSweep(_layers, states, y, 0, ws, timeStep, settings);
     final errors = Matrix(b, _configs.last.size);
     inputPredictionError(_layers, states, ws, settings, errors, 0);
-    if (optimiser != null) {
+    final learner = synapticUncertainty != null
+        ? _Learner.synaptic(synapticUncertainty, _gradBuffers())
+        : optimiser == null
+        ? null
+        : _Learner.optimiser(optimiser);
+    if (learner != null) {
       final grads = _gradBuffers();
-      accumulateGradients(_layers, states, ws, learningKind, grads);
-      optimiser.step(weights, grads);
+      accumulateGradients(
+        _layers,
+        states,
+        ws,
+        learningKind,
+        grads,
+        sampleWeights: weightsOfSamples,
+        importance: learner.importance,
+      );
+      learner.step(_layers, weights, grads);
     }
     if (updatePrecisions) {
       carryPrecisions(_layers, states, settings);
       for (var l = 0; l < _state.length; l++) {
         final t = _state[l];
         final s = states[l];
-        _addMeanIncrement(t.precision, s.precision, b);
+        _addMeanIncrement(t.precision, s.precision, b, weightsOfSamples);
         if (t.meanVol != null) {
-          _addMeanIncrement(t.meanVol!, s.meanVol!, b);
-          _addMeanIncrement(t.precisionVol!, s.precisionVol!, b);
+          _addMeanIncrement(t.meanVol!, s.meanVol!, b, weightsOfSamples);
+          _addMeanIncrement(
+            t.precisionVol!,
+            s.precisionVol!,
+            b,
+            weightsOfSamples,
+          );
         }
       }
     }
     return errors;
   }
 
-  /// `template += mean_s(batch[·][s] − template)`.
+  /// `template += mean_s(batch[·][s] − template)`, or with [weights] (summing
+  /// to 1, or all zero) `template += Σ_s weights[s]·(batch[·][s] − template)`.
   static void _addMeanIncrement(
     Float64List template,
     Float64List batch,
-    int b,
-  ) {
+    int b, [
+    Float64List? weights,
+  ]) {
     for (var i = 0; i < template.length; i++) {
       final t = template[i];
       var sum = 0.0;
-      for (var s = 0; s < b; s++) {
-        sum += batch[i * b + s] - t;
+      if (weights == null) {
+        for (var s = 0; s < b; s++) {
+          sum += batch[i * b + s] - t;
+        }
+        template[i] = t + sum / b;
+      } else {
+        for (var s = 0; s < b; s++) {
+          sum += weights[s] * (batch[i * b + s] - t);
+        }
+        template[i] = t + sum;
       }
-      template[i] = t + sum / b;
     }
+  }
+
+  /// How much learning signal each weight matrix receives
+  /// (`check_gradient_health`): one prediction and update sweep on the
+  /// sample `(x, y)` from the current state (which is left unchanged),
+  /// then the largest child-side gradient factor `|u|` per matrix.
+  ///
+  /// A matrix is [GradientHealth.dead] when that is exactly zero or below
+  /// [relativeFloor] times the largest, or when its child's belief
+  /// displacement is within a few float32 ulps of the belief's scale
+  /// ([GradientHealth.quantised]: the factor is rounding noise at float32,
+  /// the precision of the GPU and of pyhgf's default).
+  GradientHealth checkGradientHealth(
+    List<double> x,
+    List<double> y, {
+    LearningKind learningKind = LearningKind.precisionWeighted,
+    double relativeFloor = 1e-9,
+  }) {
+    _requireLayers(2);
+    final xm = Matrix.row(x), ym = Matrix.row(y);
+    _checkColumns(xm, _configs.last.size, 'x');
+    _checkColumns(ym, _configs.first.size, 'y');
+    final states = [for (final st in _state) st.copy()];
+    final ws = Workspace(1);
+    predictionSweep(_layers, states, xm, 0, ws, 1.0, settings);
+    updateSweep(_layers, states, ym, 0, ws, 1.0, settings);
+    final factorMax = Float64List(_layers.length);
+    accumulateGradients(
+      _layers,
+      states,
+      ws,
+      learningKind,
+      _gradBuffers(),
+      factorMax: factorMax,
+    );
+    final magnitudes = <double?>[
+      null,
+      for (var l = 1; l < _layers.length; l++) factorMax[l],
+    ];
+    var live = 0.0;
+    for (final m in magnitudes) {
+      if (m != null && m > live) live = m;
+    }
+    final dead = <int>{
+      for (var l = 1; l < magnitudes.length; l++)
+        if (magnitudes[l]! == 0.0 || magnitudes[l]! < live * relativeFloor) l,
+    };
+    // Displacements within a few f32 ulps of the belief's scale.
+    const eps32 = 1.1920928955078125e-7;
+    final quantised = <int>[];
+    for (var l = 1; l < _layers.length; l++) {
+      final c = states[l - 1];
+      final ulps = [
+        for (var k = 0; k < c.nodes; k++)
+          c.valuePredictionError[k].abs() /
+              math.max(
+                math.max(c.mean[k].abs(), c.expectedMean[k].abs()) * eps32,
+                1e-300,
+              ),
+      ]..sort();
+      final n = ulps.length;
+      final median = n.isOdd
+          ? ulps[n ~/ 2]
+          : (ulps[n ~/ 2 - 1] + ulps[n ~/ 2]) / 2;
+      if (median < 8.0) quantised.add(l);
+    }
+    return GradientHealth._(
+      magnitudes,
+      (dead..addAll(quantised)).toList()..sort(),
+      quantised,
+    );
   }
 
   /// The batch states, re-armed from the network's state.
@@ -748,8 +989,64 @@ final class DeepTrajectories {
 /// A copy of a [DeepNetwork]'s weights and beliefs ([DeepNetwork.snapshot]).
 /// Optimiser state is not included (see [Optimiser.copy]).
 final class DeepSnapshot {
-  DeepSnapshot._(this._weights, this._states);
+  DeepSnapshot._(this._weights, this._states, this._deltas);
 
   final List<Matrix?> _weights;
   final List<LayerState> _states;
+  final List<Float64List?> _deltas;
+}
+
+/// The result of [DeepNetwork.checkGradientHealth].
+final class GradientHealth {
+  GradientHealth._(this.magnitudes, this.dead, this.quantised);
+
+  /// Per weight matrix (indexed like [DeepNetwork.weights]; `null` for the
+  /// bottom layer), the largest child-side gradient factor `|u|`.
+  final List<double?> magnitudes;
+
+  /// The matrices receiving no usable signal, by either detector.
+  final List<int> dead;
+
+  /// The subset flagged because the child's belief displacement is within
+  /// a few float32 ulps of its scale.
+  final List<int> quantised;
+
+  /// Whether part of the network learns while another part does not (the
+  /// case pyhgf warns about: only a head is training).
+  bool get partiallyDead =>
+      dead.isNotEmpty &&
+      [
+        for (var l = 0; l < magnitudes.length; l++)
+          if (magnitudes[l] case final m? when m > 0 && !dead.contains(l)) l,
+      ].isNotEmpty;
+
+  @override
+  String toString() =>
+      'GradientHealth(magnitudes: $magnitudes, dead: $dead, '
+      'quantised: $quantised)';
+}
+
+/// What takes the learning step: an [Optimiser], or the weight-belief rule
+/// of [LearningKind.synapticUncertainty] (which also needs the curvature
+/// increments, in [importance]).
+final class _Learner {
+  _Learner.optimiser(Optimiser this.optimiser)
+    : synaptic = null,
+      importance = null;
+
+  _Learner.synaptic(SynapticUncertainty this.synaptic, this.importance)
+    : optimiser = null;
+
+  final Optimiser? optimiser;
+  final SynapticUncertainty? synaptic;
+  final List<Float64List?>? importance;
+
+  void step(List<Layer> layers, List<Matrix?> weights, List<Float64List?> g) {
+    final o = optimiser;
+    if (o != null) {
+      o.step(weights, g);
+    } else {
+      applySynapticUncertainty(layers, g, importance!, synaptic!);
+    }
+  }
 }

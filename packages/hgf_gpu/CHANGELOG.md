@@ -1,5 +1,15 @@
 ## Unreleased
 
+- Reverse mode in `GpuFitter`: `FitKernel(reverse: true)` (√T
+  checkpoints, split across dispatches like the forward pass) and
+  `GpuFitter(gradientMode:, reverseAbove:)`, `auto` by default (reverse
+  above 150 parameters × carried slots: 2–19× faster where forward mode's
+  tangents spill). The unbounded update now has an SSA form, and adjoints
+  stay finite through branches not taken. The IR moved to
+  `package:hgf_fit/ir.dart` (`src/ir.dart` and `src/trial.dart` re-export
+  it); `gpuResponseOf` is `irResponseOf`. `GpuDeepNetwork` and
+  `GpuDeepEnsemble` reject hgf_deep's new learning options for now.
+
 - `GpuSoftmax`: hgf_fit's `SoftmaxReadout` on the GPU (`GpuFitter`), with
   tangents; f32 within 2e-7 of f64 on the IGT and bandit cases.
 - `GpuDeepEnsemble` keeps each member's working state in workgroup memory

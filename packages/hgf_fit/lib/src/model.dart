@@ -3,6 +3,9 @@ import 'dart:typed_data';
 
 import 'package:hgf/hgf.dart';
 
+import 'ir/eval.dart';
+import 'ir/response.dart';
+import 'ir/trial.dart';
 import 'parameter.dart';
 import 'prior.dart';
 import 'response_model.dart';
@@ -54,7 +57,10 @@ final class HgfModel {
     required this.response,
     required List<Parameter> parameters,
     this.blockSize = 256,
-  }) : network = network..build(),
+    this.gradientMode = GradientMode.auto,
+    this.reverseAbove = defaultReverseAbove,
+  }) : _reverseState = _ReverseState(),
+       network = network..build(),
        parameters = List.unmodifiable(parameters),
        _batches = {},
        _responseNames = response.parameters.keys.toList(growable: false),
@@ -103,6 +109,9 @@ final class HgfModel {
     : network = base.network,
       response = base.response,
       blockSize = base.blockSize,
+      gradientMode = base.gradientMode,
+      reverseAbove = base.reverseAbove,
+      _reverseState = base._reverseState,
       _responseNames = base._responseNames,
       _responseDefaults = base._responseDefaults,
       _batches = base._batches;
@@ -146,6 +155,80 @@ final class HgfModel {
 
   /// `BatchNetwork.blockSize` for the batches.
   final int blockSize;
+
+  /// How [negLogPosterior] computes exact gradients: forward-mode tangents
+  /// through `BatchNetwork` (cost about `1 + 0.6·dimension` likelihoods),
+  /// reverse mode ([IrReverse]: a fixed multiple of the likelihood), or
+  /// [GradientMode.auto]: reverse once [dimension] exceeds
+  /// [reverseAbove]. Models reverse mode can't express (vector node kinds,
+  /// custom couplings or responses, multi-column inputs) use forward mode
+  /// whatever this says ([reverseUnsupported] tells why).
+  final GradientMode gradientMode;
+
+  /// [GradientMode.auto] uses reverse mode above this many parameters.
+  final int reverseAbove;
+
+  /// The default [reverseAbove]. Measured on the CPU (AOT, Apple M3 Pro,
+  /// `benchmark/bin/reverse_cpu.dart`): forward mode costs about
+  /// `1 + 0.6·k` likelihoods, reverse mode 8–12, so they cross between
+  /// k ≈ 12 and 18 depending on the model.
+  static const defaultReverseAbove = 16;
+
+  final _ReverseState _reverseState;
+
+  /// Why reverse mode is unavailable for this model (`null` when it is
+  /// available).
+  String? get reverseUnsupported {
+    _reverse();
+    return _reverseState.reason;
+  }
+
+  /// Whether [negLogPosterior] computes gradients in reverse mode.
+  bool get usesReverseGradients => switch (gradientMode) {
+    GradientMode.forward => false,
+    GradientMode.reverse => _reverse() != null,
+    GradientMode.auto => dimension > reverseAbove && _reverse() != null,
+  };
+
+  /// The reverse-mode evaluator and each parameter's slots, built once
+  /// (`null` where the model has no IR form).
+  _Reverse? _reverse() {
+    final st = _reverseState;
+    if (st.built) return st.value;
+    st.built = true;
+    try {
+      final ir = IrReverse(network, irResponseOf(response));
+      final responseNames = response.parameters.keys.toList();
+      // The slot each target sets; the last parameter wins, as on the CPU.
+      final owner = <int, int>{};
+      for (var i = 0; i < dimension; i++) {
+        for (final t in parameters[i].targets) {
+          final v = switch (t) {
+            NodeTarget(:final node, :final field) =>
+              gpuNodeFields.contains(field)
+                  ? TrialCompiler.fieldVar(node, field)
+                  : throw UnsupportedError('No IR slot for $field'),
+            ValueCouplingTarget(:final parent, :final child) =>
+              'a${parent}_$child',
+            VolatilityCouplingTarget(:final parent, :final child) =>
+              'k${parent}_$child',
+            ResponseTarget(:final name) => 'rp${responseNames.indexOf(name)}',
+          };
+          owner[ir.slotOfVar[v]!] = i;
+        }
+      }
+      st.value = _Reverse(ir, [
+        for (var i = 0; i < dimension; i++)
+          Int32List.fromList([
+            for (final MapEntry(:key, :value) in owner.entries)
+              if (value == i) key,
+          ]),
+      ]);
+    } on UnsupportedError catch (e) {
+      st.reason = '${e.message}';
+    }
+    return st.value;
+  }
 
   final List<String> _responseNames;
   final Float64List _responseDefaults;
@@ -264,6 +347,18 @@ final class HgfModel {
         throw ArgumentError('gradient must have ${nE * k} entries');
       }
     }
+    if (exact && usesReverseGradients) {
+      return _negLogPosteriorReverse(
+        subjects,
+        subjectOf,
+        y,
+        out,
+        jacobian: jacobian,
+        negLogLikelihood: negLogLikelihood,
+        gradient: gradient,
+        includePrior: includePrior,
+      );
+    }
     final groups = _group(subjects, subjectOf);
     final x = Float64List(nE * k);
     final dxdy = exact ? Float64List(nE * k) : null;
@@ -315,6 +410,160 @@ final class HgfModel {
         );
       }
     }
+  }
+
+  /// The exact Hessian of each element's negative log posterior with
+  /// respect to its unconstrained parameters `y` (`k × k`, row-major), by
+  /// forward-over-reverse through the trial's IR (`IrReverse`): one
+  /// Hessian-vector product per parameter, each about twice the cost of a
+  /// reverse-mode gradient. With [jacobian] and [includePrior] as in
+  /// [negLogPosterior]. NaN where the value is not finite.
+  ///
+  /// Needs reverse mode ([reverseUnsupported] `null`). For Laplace
+  /// approximations; with few parameters the finite differences of
+  /// `laplace` (`2k² + 1` likelihoods) are cheaper, these are exact.
+  List<Float64List> exactHessians(
+    List<Subject> subjects,
+    Int32List subjectOf,
+    Float64List y, {
+    bool jacobian = false,
+    List<bool>? includePrior,
+  }) {
+    final rev = _reverse();
+    if (rev == null) {
+      throw UnsupportedError(
+        'Exact Hessians need reverse mode: ${_reverseState.reason}',
+      );
+    }
+    final ir = rev.ir;
+    final k = dimension, nE = subjectOf.length, nS = ir.nSlots;
+    if (y.length != nE * k) {
+      throw ArgumentError('y must have ${nE * k} entries ($nE x $k)');
+    }
+    // Element e, direction j is element e * k + j of the sweep.
+    final m = nE * k;
+    final subj = Int32List(m);
+    final slots = Float64List(m * nS), dir = Float64List(m * nS);
+    final x = Float64List(nE * k);
+    for (var e = 0; e < nE; e++) {
+      for (var i = 0; i < k; i++) {
+        x[e * k + i] = parameters[i].transform.toConstrained(y[e * k + i]);
+      }
+      for (var j = 0; j < k; j++) {
+        final r = e * k + j;
+        subj[r] = subjectOf[e];
+        slots.setAll(r * nS, ir.initialSlots);
+        for (var i = 0; i < k; i++) {
+          for (final s in rev.slotsOf[i]) {
+            slots[r * nS + s] = x[e * k + i];
+          }
+        }
+        for (final s in rev.slotsOf[j]) {
+          dir[r * nS + s] = 1.0;
+        }
+      }
+    }
+    final nll = Float64List(m);
+    final adj = Float64List(m * nS), hvp = Float64List(m * nS);
+    ir.hessianVectorProducts(subjects, subj, slots, dir, nll, adj, hvp);
+    double sumOver(Float64List a, int r, int i) {
+      var v = 0.0;
+      for (final s in rev.slotsOf[i]) {
+        v += a[r * nS + s];
+      }
+      return v;
+    }
+
+    return [
+      for (var e = 0; e < nE; e++)
+        () {
+          final h = Float64List(k * k);
+          if (!nll[e * k].isFinite) return h..fillRange(0, k * k, double.nan);
+          final d1 = Float64List(k), d2 = Float64List(k);
+          for (var i = 0; i < k; i++) {
+            final t = parameters[i].transform, yi = y[e * k + i];
+            d1[i] = t.dToConstrained(yi);
+            d2[i] = t.d2ToConstrained(yi);
+          }
+          // The likelihood: J·H_x·J, H_x[i][j] from direction j.
+          for (var i = 0; i < k; i++) {
+            for (var j = 0; j < k; j++) {
+              h[i * k + j] = d1[i] * d1[j] * sumOver(hvp, e * k + j, i);
+            }
+          }
+          // Symmetric to rounding: average the two triangles.
+          for (var i = 0; i < k; i++) {
+            for (var j = i + 1; j < k; j++) {
+              final v = (h[i * k + j] + h[j * k + i]) / 2;
+              h[i * k + j] = v;
+              h[j * k + i] = v;
+            }
+          }
+          for (var i = 0; i < k; i++) {
+            final p = parameters[i], xi = x[e * k + i], yi = y[e * k + i];
+            // The chain rule's second term: ∂ℓ/∂x · d²x/dy².
+            var v = sumOver(adj, e * k, i) * d2[i];
+            if (includePrior == null || includePrior[i]) {
+              v -=
+                  p.prior.d2LogDensity(xi) * d1[i] * d1[i] +
+                  p.prior.dLogDensity(xi) * d2[i];
+              if (jacobian) v -= p.transform.d2LogAbsJacobian(yi);
+            }
+            h[i * k + i] += v;
+          }
+          return h;
+        }(),
+    ];
+  }
+
+  /// [negLogPosterior] with the likelihood's gradient from reverse mode.
+  void _negLogPosteriorReverse(
+    List<Subject> subjects,
+    Int32List subjectOf,
+    Float64List y,
+    Float64List out, {
+    required bool jacobian,
+    required Float64List? negLogLikelihood,
+    required Float64List gradient,
+    required List<bool>? includePrior,
+  }) {
+    final rev = _reverse()!;
+    final ir = rev.ir;
+    final k = dimension, nE = subjectOf.length, nS = ir.nSlots;
+    final slots = Float64List(nE * nS);
+    for (var e = 0; e < nE; e++) {
+      slots.setAll(e * nS, ir.initialSlots);
+      for (var i = 0; i < k; i++) {
+        final xi = parameters[i].transform.toConstrained(y[e * k + i]);
+        for (final s in rev.slotsOf[i]) {
+          slots[e * nS + s] = xi;
+        }
+      }
+    }
+    final nll = Float64List(nE);
+    final adj = Float64List(nE * nS);
+    ir.evaluate(subjects, subjectOf, slots, nll, adjoints: adj);
+    final lg = Float64List(nE * k);
+    for (var e = 0; e < nE; e++) {
+      for (var i = 0; i < k; i++) {
+        var a = 0.0;
+        for (final s in rev.slotsOf[i]) {
+          a += adj[e * nS + s];
+        }
+        lg[e * k + i] =
+            a * parameters[i].transform.dToConstrained(y[e * k + i]);
+      }
+    }
+    negLogLikelihood?.setAll(0, nll);
+    completeNegLogPosterior(
+      y,
+      nll,
+      out,
+      jacobian: jacobian,
+      likelihoodGradient: lg,
+      gradient: gradient,
+      includePrior: includePrior,
+    );
   }
 
   /// Element [e]'s posterior from its likelihood [nll]: the prior and
@@ -842,4 +1091,33 @@ final class _BoundResponse extends ResponseFunction {
       element * nParams,
     );
   }
+}
+
+/// How [HgfModel.negLogPosterior] computes exact gradients.
+enum GradientMode {
+  /// Reverse mode above [HgfModel.reverseAbove] parameters, forward mode
+  /// otherwise.
+  auto,
+
+  /// Forward-mode tangents through `BatchNetwork`.
+  forward,
+
+  /// Reverse mode ([IrReverse]).
+  reverse,
+}
+
+final class _Reverse {
+  _Reverse(this.ir, this.slotsOf);
+
+  final IrReverse ir;
+
+  /// The slots each parameter sets.
+  final List<Int32List> slotsOf;
+}
+
+/// Built lazily, shared by the copies of a model ([HgfModel.withPriors]).
+final class _ReverseState {
+  bool built = false;
+  _Reverse? value;
+  String? reason;
 }

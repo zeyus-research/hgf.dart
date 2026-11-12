@@ -192,12 +192,13 @@ melos:
         skips without wgpu-native) with a few epochs each.
     bench:deep:
       run: >-
+        PIN=$(command -v taskset >/dev/null && echo 'taskset -c 0');
         cd packages/hgf_deep &&
         dart compile exe benchmark/bin/deep_benchmark.dart -o .dart_tool/deep_bench &&
-        taskset -c 0 .dart_tool/deep_bench --out .dart_tool/deep_problems.json &&
+        $PIN .dart_tool/deep_bench --out .dart_tool/deep_problems.json &&
         cd ../../tool/parity &&
-        taskset -c 0 uv run python bench_deep.py ../../packages/hgf_deep/.dart_tool/deep_problems.json &&
-        taskset -c 0 uv run python bench_deep.py ../../packages/hgf_deep/.dart_tool/deep_problems.json --f32
+        $PIN uv run python bench_deep.py ../../packages/hgf_deep/.dart_tool/deep_problems.json &&
+        $PIN uv run python bench_deep.py ../../packages/hgf_deep/.dart_tool/deep_problems.json --f32
       description: >-
         DeepNetwork fit (sequential), batch_update and predict on three
         tanh networks, one core: hgf_deep against pyhgf JAX (float64 and
@@ -215,12 +216,13 @@ melos:
         `--agents N` by running the steps by hand.
     bench:nuts:
       run: >-
+        PIN=$(command -v taskset >/dev/null && echo 'taskset -c 0');
         cd packages/hgf_fit &&
         dart compile exe benchmark/bin/fit_benchmark.dart -o .dart_tool/fit_benchmark &&
-        taskset -c 0 .dart_tool/fit_benchmark --repeat 1 --nuts --out .dart_tool/nuts_problem.json &&
+        $PIN .dart_tool/fit_benchmark --repeat 1 --nuts --out .dart_tool/nuts_problem.json &&
         cd ../../tool/parity &&
-        taskset -c 0 uv run --with numpyro python fit_nuts_jax.py ../../packages/hgf_fit/.dart_tool/nuts_problem.json --backend numpyro &&
-        taskset -c 0 uv run python fit_nuts_jax.py ../../packages/hgf_fit/.dart_tool/nuts_problem.json --backend pymc
+        $PIN uv run --with numpyro python fit_nuts_jax.py ../../packages/hgf_fit/.dart_tool/nuts_problem.json --backend numpyro &&
+        $PIN uv run python fit_nuts_jax.py ../../packages/hgf_fit/.dart_tool/nuts_problem.json --backend pymc
       description: >-
         NUTS on pyhgf's parameter-recovery problem (20 agents, 4 chains,
         1000 + 1000), one core: hgf_fit's sampleNuts against PyMC (the
@@ -228,12 +230,13 @@ melos:
         the posterior means. Takes about 8 minutes; Linux (taskset).
     bench:hier:
       run: >-
+        PIN=$(command -v taskset >/dev/null && echo 'taskset -c 0');
         cd packages/hgf_fit &&
         dart compile exe benchmark/bin/hierarchical_benchmark.dart -o .dart_tool/hier_benchmark &&
-        taskset -c 0 .dart_tool/hier_benchmark --centered --out .dart_tool/hier_problem.json &&
+        $PIN .dart_tool/hier_benchmark --centered --out .dart_tool/hier_problem.json &&
         cd ../../tool/parity &&
-        taskset -c 0 uv run --with numpyro python fit_hier_jax.py ../../packages/hgf_fit/.dart_tool/hier_problem.json --backend numpyro &&
-        taskset -c 0 uv run python fit_hier_jax.py ../../packages/hgf_fit/.dart_tool/hier_problem.json --backend pymc
+        $PIN uv run --with numpyro python fit_hier_jax.py ../../packages/hgf_fit/.dart_tool/hier_problem.json --backend numpyro &&
+        $PIN uv run python fit_hier_jax.py ../../packages/hgf_fit/.dart_tool/hier_problem.json --backend pymc
       description: >-
         Hierarchical model of pyhgf's multilevel notebook (10 agents, ω₂ and
         β pooled, 4 chains, 1000 + 1000, centred), one core: hgf_fit's
@@ -294,8 +297,9 @@ melos:
       # hgf_deep's DeepNetwork on wgpu-native vs the f64 CPU engine (one core).
       exec:
         command: >-
+          PIN=$(command -v taskset >/dev/null && echo 'taskset -c 0');
           dart compile exe benchmark/bin/deep_gpu.dart -o .dart_tool/deep_gpu &&
-          taskset -c 0 .dart_tool/deep_gpu --batches 256,1024,4096
+          $PIN .dart_tool/deep_gpu --batches 256,1024,4096
         concurrency: 1
       packageFilters:
         fileExists: benchmark/bin/deep_gpu.dart
@@ -307,8 +311,9 @@ melos:
       # (GpuDeepEnsemble) vs DeepNetwork.fit on one core (~1 min).
       exec:
         command: >-
+          PIN=$(command -v taskset >/dev/null && echo 'taskset -c 0');
           dart compile exe benchmark/bin/deep_ensemble.dart -o .dart_tool/deep_ensemble &&
-          taskset -c 0 .dart_tool/deep_ensemble --members 1,16,256,1024,4096
+          $PIN .dart_tool/deep_ensemble --members 1,16,256,1024,4096
         concurrency: 1
       packageFilters:
         fileExists: benchmark/bin/deep_ensemble.dart
@@ -352,13 +357,14 @@ melos:
         pyhgf export). Then `melos run bench:plot`.
     bench:deep-sweep:
       run: >-
+        PIN=$(command -v taskset >/dev/null && echo 'taskset -c 0');
         cd packages/hgf_gpu &&
         dart compile exe benchmark/bin/deep_sweep.dart -o .dart_tool/deep_sweep &&
-        taskset -c 0 .dart_tool/deep_sweep --out ../../.dart_tool/deep_sweep.json &&
+        $PIN .dart_tool/deep_sweep --out ../../.dart_tool/deep_sweep.json &&
         cd ../../tool/parity &&
         rm -f ../../.dart_tool/deep_sweep_rows.jsonl &&
-        taskset -c 0 uv run python bench_deep.py ../../.dart_tool/deep_sweep.json --sweep ../../.dart_tool/deep_sweep_rows.jsonl &&
-        JAX_PLATFORMS=cpu taskset -c 0 uv run python bench_deep.py ../../.dart_tool/deep_sweep.json --sweep ../../.dart_tool/deep_sweep_rows.jsonl --f32 --no-rs &&
+        $PIN uv run python bench_deep.py ../../.dart_tool/deep_sweep.json --sweep ../../.dart_tool/deep_sweep_rows.jsonl &&
+        JAX_PLATFORMS=cpu $PIN uv run python bench_deep.py ../../.dart_tool/deep_sweep.json --sweep ../../.dart_tool/deep_sweep_rows.jsonl --f32 --no-rs &&
         if test -x .venv-rocm/python-rocm; then
         .venv-rocm/python-rocm bench_deep.py ../../.dart_tool/deep_sweep.json --sweep ../../.dart_tool/deep_sweep_rows.jsonl --f32 --no-rs &&
         .venv-rocm/python-rocm bench_deep.py ../../.dart_tool/deep_sweep.json --sweep ../../.dart_tool/deep_sweep_rows.jsonl --no-rs; fi

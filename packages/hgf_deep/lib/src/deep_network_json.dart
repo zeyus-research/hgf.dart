@@ -64,6 +64,7 @@ Map<String, Object?> _deepNetworkToJson(DeepNetwork net) {
       'feedforward_uncertainty': s.feedforwardUncertainty,
       'carry_precision': s.carryPrecision,
       'mean_field_updates': s.meanFieldUpdates,
+      'update_input_layer': s.updateInputLayer,
       'fixes': {
         'curvature_floor': s.fixes.curvatureFloor,
         'log_space_volatility': s.fixes.logSpaceVolatility,
@@ -93,6 +94,8 @@ Map<String, Object?> _layerToJson(LayerConfig c, Layer layer, LayerState st) =>
           key.pyhgfName: _enc(value),
       },
       'weights': layer.weights == null ? null : _encList(layer.weights!.data),
+      if (layer.weightsPrecisionDelta case final d?)
+        'weights_precision_delta': _encList(d),
       'node_tonic_volatility': layer.tonicVolatility == null
           ? null
           : _encList(layer.tonicVolatility!),
@@ -129,6 +132,7 @@ DeepNetwork _deepNetworkFromJson(
     tonicVolatility: json['tonic_volatility'] as bool,
     meanFieldUpdates: s['mean_field_updates'] as bool,
     carryPrecision: s['carry_precision'] as bool,
+    updateInputLayer: s['update_input_layer'] as bool? ?? false,
     fixes: DeepFixes(
       curvatureFloor: fixes['curvature_floor'] as bool,
       logSpaceVolatility: fixes['log_space_volatility'] as bool,
@@ -163,6 +167,13 @@ DeepNetwork _deepNetworkFromJson(
     }
     if (w != null) {
       w.data.setAll(0, _decList(l['weights'], w.data.length, '$where weights'));
+      if (l['weights_precision_delta'] case final d?) {
+        layer.weightsPrecisionDelta = _decList(
+          d,
+          w.data.length,
+          '$where weights_precision_delta',
+        );
+      }
     }
     final n = layer.size;
     final tv = layer.tonicVolatility;

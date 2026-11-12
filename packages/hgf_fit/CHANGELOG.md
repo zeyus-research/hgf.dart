@@ -1,5 +1,15 @@
 ## Unreleased
 
+- Reverse-mode gradients on the CPU: `HgfModel(gradientMode:)` (`auto` by
+  default: reverse above `reverseAbove` = 16 parameters, where it costs a
+  flat 8–12 likelihoods against forward mode's `1 + 0.6·k`).
+  `package:hgf_fit/ir.dart` now holds the trial IR (moved from hgf_gpu)
+  and `IrReverse`, which evaluates it and its adjoints in f64 on every
+  platform. `HgfModel.exactHessians` (forward-over-reverse) and
+  `laplace(exactHessian: true)`. `Prior.d2LogDensity`,
+  `Transform.d2ToConstrained`, `Transform.d2LogAbsJacobian`. The codec
+  carries the gradient mode.
+
 - Export to code (`package:hgf_fit/codegen.dart`, `dart run
   hgf_fit:export`): a network or a model, with its data and fit settings,
   as a runnable Dart script (`DartExport`) or Python script on pyhgf and

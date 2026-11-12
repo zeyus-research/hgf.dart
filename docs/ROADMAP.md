@@ -1297,9 +1297,22 @@ rest is the sampler's own host work per chain and leapfrog step.
   - [x] WGSL (tiled GEMM plus elementwise kernels), f32, checked against
     the f64 CPU engine like hgf_gpu (2026-11-10): `GpuDeepNetwork`, see
     "hgf_deep on the GPU" below.
-  - [ ] The sequential `fit` on the GPU: one persistent workgroup per
+  - [x] The sequential `fit` on the GPU: one persistent workgroup per
     network looping over samples (barriers instead of dispatches), which
-    would also run ensembles of networks, one per workgroup.
+    also runs ensembles of networks, one per workgroup (2026-11-10:
+    `GpuDeepEnsemble`).
+  - [x] pyhgf's remaining learning features on the CPU (2026-11-12): the
+    weight-belief rule (`synaptic_uncertainty`), `sample_weight`,
+    `update_input_layer`, `check_gradient_health`. See "hgf_deep: the
+    rest of pyhgf's learning" below.
+  - [ ] Continuous layers (`kind="continuous"`, `input_data`): a
+    vectorised notation for a nodal continuous `Network` in pyhgf (its
+    tests check them against `Network`), so hgf_deep can build the
+    equivalent hgf `Network`. Needs pyhgf #477 (noise parents of
+    continuous input nodes) in hgf first: the observation layer's
+    volatility parent follows those semantics.
+  - [ ] The new learning features on the GPU (`GpuDeepNetwork` and
+    `GpuDeepEnsemble` reject them with an `UnsupportedError`).
 - [x] Tangents in the codegen (exact gradients on the GPU), then a GPU
   `Pass` transport in hgf_fit (MAP, NUTS with many chains, hierarchical):
   Phase 7b.
@@ -1317,8 +1330,9 @@ rest is the sampler's own host work per chain and leapfrog step.
   and categorical since 2026-11-10; `GpuFitter` falls back to it for
   them.)
 - [ ] Platform coverage still to measure:
-  - Intel and Apple GPUs, and Android (Vulkan) and iOS (Metal) through
-    wgpu-native;
+  - Intel GPUs, and Android (Vulkan) and iOS (Metal) devices through
+    wgpu-native (Apple M3 Pro through Metal: measured 2026-11-12, see
+    "macOS / Apple silicon");
   - Firefox and Safari WebGPU.
 - [ ] CI: run `test/gpu_parity_test.dart` on SwiftShader. The
   `chrome-gpu` platform names `chromium`, but CI has Chrome through a
@@ -1337,8 +1351,11 @@ volatility update, relaxed or mean-field, feedforward uncertainty, carried
 or reset precisions, tonic volatility; `fit` (sequential), `batchUpdate`
 (returns the input-layer errors), `predict`; SGD and Adam with optax's
 arithmetic; four weight initialisers. Not ported: continuous layers
-(`input_data`), `synaptic_uncertainty` learning, `update_input_layer`,
-`LayerStack`, the two-phase batch step, sample weights.
+(`input_data`), `LayerStack` (a `jax.lax.scan` compile-time device with
+nothing to port), and rshgf's two-phase batch step (`batch_forward` /
+`batch_update_from_error`, a Rust-binding convenience pyhgf doesn't
+have). `synaptic_uncertainty` learning, `update_input_layer`, sample
+weights and `check_gradient_health` followed on 2026-11-12.
 
 - **Reference:** pyhgf's JAX backend in float64, not rshgf. It is a
   superset of rshgf's features, and rshgf's batched kernel is wrong (R4).
@@ -1623,7 +1640,92 @@ used to JAX/Julia AD): [DIFFERENTIATION.md](DIFFERENTIATION.md) §7.
 - Next, if a model needs many parameters: SSA for the unbounded update
   (its `if` blocks and accumulators as `select`s), dispatch splitting,
   `FitKernel(reverse:)` chosen by k × carried slots, and maybe
-  forward-over-reverse for an exact Laplace Hessian.
+  forward-over-reverse for an exact Laplace Hessian. All done on
+  2026-11-12, see below.
+
+#### Reverse mode wired in, on the GPU and the CPU; exact Hessians (2026-11-12): done
+
+Details and numbers: [DIFFERENTIATION.md](DIFFERENTIATION.md) §7 "Done
+since the spike".
+
+- **SSA for the unbounded update**, with NaN-safe adjoints: conditions are
+  applied where an adjoint is added (`x_b += select(0, g, …)`), since a
+  zero adjoint times an infinite partial in a branch not taken is NaN.
+  Forward and existing fit kernels: WGSL byte-identical to before.
+- **`FitKernel(reverse: true)`**: the primal with √T checkpoints, then a
+  backward kernel over segments with the carried adjoints kept between
+  dispatches, so `trialsPerDispatch` splits both directions (browsers).
+  `GpuFitter(gradientMode: auto)` switches at parameters × carried slots
+  > 150. Matches f64 like forward mode (≤ 5.7e-6 of the gradient's
+  scale) on wgpu-native and Chromium's WebGPU, split or not.
+- **CPU reverse mode**: the IR moved to `package:hgf_fit/ir.dart` with
+  structured conditions and constants; `IrReverse` compiles the SSA trial
+  and its adjoints to register code and interprets it in f64 over chunks
+  of elements (VM, dart2js, dart2wasm). Agrees with `BatchNetwork`'s
+  tangents to 1e-15. A flat 8–12 likelihoods per gradient, so
+  `HgfModel(gradientMode: auto)` uses it above 16 parameters; 1.8× faster
+  than forward mode at 33.
+- **Exact Hessians**: forward-over-reverse (the adjoint program in dual
+  numbers), `HgfModel.exactHessians`, `laplace(exactHessian: true)`, with
+  second derivatives of the transforms and priors.
+- Tests: hgf_fit `test/reverse_gradient_test.dart` (the eight shared fit
+  cases, now in `hgf_fit/test/src/fit_cases.dart`, against forward mode,
+  central differences and the finite-difference Laplace); hgf_gpu
+  `native_reverse_test.dart` (three unbounded models added), the reverse
+  fit passes in `native_fit_test.dart` and `gpu_parity_test.dart`.
+- Benchmarks: `hgf_fit/benchmark/bin/reverse_cpu.dart`,
+  `hgf_gpu/benchmark/bin/fit_reverse_gpu.dart`.
+
+#### hgf_deep: the rest of pyhgf's learning (2026-11-12): done
+
+- `LearningKind.synapticUncertainty` with `SynapticUncertainty(window:,
+  priorVariance:, priorMean:, learningRate:, incrementScale:)`: each
+  weight carries a Gaussian belief (`Layer.weightsPrecisionDelta`,
+  `installWeightBelief`, saved by `toJson` and `snapshot`). The evidence
+  precision is carried up from the clamped layer (`evidence_pullback`,
+  curvature backpropagation: a Gauss–Newton diagonal) and charged with
+  each child's process noise; the gradient divides by the weight's
+  precision. Works in `fit`, `batchUpdate` and `trace`.
+- `batchUpdate(sampleWeight:)`: weighted batch means of gradients,
+  curvatures and carried-precision increments (masks for padded rows).
+- `DeepNetwork(updateInputLayer: true)`: the top layer's precision is
+  predicted (`vectorised_root_prediction`) and updated from the layer
+  below, its mean stays on the predictors.
+- `checkGradientHealth` (`GradientHealth`: magnitudes, dead and
+  quantised matrices). Not run automatically after `fit` (pyhgf warns;
+  Dart has no warnings channel).
+- Parity: 16 new pyhgf JAX f64 fixtures (`gen_deep_fixtures.py`: three
+  volatility updates, one-to-one and sigmoid layers, binary and
+  categorical leaves, every `learning_kwargs`, weighted, masked and
+  all-zero batches, binary top layers, frozen precisions, the health
+  probe) match to 1e-9, 46 fixtures in all; the new paths were checked by
+  mutation (each of four perturbations fails the suite). The 4-layer tanh
+  fixtures use smaller initial weights (0.25) to stay clear of P18's
+  runaway; the eHGF ones still reach it late and are compared up to it.
+- The GPU classes reject the new options for now; the GPU fixture checks
+  skip fixtures that use them.
+
+#### macOS / Apple silicon (2026-11-12): measured
+
+Apple M3 Pro (6P + 6E cores, its GPU through Metal via wgpu-native):
+[benchmark_results_macos.md](benchmark_results_macos.md), against the
+Linux i7-7700 + RX 7600 XT.
+
+- Every native GPU test passes on Metal (95), and the WebGPU suite in
+  Chrome (Dawn on Metal).
+- CPU: Dart AOT 1.5–1.7× faster than on the i7, the same lead over JAX
+  and rshgf; `BatchNetwork` on 12 isolates beats JAX's float32 `vmap`
+  2.5× (on Linux JAX was ahead).
+- GPU: the same time for the probe batch; HGF neural networks within
+  ±30% of the RX 7600 XT (faster on small, slower on memory-bound wide
+  ones). A pass waits ~1.4 ms for its readback (Linux 0.3–0.5 ms), so
+  small NUTS jobs run better on the CPU pool there; at 2000 agents the GPU
+  is 3.9× ahead.
+- Forward-mode tangents spill sooner on the M3's GPU, which set
+  `GpuFitter.defaultReverseAbove`.
+- The melos bench scripts pin to a core with `taskset` only where it
+  exists, and `tool/bench_compare.dart` takes `--out` and reads the CPU
+  name on macOS.
 
 ### Phase 8: App -> HGF GUI modelling
 
@@ -2209,9 +2311,15 @@ column mapping on import and CSV exports are done (2026-11-10), and so is
 choice tasks (`SoftmaxReadout`, `simulateChoices`, `IowaGamblingTask`,
 CPU and GPU; the playground's IGT and two-armed bandit presets). Export to
 code is done (2026-11-11: Dart and pyhgf/PyMC scripts from the playground
-or `dart run hgf_fit:export`). Next are real-time sources / LSL, vector
-node kinds on the GPU, a faster dp candidate search, and the choice-task
-follow-ups (stickiness, lapse rate, a model builder).
+or `dart run hgf_fit:export`). 2026-11-12: hgf_deep has the rest of
+pyhgf's learning (weight beliefs, sample weights, `update_input_layer`),
+reverse mode is wired into `GpuFitter` and runs on the CPU too (with exact
+Hessians), and the benchmarks ran on an Apple M3 Pro. Next are pyhgf #477
+(noise parents of continuous input nodes; `codegen_python_test` fails on
+it since pyhgf moved) and then hgf_deep's continuous layers, real-time
+sources / LSL, vector node kinds on the GPU, a faster dp candidate
+search, and the choice-task follow-ups (stickiness, lapse rate, a model
+builder).
 
 ```sh
 cd hgf.dart

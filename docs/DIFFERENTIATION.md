@@ -13,8 +13,10 @@ come from **forward-mode AD written into the filter itself**:
 | where | precision | how the derivative code is produced | status |
 |---|---|---|---|
 | CPU (`package:hgf`, `batch/batch_tangents.dart`) | f64 | written by hand: every update step has a twin that also propagates tangents | default since 2026-11-06 |
-| GPU (`package:hgf_gpu`, `ir.dart` + `trial.dart`) | f32 | generated: a small expression IR with derivative rules, printed as WGSL | default on the GPU since 2026-11-09 |
-| GPU, reverse mode (`fit/grad_kernel.dart`) | f32 | generated from the same IR: adjoint statements in reverse order | spike, 2026-11-11 (below) |
+| GPU (`package:hgf_gpu`, IR in `package:hgf_fit/ir.dart`) | f32 | generated: a small expression IR with derivative rules, printed as WGSL | default on the GPU since 2026-11-09 |
+| GPU, reverse mode (`fit/fit_kernel.dart`) | f32 | generated from the same IR: adjoint statements in reverse order, √T checkpoints | `GpuFitter` uses it for large models since 2026-11-12 (§7) |
+| CPU, reverse mode (`hgf_fit`, `ir/eval.dart`) | f64 | the same IR and adjoint program, interpreted over chunks of elements | `HgfModel` uses it above 16 parameters since 2026-11-12 (§7) |
+| CPU, exact Hessian (`HgfModel.exactHessians`) | f64 | forward-over-reverse: the adjoint program run in dual numbers | opt-in for `laplace` (§7) |
 
 Finite differences remain only where they are the right tool: the Laplace
 Hessian (second differences of values), and as an independent oracle in
@@ -296,21 +298,110 @@ What the numbers say:
   default buffer limits (128 MB per binding in browsers), which the full
   tape does not.
 
+### Done since the spike (2026-11-12)
+
+The four open items of the spike, on an Apple M3 Pro (Metal through
+wgpu-native; the CPU timings are AOT on one core).
+
+**The unbounded update in SSA form.** `compileSsa` now covers every
+update. Each Lambert W expansion that forward mode guards with an `if` is
+computed unconditionally and selected in. Where the expansion is off (an
+unobserved child, κ = 0), κ is replaced by 1 so that the discarded values
+stay finite. That alone is not enough in reverse mode: a branch that is
+not taken gets a zero adjoint, and zero times an infinite partial is NaN.
+`Adjoints` therefore carries the conditions down the tree (the `select`s
+passed, and that the statement's own adjoint is nonzero) and applies them
+where an adjoint is added, `x_b += select(0, g, conditions)`. The guard
+costs 0–10% (measured with and without it). The forward kernels stay
+byte-identical, and so do the existing fit kernels (checked by diffing the
+WGSL against the previous commit).
+
+**Reverse mode in `GpuFitter`.** `FitKernel(reverse: true)` emits two
+kernels. The first is the primal, which also stores the carried state
+every `C ≈ √T` trials. The second walks the segments back, last first:
+it recomputes each segment from its checkpoint and runs the adjoints,
+keeping the carried slots' adjoints in a buffer between dispatches. So
+long series split across dispatches as browsers need (`trialsPerDispatch`
+now applies to both directions). The dispatch that reaches the first
+segment maps the slots' adjoints through `dx/dy` into the slots the
+tangent kernel fills, so nothing else in the fitter changes.
+`GpuFitter(gradientMode:)` is `auto` by default: reverse mode once
+parameters × carried slots exceeds `reverseAbove` (150). Tests: hgf_gpu's
+eight fit cases (missing observations, time steps, short series,
+responses, every update) against the f64 CPU engine, in one dispatch and
+in 37-trial dispatches, on wgpu-native and Chromium's WebGPU: within
+5.7e-6 of the gradient's scale, as forward mode (4.1e-6).
+
+`benchmark/bin/fit_reverse_gpu.dart`, 320 trials, a gradient pass as a
+multiple of a pass without one (B = 16,384):
+
+| model | k | k × carried | forward | reverse |
+|---|--:|--:|--:|--:|
+| continuous 3-level standard | 10 | 170 | 2.5 | 3.5 |
+| continuous 3-level unbounded | 10 | 170 | 7.0 | 3.4 |
+| 8 binary inputs | 5 | 305 | 24.5 | 13.9 |
+| 8 binary inputs | 10 | 610 | 74.5 | 12.6 |
+| 8 binary inputs | 33 | 2013 | 156 | 8.4 |
+
+At B = 2,000 every pass costs at least ~1.35 ms on this GPU (the RX 7600
+XT: 0.2–0.7 ms), and forward and reverse are within 10% below k = 10.
+Forward mode spills sooner on the M3 than on the RX 7600 XT (8 inputs,
+k = 5: 21–25× against 7–14×).
+
+**Reverse mode on the CPU.** Of the two routes the spike named
+(hand-written adjoints for every batched kernel, or Dart generated from
+the IR at build time), neither fits a library whose models are built at
+run time. The third: the IR moved to `package:hgf_fit/ir.dart`, its
+conditions and constants became trees (still printed as the same WGSL),
+and `IrReverse` compiles the SSA trial and its adjoint program to flat
+register code (with value numbering, so the adjoints reuse the primal's
+subexpressions) and interprets it in f64 over chunks of 64 elements, one
+typed-data loop per operation. It runs wherever Dart does: the tests pass
+on the VM, dart2js and dart2wasm. The `f32` stand-ins of the WGSL
+(the smallest normal floor, `ln f32::MAX`, log 2π rounded to f32) carry
+their f64 values, so it agrees with `BatchNetwork`'s tangents to 1e-15.
+
+`HgfModel(gradientMode:)` is `auto` by default: reverse mode above
+`reverseAbove` (16) parameters, for models the IR covers (vector node
+kinds, custom couplings and custom responses stay in forward mode,
+`reverseUnsupported` says why). `benchmark/bin/reverse_cpu.dart`, 256
+elements × 320 trials, as multiples of the likelihood:
+
+| model | likelihood (ns/element-trial) | forward k=2 / 5 / 10 / 33 | reverse |
+|---|--:|--:|--:|
+| binary 2-level, softmax | 45 | 2.0 / 3.3 / — | 8.2 |
+| continuous 3-level standard | 64 | 3.0 / 4.7 / 7.5 | 8.6 |
+| continuous 3-level unbounded | 165 | 2.3 / 3.7 / 5.6 | 8.7 |
+| 8 binary inputs | 280 | 2.6 / 4.3 / 7.3 / 21 | 12 |
+
+Reverse mode costs a flat 8–12 likelihoods, interpretation included (the
+chunk width, 16 to 256, changes nothing), so it pays from about k = 12–18:
+1.8× faster at k = 33. The hand-written forward mode stays the default for
+the models fitted today.
+
+**Exact Hessians.** `IrReverse.hessianVectorProducts` runs the reverse
+program in dual numbers (a value and a tangent per register), which is
+forward-over-reverse: the exact Hessian of the likelihood with respect to
+the initial slots times a direction. `HgfModel.exactHessians` takes `k` of
+them per subject and adds the second derivatives of the transforms, priors
+and Jacobian terms (new: `Transform.d2ToConstrained`,
+`d2LogAbsJacobian`, `Prior.d2LogDensity`, exact for the built-ins).
+`laplace(..., exactHessian: true)` uses it. Tests: within 1e-6 of central
+differences of the exact gradient on all eight cases; `laplace`'s
+standard errors and log evidence agree with the finite-difference path to
+its own accuracy (~1e-4). Each product costs about two reverse gradients,
+so for small `k` the second differences of values (`2k² + 1`
+likelihoods) stay the default; the exact Hessian is for accuracy.
+
 ### Not done yet
 
-- The **unbounded update** (pyhgf's default) has no SSA form yet. Its
-  mutable accumulators and `if` blocks need rewriting as `select`s first,
-  as was done for forward mode.
-- Reverse mode is not wired into `GpuFitter`, and it runs each series in
-  one dispatch. Browsers need long series split across dispatches, as
-  `FitKernel` already does.
-- **No reverse mode on the CPU.** Dart AOT cannot load generated code at
-  runtime, so a CPU reverse mode would mean hand-written adjoints for
-  every batched kernel, or generating Dart from the IR at build time. The
-  CPU's f64 forward mode does not have the GPU's register problem.
-- Second order: an exact Laplace Hessian could come from forward-over-
-  reverse (`k` reverse sweeps of a tangent kernel). Today it uses second
-  differences of values in f64, which is accurate and cheap for small `k`.
+- The CPU reverse mode interprets its program. Storing each trial's
+  registers (instead of recomputing the primal on the way back) would save
+  about a third, at `nRegs × T` floats per element.
+- The exact Hessian runs on the calling isolate, not as a `Pass` on a
+  `FitWorkers` pool or the GPU.
+- `GpuDeepNetwork` and the deep networks' weight learning are not
+  differentiated by this machinery (they have their own gradient rules).
 
 ## 8. Where finite differences are still used
 
@@ -346,7 +437,12 @@ What the numbers say:
   1e-6), on six models, on native Vulkan and on Chromium's
   WebGPU/SwiftShader.
 - **GPU reverse mode** against GPU forward mode and the f64 CPU engine
-  (§7).
+  (§7), now including the unbounded update, and through `GpuFitter` (split
+  and unsplit) against the f64 CPU engine.
+- **CPU reverse mode** against the CPU's forward tangents (1e-15 in the
+  benchmark, 1e-8 asserted), its slot adjoints against central differences,
+  and the exact Hessians against central differences of the exact
+  gradients, on the VM, dart2js and dart2wasm.
 - **Custom coupling fixtures** (sin, softplus) were generated with JAX
   autodiff.
 
@@ -357,8 +453,11 @@ What the numbers say:
 | `packages/hgf/lib/src/batch/batch_tangents.dart` | CPU forward-mode kernels (`_t*`) |
 | `packages/hgf/lib/src/coupling.dart` | coupling functions and their derivatives up to `g‴` |
 | `packages/hgf_fit/lib/src/model.dart` | seeding with `dx/dy`, prior and Jacobian terms |
-| `packages/hgf_gpu/lib/src/ir.dart` | expression IR, `Tangents` (JVP), `Adjoints` (VJP), the rule table |
-| `packages/hgf_gpu/lib/src/trial.dart` | trial code generation (`compile`, `compileSsa`) |
-| `packages/hgf_gpu/lib/src/fit/fit_kernel.dart` | production GPU likelihood + gradient kernel (forward mode) |
+| `packages/hgf_fit/lib/src/ir/ir.dart` | expression IR, `Tangents` (JVP), `Adjoints` (VJP), the rule table |
+| `packages/hgf_fit/lib/src/ir/trial.dart` | trial code generation (`compile`, `compileSsa`) |
+| `packages/hgf_fit/lib/src/ir/eval.dart` | `IrReverse`: the CPU's reverse mode and Hessian-vector products |
+| `packages/hgf_fit/lib/src/model.dart` | `GradientMode`, `exactHessians` |
+| `packages/hgf_gpu/lib/src/fit/fit_kernel.dart` | production GPU likelihood + gradient kernels (forward, reverse) |
 | `packages/hgf_gpu/lib/src/fit/grad_kernel.dart` | reverse-mode spike kernels (forward/reverse harness) |
 | `packages/hgf_gpu/benchmark/bin/reverse_gpu.dart`, `reverse_f64.dart` | the spike's benchmarks |
+| `packages/hgf_gpu/benchmark/bin/fit_reverse_gpu.dart`, `packages/hgf_fit/benchmark/bin/reverse_cpu.dart` | gradient cost by mode, GPU and CPU |

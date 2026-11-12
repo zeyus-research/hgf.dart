@@ -50,6 +50,7 @@ final class GradKernel {
     int directions = 0,
     int checkpoint = 0,
     int workgroupSize = 64,
+    bool zeroGuard = true,
   }) {
     final reverse =
         mode == GradMode.reverseTape || mode == GradMode.reverseCheckpoint;
@@ -177,7 +178,10 @@ final class GradKernel {
         src.writeln('  var ${v}_b = 0.0f;');
       }
       final names = {for (final (n, _) in ssa.statements) n};
-      final adj = Adjoints((n) => names.contains(n) || ssa.carried.contains(n));
+      final adj = Adjoints(
+        (n) => names.contains(n) || ssa.carried.contains(n),
+        zeroGuard: zeroGuard,
+      );
       for (final (n, e) in ssa.statements.reversed) {
         adj.statement(n, e);
       }

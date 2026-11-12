@@ -34,6 +34,11 @@ void main() {
           .listSync()
           .whereType<File>()
           .where((f) => f.path.endsWith('.json'))
+          .where(
+            (f) => gpuDeepSupported(
+              jsonDecode(f.readAsStringSync()) as Map<String, Object?>,
+            ),
+          )
           .toList()
         ..sort((a, b) => a.path.compareTo(b.path));
 

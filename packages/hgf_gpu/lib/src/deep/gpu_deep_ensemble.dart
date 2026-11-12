@@ -401,6 +401,12 @@ final class GpuDeepEnsemble {
     bool readPredictions = true,
     int? rowsPerDispatch,
   }) async {
+    if (learningKind == LearningKind.synapticUncertainty) {
+      throw UnsupportedError(
+        'LearningKind.synapticUncertainty has no GPU kernel yet: use the CPU '
+        'DeepNetwork.',
+      );
+    }
     if (weightUpdate && optimiser == null) {
       throw ArgumentError('fit needs an optimiser (or weightUpdate: false).');
     }

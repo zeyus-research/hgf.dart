@@ -82,6 +82,7 @@ DeepNetwork buildNetwork(Map<String, Object?> fixture, {DeepFixes? fixes}) {
     tonicVolatility: s['tonic_volatility'] as bool? ?? false,
     meanFieldUpdates: s['mean_field_updates'] as bool? ?? false,
     carryPrecision: s['carry_precision'] as bool? ?? true,
+    updateInputLayer: s['update_input_layer'] as bool? ?? false,
     fixes: fixes ?? fixesOf(s),
   );
   for (final raw in fixture['layers'] as List<Object?>) {
@@ -155,6 +156,20 @@ int? _firstNonFiniteRow(Map<String, Object?>? traj) {
 
 int _currentSamples = 1;
 
+/// The op's weight-belief settings (`learning_kwargs`), or `null`.
+SynapticUncertainty? synapticOf(Map<String, Object?> op) {
+  final kw = op['learning_kwargs'] as Map<String, Object?>?;
+  if (kw == null) return null;
+  double? d(String k) => (kw[k] as num?)?.toDouble();
+  return SynapticUncertainty(
+    window: d('window')!,
+    priorVariance: d('prior_variance') ?? 1.0,
+    priorMean: d('prior_mean') ?? 0.0,
+    learningRate: d('learning_rate') ?? 1.0,
+    incrementScale: d('increment_scale') ?? 1.0,
+  );
+}
+
 /// Run every operation of [fixture] and compare against the reference.
 /// Returns the mismatches (empty when everything agrees).
 ///
@@ -216,6 +231,7 @@ List<String> checkDeepFixture(
           matrix(op['y']),
           optimiser: _optimiser(optimisers, op['optimiser']),
           learningKind: learningKind,
+          synapticUncertainty: synapticOf(op),
           weightUpdate: op['weight_update'] as bool? ?? true,
           timeStep: timeStep,
           updatePrecisions: op['update_precisions'] as bool? ?? true,
@@ -247,10 +263,34 @@ List<String> checkDeepFixture(
           matrix(op['y']),
           optimiser: _optimiser(optimisers, op['optimiser']),
           learningKind: learningKind,
+          synapticUncertainty: synapticOf(op),
           timeStep: timeStep,
           updatePrecisions: op['update_precisions'] as bool? ?? true,
+          sampleWeight: op['sample_weight'] == null
+              ? null
+              : series(op['sample_weight']),
         );
         cmp('$tag input errors', matrix(op['input_errors']).data, errors.data);
+      case 'health':
+        final h = net.checkGradientHealth(
+          series(op['x']),
+          series(op['y']),
+          learningKind: learningKind,
+        );
+        final mags = op['magnitudes'] as List<Object?>;
+        cmp(
+          '$tag magnitudes',
+          [for (final m in mags.skip(1)) decode(m)],
+          [for (final m in h.magnitudes.skip(1)) m!],
+        );
+        if (h.magnitudes.first != null) failures.add('$tag magnitude 0');
+        if ('${h.dead}' != '${op['dead']}') {
+          failures.add('$tag dead ${h.dead} != ${op['dead']}');
+        }
+        if ('${h.quantised}' != '${op['quantised']}') {
+          failures.add('$tag quantised ${h.quantised} != ${op['quantised']}');
+        }
+        continue;
       case 'predict':
         final pred = net.predict(matrix(op['x']));
         cmp('$tag predictions', matrix(op['predictions']).data, pred.data);
@@ -260,6 +300,20 @@ List<String> checkDeepFixture(
     if (rows >= 0) break; // the reference went non-finite in this fit
     final after = op['after'] as Map<String, Object?>;
     final weights = after['weights'] as List<Object?>;
+    final deltas = after['weights_precision_delta'] as List<Object?>?;
+    final ours = net.weightPrecisionDeltas;
+    for (var l = 0; l < weights.length; l++) {
+      final d = deltas?[l];
+      if ((d == null) != (ours[l + 1] == null)) {
+        failures.add('$tag weights_precision_delta ${l + 1}: presence differs');
+      } else if (d != null) {
+        cmp(
+          '$tag weights_precision_delta ${l + 1}',
+          matrix(d).data,
+          ours[l + 1]!.data,
+        );
+      }
+    }
     for (var l = 0; l < weights.length; l++) {
       cmp(
         '$tag weights ${l + 1}',

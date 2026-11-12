@@ -98,6 +98,7 @@ def build(spec: dict) -> DeepNetwork:
         tonic_volatility=s.get("tonic_volatility", False),
         mean_field_updates=s.get("mean_field_updates", False),
         carry_precision=s.get("carry_precision", True),
+        update_input_layer=s.get("update_input_layer", False),
     )
     for layer in spec["layers"]:
         kwargs = dict(layer.get("overrides", {}))
@@ -118,8 +119,18 @@ def build(spec: dict) -> DeepNetwork:
 
 
 def snapshot(net: DeepNetwork) -> dict:
+    deltas = [layer.weights_precision_delta for layer in net.state.layers[1:]]
     return {
         "weights": [_mat(layer.weights_mean) for layer in net.state.layers[1:]],
+        **(
+            {
+                "weights_precision_delta": [
+                    None if d is None else _mat(d) for d in deltas
+                ]
+            }
+            if any(d is not None for d in deltas)
+            else {}
+        ),
         "state": {
             field: [
                 None
@@ -269,6 +280,7 @@ def _run(spec: dict) -> dict:
                 np.asarray(op["y"]),
                 optimiser=make_optimiser(optimisers, op.get("optimiser")),
                 learning_kind=op.get("learning_kind", "precision_weighted"),
+                learning_kwargs=op.get("learning_kwargs"),
                 weight_update=op.get("weight_update", True),
                 time_step=op.get("time_step", 1.0),
                 update_precisions=op.get("update_precisions", True),
@@ -290,10 +302,23 @@ def _run(spec: dict) -> dict:
                 np.asarray(op["y"]),
                 optimiser=make_optimiser(optimisers, op.get("optimiser")),
                 learning_kind=op.get("learning_kind", "precision_weighted"),
+                learning_kwargs=op.get("learning_kwargs"),
                 update_precisions=op.get("update_precisions", True),
                 time_step=op.get("time_step", 1.0),
+                sample_weight=None
+                if op.get("sample_weight") is None
+                else np.asarray(op["sample_weight"]),
             )
             out["input_errors"] = _mat(net.input_errors)
+        elif kind == "health":
+            h = net.check_gradient_health(
+                np.asarray(op["x"]),
+                np.asarray(op["y"]),
+                learning_kind=op.get("learning_kind", "precision_weighted"),
+            )
+            out["magnitudes"] = [None if m is None else _clean(m) for m in h["magnitudes"]]
+            out["dead"] = list(h["dead"])
+            out["quantised"] = list(h["quantised"])
         elif kind == "predict":
             out["predictions"] = _mat(net.predict(np.asarray(op["x"])))
         else:
@@ -318,6 +343,11 @@ RS_SUPPORTED_SETTINGS = {
 def rshgf_deviation(spec: dict, ops: list) -> float | None:
     """Largest |Rust f32 − JAX f64| over the predictions and weights."""
     if set(spec["settings"]) - RS_SUPPORTED_SETTINGS:
+        return None
+    if any(
+        op.get("learning_kwargs") or op.get("sample_weight") is not None or op["op"] == "health"
+        for op in spec["ops"]
+    ):
         return None
     s = spec["settings"]
     net = RsDeepNetwork(
@@ -403,12 +433,31 @@ def targets(kind: str, rng, n: int, size: int) -> list:
     return rng.normal(size=(n, size)).tolist()
 
 
+def synaptic(**kwargs) -> dict:
+    """Op keywords for learning_kind='synaptic_uncertainty' (no optimiser)."""
+    return {
+        "learning_kind": "synaptic_uncertainty",
+        "learning_kwargs": {"window": 20.0, **kwargs},
+    }
+
+
+def health_op(layers, rng, **kw) -> dict:
+    return {
+        "op": "health",
+        "x": rng.normal(size=layers[-1]["size"]).tolist(),
+        "y": targets(layers[0].get("kind", "volatile"), rng, 1, layers[0]["size"])[0],
+        **kw,
+    }
+
+
 def fit_op(layers, rng, n=40, optimiser=None, record=STATE_FIELDS, **kw) -> dict:
     return {
         "op": "fit",
         "x": rng.normal(size=(n, layers[-1]["size"])).tolist(),
         "y": targets(layers[0].get("kind", "volatile"), rng, n, layers[0]["size"]),
-        "optimiser": optimiser or {"id": 0, "kind": "sgd", "lr": 0.05},
+        "optimiser": None
+        if kw.get("learning_kind") == "synaptic_uncertainty"
+        else optimiser or {"id": 0, "kind": "sgd", "lr": 0.05},
         "record": list(record),
         **kw,
     }
@@ -637,6 +686,183 @@ def scenarios() -> dict:
             predict_op(layers, rng),
         ],
         217,
+    )
+
+    # The weight-belief rule (learning_kind="synaptic_uncertainty").
+    syn_layers = [{"size": 2}, {"size": 5}, {"size": 4}, {"size": 3}]
+    for vol in ("unbounded", "eHGF", "standard"):
+        add(
+            f"synaptic_{vol}",
+            {"volatility_updates": vol, "coupling": "tanh"},
+            syn_layers,
+            lambda layers, rng: [
+                fit_op(layers, rng, n=40, **synaptic(prior_variance=0.05)),
+                batch_op(layers, rng, n=16, **synaptic(prior_variance=0.05)),
+                fit_op(layers, rng, n=10, record=(), **synaptic(prior_variance=0.05)),
+                predict_op(layers, rng),
+            ],
+            400 + len(vol),
+            0.25,
+        )
+    add(
+        "synaptic_settings_one_to_one",
+        {"coupling": "tanh", "feedforward_uncertainty": True},
+        [
+            {"size": 3},
+            {"size": 3, "add_constant_input": False, "fully_connected": False},
+            {"size": 4, "coupling": "sigmoid"},
+            {"size": 2},
+        ],
+        lambda layers, rng: [
+            fit_op(
+                layers,
+                rng,
+                n=30,
+                **synaptic(
+                    window=8.0,
+                    prior_variance=0.2,
+                    prior_mean=0.1,
+                    learning_rate=0.5,
+                    increment_scale=3.0,
+                ),
+            ),
+            batch_op(
+                layers,
+                rng,
+                n=12,
+                **synaptic(window=8.0, prior_variance=0.2, increment_scale=3.0),
+            ),
+        ],
+        410,
+    )
+    add(
+        "synaptic_binary_leaf",
+        {},
+        [{"size": 2, "kind": "binary"}, {"size": 4, "coupling": "tanh"}, {"size": 3}],
+        lambda layers, rng: [
+            fit_op(layers, rng, n=30, **synaptic(prior_variance=0.5)),
+            batch_op(layers, rng, n=16, **synaptic(prior_variance=0.5)),
+        ],
+        411,
+        1.0,
+    )
+    add(
+        "synaptic_categorical_leaf",
+        {"coupling": "tanh"},
+        [{"size": 3, "kind": "categorical"}, {"size": 4}, {"size": 2}],
+        lambda layers, rng: [
+            fit_op(layers, rng, n=30, **synaptic(prior_variance=0.5)),
+            batch_op(layers, rng, n=16, **synaptic(prior_variance=0.5)),
+            predict_op(layers, rng),
+        ],
+        412,
+        1.0,
+    )
+
+    # Weighted batch means (sample_weight), with an optimiser and with the
+    # weight-belief rule; a 0/1 mask and an all-zero mask.
+    def weighted_ops(layers, rng):
+        def w(n, kind):
+            if kind == "mask":
+                return [1.0] * (n - 4) + [0.0] * 4
+            if kind == "zero":
+                return [0.0] * n
+            return rng.uniform(0.0, 2.0, size=n).tolist()
+
+        return [
+            batch_op(layers, rng, n=16, optimiser=adam, sample_weight=w(16, "real")),
+            batch_op(layers, rng, n=16, optimiser=adam, sample_weight=w(16, "mask")),
+            batch_op(layers, rng, n=8, optimiser=adam, sample_weight=w(8, "zero")),
+            batch_op(layers, rng, n=16, sample_weight=w(16, "real"), **synaptic()),
+            batch_op(layers, rng, n=1, optimiser=adam, sample_weight=[3.0]),
+        ]
+
+    add("sample_weight", {"coupling": "tanh"}, deep4, weighted_ops, 420)
+    add(
+        "sample_weight_categorical",
+        {"coupling": "tanh", "feedforward_uncertainty": True},
+        [{"size": 3, "kind": "categorical"}, {"size": 4}, {"size": 2}],
+        weighted_ops,
+        421,
+        1.0,
+    )
+
+    # update_input_layer: the sweeps reach the top layer's precision.
+    for vol in ("unbounded", "eHGF", "standard"):
+        add(
+            f"input_layer_{vol}",
+            {"volatility_updates": vol, "coupling": "tanh", "update_input_layer": True},
+            deep4,
+            lambda layers, rng: [
+                fit_op(layers, rng, n=30, optimiser=adam),
+                batch_op(layers, rng, n=16, optimiser=adam),
+                predict_op(layers, rng),
+            ],
+            430 + len(vol),
+            0.25,
+        )
+    add(
+        "input_layer_feedforward_tonic",
+        {
+            "coupling": "tanh",
+            "update_input_layer": True,
+            "feedforward_uncertainty": True,
+            "tonic_volatility": True,
+        },
+        [
+            {"size": 2},
+            {"size": 4},
+            {"size": 3, "overrides": {"tonic_volatility": -2.0, "precision": 3.0}},
+        ],
+        lambda layers, rng: [
+            fit_op(layers, rng, n=30, optimiser=adam),
+            batch_op(layers, rng, n=16, optimiser=adam),
+            fit_op(layers, rng, n=20, **synaptic()),
+        ],
+        440,
+        0.25,
+    )
+    add(
+        "input_layer_two_layers",
+        {"update_input_layer": True, "carry_precision": False},
+        [{"size": 2}, {"size": 3, "volatility_parent": False, "overrides": {"precision": 0.5}}],
+        lambda layers, rng: [
+            fit_op(layers, rng, n=30, optimiser=adam),
+            batch_op(layers, rng, n=16, optimiser=adam),
+        ],
+        441,
+    )
+    add(
+        "input_layer_frozen",
+        {"update_input_layer": True, "predict_precision": False, "coupling": "tanh"},
+        three,
+        lambda layers, rng: [
+            fit_op(layers, rng, n=20, optimiser=adam),
+            fit_op(layers, rng, n=10, optimiser=adam, update_precisions=False),
+            batch_op(layers, rng, n=8, optimiser=adam),
+        ],
+        442,
+    )
+    add(
+        "input_layer_binary_top",
+        {"update_input_layer": True, "coupling": "tanh"},
+        [{"size": 2}, {"size": 3}, {"size": 2, "kind": "binary"}],
+        lambda layers, rng: [fit_op(layers, rng, n=20, optimiser=adam)],
+        443,
+    )
+
+    # check_gradient_health after some training.
+    add(
+        "gradient_health",
+        {"coupling": "tanh"},
+        deep4,
+        lambda layers, rng: [
+            fit_op(layers, rng, n=20, optimiser=adam, record=()),
+            health_op(layers, rng),
+            health_op(layers, rng, learning_kind="standard"),
+            health_op(layers, rng, learning_kind="synaptic_uncertainty"),
+        ],
+        450,
     )
 
     # Patched references: the curvature floor (see _CurvatureFloor). The
