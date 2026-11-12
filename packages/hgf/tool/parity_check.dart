@@ -15,11 +15,15 @@ library;
 
 import 'dart:convert';
 
+import 'package:hgf/hgf.dart' show Network, NetworkFixes;
+
 import '../benchmark/src/read_text.dart';
 import '../test/src/batch_check.dart';
 import '../test/src/parity_check.dart';
 
 void main() {
+  // pyhgf as it is, until hgf.dart's fixes reach it.
+  Network.defaultFixes = NetworkFixes.none;
   const dir = 'test/fixtures';
   final names = listDir(dir).where((n) => n.endsWith('.json')).toList()..sort();
   if (names.isEmpty) throw StateError('No fixtures in $dir');
