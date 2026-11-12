@@ -136,6 +136,9 @@ Future<List<(String, double, int)>> compareNetworks(
 bool gpuDeepSupported(Map<String, Object?> fixture) {
   final settings = fixture['settings'] as Map<String, Object?>;
   if (settings['update_input_layer'] == true) return false;
+  // Continuous networks are CPU filters (DeepNetwork.inputData).
+  final layers = fixture['layers'] as List<Object?>;
+  if (layers.any((l) => (l as Map)['kind'] == 'continuous')) return false;
   for (final o in fixture['ops'] as List<Object?>) {
     final op = o as Map<String, Object?>;
     if (op['op'] == 'health' ||

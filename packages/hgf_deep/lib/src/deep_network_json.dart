@@ -93,6 +93,20 @@ Map<String, Object?> _layerToJson(LayerConfig c, Layer layer, LayerState st) =>
         for (final MapEntry(:key, :value) in c.initial.entries)
           key.pyhgfName: _enc(value),
       },
+      if (c.kind == LayerKind.continuous) ...{
+        'value_children': c.valueChild,
+        'volatility_children': c.volatilityChild,
+        'value_coupling': _enc(c.valueCoupling),
+        'volatility_coupling': _enc(c.volatilityCoupling),
+        'volatility_fully_connected': c.volatilityFullyConnected,
+        'tonic_drift': _enc(c.tonicDrift),
+        'autoconnection_strength': _enc(c.autoconnectionStrength),
+        'volatility_weights': layer.volatilityWeights == null
+            ? null
+            : _encList(layer.volatilityWeights!.data),
+        'node_tonic_drift': _encList(layer.tonicDrift!),
+        'node_autoconnection_strength': _encList(layer.autoconnectionStrength!),
+      },
       'weights': layer.weights == null ? null : _encList(layer.weights!.data),
       if (layer.weightsPrecisionDelta case final d?)
         'weights_precision_delta': _encList(d),
@@ -141,6 +155,29 @@ DeepNetwork _deepNetworkFromJson(
   final layers = (json['layers'] as List<Object?>).cast<Map<String, Object?>>();
   for (final l in layers) {
     final tv = l['tonic_volatility'];
+    if (l['kind'] == LayerKind.continuous.pyhgfName) {
+      net.addLayer(
+        l['size'] as int,
+        kind: LayerKind.continuous,
+        fullyConnected: l['fully_connected'] as bool,
+        coupling: _coupling(l['coupling'] as String, couplings),
+        tonicVolatility: _dec(tv),
+        initial: {
+          for (final MapEntry(:key, :value)
+              in (l['initial'] as Map<String, Object?>).entries)
+            LayerField.parse(key): _dec(value),
+        },
+        // Explicit children (null, null) would mean the chain default.
+        valueChildren: l['value_children'] as int?,
+        volatilityChildren: l['volatility_children'] as int?,
+        valueCoupling: _dec(l['value_coupling']),
+        volatilityCoupling: _dec(l['volatility_coupling']),
+        volatilityFullyConnected: l['volatility_fully_connected'] as bool,
+        tonicDrift: _dec(l['tonic_drift']),
+        autoconnectionStrength: _dec(l['autoconnection_strength']),
+      );
+      continue;
+    }
     net.addLayer(
       l['size'] as int,
       kind: LayerKind.parse(l['kind'] as String),
@@ -176,6 +213,23 @@ DeepNetwork _deepNetworkFromJson(
       }
     }
     final n = layer.size;
+    final kw = layer.volatilityWeights;
+    if ((kw == null) != (l['volatility_weights'] == null)) {
+      throw FormatException('$where: volatility_weights on one side only');
+    }
+    if (kw != null) {
+      kw.data.setAll(
+        0,
+        _decList(l['volatility_weights'], kw.data.length, '$where κ'),
+      );
+    }
+    if (layer.tonicDrift case final d? when l['node_tonic_drift'] != null) {
+      d.setAll(0, _decList(l['node_tonic_drift'], n, where));
+    }
+    if (layer.autoconnectionStrength case final a?
+        when l['node_autoconnection_strength'] != null) {
+      a.setAll(0, _decList(l['node_autoconnection_strength'], n, where));
+    }
     final tv = layer.tonicVolatility;
     if (tv != null && l['node_tonic_volatility'] != null) {
       tv.setAll(0, _decList(l['node_tonic_volatility'], n, where));

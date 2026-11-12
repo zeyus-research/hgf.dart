@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:hgf/hgf.dart';
 
 import 'config.dart';
+import 'continuous.dart';
 import 'init.dart';
 import 'kernels.dart';
 import 'matrix.dart';
@@ -99,6 +100,7 @@ final class DeepNetwork {
   final Workspace _ws1 = Workspace(1);
   Workspace? _wsBatch;
   List<LayerState>? _batchStates;
+  ContinuousTopology? _topology;
 
   /// The trajectories recorded by the last [fit] (`null` when it recorded
   /// nothing).
@@ -122,27 +124,90 @@ final class DeepNetwork {
   /// Add a layer above the existing ones (the first is the output layer).
   ///
   /// [addConstantInput] appends a bias column to this layer's weights (on
-  /// by default). [fullyConnected] `false` connects one-to-one with the
-  /// layer below (same size, no bias). [volatilityParent] defaults to
-  /// [carryPrecision] for volatile layers and `true` otherwise.
+  /// by default; never on continuous layers). [fullyConnected] `false`
+  /// connects one-to-one with the layer below (same size, no bias).
+  /// [volatilityParent] defaults to [carryPrecision] for volatile layers
+  /// and `true` otherwise (continuous layers ignore it).
   /// [initial] overrides initial beliefs, broadcast to every node (for
   /// example `{LayerField.precision: 2.0}`); volatility-level overrides on a
   /// layer without a volatility parent are dropped, as in pyhgf.
+  ///
+  /// [LayerKind.continuous] layers form a filter of their own (see
+  /// [inputData]) and take the continuous-only arguments:
+  ///
+  /// * [valueChildren] / [volatilityChildren]: the index of the existing
+  ///   layer this one is the value / volatility parent of. Without either,
+  ///   the layer is the value parent of the previous one.
+  /// * [valueCoupling] (default 1) and [volatilityCoupling] κ₀ (default 1):
+  ///   dense entries are the strength divided by this layer's size, so the
+  ///   child receives the strength times the layer's average; one-to-one
+  ///   entries are the strength. [volatilityFullyConnected] `false` makes κ
+  ///   one-to-one (required by the unbounded update).
+  /// * [tonicVolatility] ω (default −4), [tonicDrift] ρ (default 0) and
+  ///   [autoconnectionStrength] λ (default 1). The observation layer (the
+  ///   first) defaults to ω = 0 and λ = 0.
   ///
   /// Adding a layer rebuilds the network: weights go back to 1 (dense) or
   /// the identity (one-to-one).
   DeepNetwork addLayer(
     int size, {
     LayerKind kind = LayerKind.volatile,
-    bool addConstantInput = true,
+    bool? addConstantInput,
     bool fullyConnected = true,
     Coupling? coupling,
     bool? volatilityParent,
     double? tonicVolatility,
-    double tonicVolatilityVol = -4.0,
+    double? tonicVolatilityVol,
     Map<LayerField, double> initial = const {},
+    int? valueChildren,
+    int? volatilityChildren,
+    double? valueCoupling,
+    double? volatilityCoupling,
+    bool? volatilityFullyConnected,
+    double? tonicDrift,
+    double? autoconnectionStrength,
   }) {
     if (size < 1) throw ArgumentError.value(size, 'size', 'must be positive');
+    final continuous = kind == LayerKind.continuous;
+    if (_configs.isNotEmpty && isContinuous != continuous) {
+      throw ArgumentError(
+        'Continuous layers cannot mix with volatile/binary/categorical layers '
+        'in one network.',
+      );
+    }
+    if (continuous) {
+      return _addContinuousLayer(
+        size,
+        addConstantInput: addConstantInput,
+        fullyConnected: fullyConnected,
+        coupling: coupling,
+        tonicVolatility: tonicVolatility,
+        tonicVolatilityVol: tonicVolatilityVol,
+        initial: initial,
+        valueChildren: valueChildren,
+        volatilityChildren: volatilityChildren,
+        valueCoupling: valueCoupling ?? 1.0,
+        volatilityCoupling: volatilityCoupling ?? 1.0,
+        volatilityFullyConnected: volatilityFullyConnected ?? true,
+        tonicDrift: tonicDrift,
+        autoconnectionStrength: autoconnectionStrength,
+      );
+    }
+    final misplaced = [
+      if (valueChildren != null) 'valueChildren',
+      if (volatilityChildren != null) 'volatilityChildren',
+      if (valueCoupling != null) 'valueCoupling',
+      if (volatilityCoupling != null) 'volatilityCoupling',
+      if (volatilityFullyConnected != null) 'volatilityFullyConnected',
+      if (tonicDrift != null) 'tonicDrift',
+      if (autoconnectionStrength != null) 'autoconnectionStrength',
+    ];
+    if (misplaced.isNotEmpty) {
+      throw ArgumentError(
+        '${misplaced.join(', ')} only apply to continuous layers.',
+      );
+    }
+    final hasConstant = addConstantInput ?? true;
     if (kind == LayerKind.categorical && _configs.isNotEmpty) {
       throw ArgumentError(
         'Categorical layers represent a single N-way choice and are only '
@@ -164,7 +229,7 @@ final class DeepNetwork {
       );
     }
     if (!fullyConnected) {
-      if (addConstantInput) {
+      if (hasConstant) {
         throw ArgumentError(
           'One-to-one layers (fullyConnected: false) cannot use '
           'addConstantInput.',
@@ -181,7 +246,7 @@ final class DeepNetwork {
       LayerConfig(
         size: size,
         kind: kind,
-        addConstantInput: addConstantInput,
+        addConstantInput: hasConstant,
         fullyConnected: fullyConnected,
         coupling: coupling ?? this.coupling,
         volatilityParent:
@@ -189,7 +254,7 @@ final class DeepNetwork {
         tonicVolatility: isVolatile
             ? (tonicVolatility ?? (this.tonicVolatility ? -4.0 : null))
             : null,
-        tonicVolatilityVol: tonicVolatilityVol,
+        tonicVolatilityVol: tonicVolatilityVol ?? -4.0,
         initial: Map.unmodifiable(initial),
       ),
     );
@@ -197,9 +262,173 @@ final class DeepNetwork {
     return this;
   }
 
+  /// [addLayer] for a continuous layer (pyhgf's `add_layer` with
+  /// `kind="continuous"` and `_resolve_continuous_children`).
+  DeepNetwork _addContinuousLayer(
+    int size, {
+    required bool? addConstantInput,
+    required bool fullyConnected,
+    required Coupling? coupling,
+    required double? tonicVolatility,
+    required double? tonicVolatilityVol,
+    required Map<LayerField, double> initial,
+    required int? valueChildren,
+    required int? volatilityChildren,
+    required double valueCoupling,
+    required double volatilityCoupling,
+    required bool volatilityFullyConnected,
+    required double? tonicDrift,
+    required double? autoconnectionStrength,
+  }) {
+    if (addConstantInput ?? false) {
+      throw ArgumentError(
+        'Continuous layers cannot use addConstantInput: the per-node '
+        'tonicDrift already provides a constant offset.',
+      );
+    }
+    if (tonicVolatilityVol != null) {
+      throw ArgumentError(
+        'tonicVolatilityVol does not apply to continuous layers (they have '
+        'no internal volatility level).',
+      );
+    }
+    final existing = _configs.length;
+    final valueChild = valueChildren == null && volatilityChildren == null
+        ? (existing > 0 ? existing - 1 : null)
+        : valueChildren;
+    final volatilityChild = volatilityChildren;
+    for (final (name, child) in [
+      ('valueChildren', valueChild),
+      ('volatilityChildren', volatilityChild),
+    ]) {
+      if (child != null && (child < 0 || child >= existing)) {
+        throw RangeError(
+          '$name=$child does not name an existing layer (the network has '
+          '$existing layers).',
+        );
+      }
+    }
+    if (valueChild != null) {
+      final owner = _configs.indexWhere((c) => c.valueChild == valueChild);
+      if (owner >= 0) {
+        throw ArgumentError(
+          'Layer $valueChild already has a value parent (layer $owner).',
+        );
+      }
+      if (!fullyConnected && _configs[valueChild].size != size) {
+        throw ArgumentError(
+          'One-to-one layers require the same size as the child layer '
+          '(${_configs[valueChild].size}), got $size.',
+        );
+      }
+    }
+    if (volatilityChild != null) {
+      final owner = _configs.indexWhere(
+        (c) => c.volatilityChild == volatilityChild,
+      );
+      if (owner >= 0) {
+        throw ArgumentError(
+          'Layer $volatilityChild already has a volatility parent '
+          '(layer $owner).',
+        );
+      }
+      final childSize = _configs[volatilityChild].size;
+      if (!volatilityFullyConnected && childSize != size) {
+        throw ArgumentError(
+          'A one-to-one volatility coupling requires equal sizes (child '
+          'layer $volatilityChild has $childSize nodes, this layer $size).',
+        );
+      }
+      if (settings.volatilityUpdates == DeepVolatilityUpdate.unbounded) {
+        // The unbounded update is implemented for one volatility child per
+        // node and no value child.
+        if (volatilityFullyConnected && !(size == 1 && childSize == 1)) {
+          throw ArgumentError(
+            'The unbounded volatility update requires a one-to-one '
+            'volatility coupling (volatilityFullyConnected: false). Use '
+            'standard or eHGF for fully connected volatility parents.',
+          );
+        }
+        if (valueChild != null) {
+          throw ArgumentError(
+            'Under the unbounded volatility update a volatility parent '
+            'cannot also be a value parent. Use standard or eHGF for mixed '
+            'parents.',
+          );
+        }
+      }
+    }
+    // The observation layer performs no autoregression of its own and its
+    // volatility exponent is zeroed (pyhgf's observation-leaf convention).
+    final observation = existing == 0;
+    final config = LayerConfig(
+      size: size,
+      kind: LayerKind.continuous,
+      addConstantInput: false,
+      fullyConnected: fullyConnected,
+      coupling: coupling ?? this.coupling,
+      volatilityParent: false,
+      tonicVolatility: tonicVolatility ?? (observation ? 0.0 : -4.0),
+      tonicVolatilityVol: -4.0,
+      initial: Map.unmodifiable(initial),
+      valueChild: valueChild,
+      volatilityChild: volatilityChild,
+      valueCoupling: valueCoupling,
+      volatilityCoupling: volatilityCoupling,
+      volatilityFullyConnected: volatilityFullyConnected,
+      tonicDrift: tonicDrift ?? 0.0,
+      autoconnectionStrength:
+          autoconnectionStrength ?? (observation ? 0.0 : 1.0),
+    );
+    _configs.add(config);
+    try {
+      _build();
+    } on ArgumentError {
+      _configs.removeLast();
+      _build();
+      rethrow;
+    }
+    return this;
+  }
+
+  /// Whether this is a network of continuous layers (a filter run with
+  /// [inputData]).
+  bool get isContinuous =>
+      _configs.isNotEmpty && _configs.first.kind == LayerKind.continuous;
+
+  /// Reject the deep-network entry points on a continuous network.
+  void _requireDeep(String method) {
+    if (isContinuous) {
+      throw StateError(
+        '$method() is not available for continuous networks: they are '
+        'filters, not trainable deep networks. Use inputData() to run '
+        'observations through the network.',
+      );
+    }
+  }
+
+  /// One fixed coupling matrix of a continuous layer (`_fan_in_matrix`):
+  /// dense entries `strength / size`, one-to-one `strength` on the
+  /// diagonal.
+  Matrix? _fanIn(int? child, int size, double strength, bool dense) {
+    if (child == null) return null;
+    final rows = _configs[child].size;
+    if (dense) return Matrix.filled(rows, size, strength / size);
+    final m = Matrix(rows, size);
+    for (var i = 0; i < rows && i < size; i++) {
+      m.data[i * size + i] = strength;
+    }
+    return m;
+  }
+
   /// Rebuild every layer from its description: initial beliefs, unit
   /// weights.
   void _build() {
+    if (isContinuous) {
+      _buildContinuous();
+      return;
+    }
+    _topology = null;
     final layers = <Layer>[];
     final state = <LayerState>[];
     for (var i = 0; i < _configs.length; i++) {
@@ -237,6 +466,113 @@ final class DeepNetwork {
     trajectories = null;
   }
 
+  /// [_build] for a continuous network (`_init_continuous_state`).
+  void _buildContinuous() {
+    final topology = ContinuousTopology(_configs);
+    final layers = <Layer>[];
+    final state = <LayerState>[];
+    for (var i = 0; i < _configs.length; i++) {
+      final c = _configs[i];
+      final s = LayerState.continuous(
+        c.size,
+        hasVolatilityParent: topology.volatilityParentOf[i] != null,
+      );
+      c.initial.forEach((field, value) {
+        s.field(field)?.fillRange(0, c.size, value);
+      });
+      Float64List filled(double v) =>
+          Float64List(c.size)..fillRange(0, c.size, v);
+      layers.add(
+        Layer(
+          config: c,
+          index: i,
+          tonicVolatilityVol: filled(c.tonicVolatilityVol),
+          tonicVolatility: filled(c.tonicVolatility!),
+          priorPrecision: Float64List.fromList(s.precision),
+          weights: _fanIn(
+            c.valueChild,
+            c.size,
+            c.valueCoupling,
+            c.fullyConnected,
+          ),
+          volatilityWeights: _fanIn(
+            c.volatilityChild,
+            c.size,
+            c.volatilityCoupling,
+            c.volatilityFullyConnected,
+          ),
+          tonicDrift: filled(c.tonicDrift),
+          autoconnectionStrength: filled(c.autoconnectionStrength),
+        ),
+      );
+      state.add(s);
+    }
+    _topology = topology;
+    _layers = layers;
+    _state = state;
+    _batchStates = null;
+    trajectories = null;
+  }
+
+  /// Filter the observations [y] (`steps × size of layer 0`) through a
+  /// continuous network, as pyhgf's `input_data`: for every row, a
+  /// top-down prediction of every layer from its parents, then the row is
+  /// clamped on layer 0 and the prediction errors propagate up through the
+  /// value and volatility couplings. There is no learning: the couplings
+  /// are parameters of the filter.
+  ///
+  /// [timeSteps] gives the time step of every row (default 1). [record]
+  /// names the fields to keep at every step, in [trajectories]. Returns
+  /// layer 0's expected mean at every step, the prediction made before
+  /// that row was seen. The state carries over to the next call.
+  Matrix inputData(
+    Matrix y, {
+    List<double>? timeSteps,
+    Set<LayerField> record = const {},
+  }) {
+    if (!isContinuous) {
+      throw StateError(
+        'inputData() is only available for continuous networks; use fit() '
+        'for volatile/binary/categorical networks.',
+      );
+    }
+    _checkColumns(y, _configs.first.size, 'y');
+    final n = y.rows;
+    if (timeSteps != null && timeSteps.length != n) {
+      throw ArgumentError(
+        'timeSteps has ${timeSteps.length} entries for $n observations.',
+      );
+    }
+    final unknown = [
+      for (final f in record)
+        if (_state.every((s) => s.field(f) == null)) f.pyhgfName,
+    ];
+    if (unknown.isNotEmpty) {
+      throw ArgumentError(
+        'Unknown record field(s) $unknown: no layer of this network has '
+        'them.',
+      );
+    }
+    final topo = _topology!;
+    final out = Matrix(n, _configs.first.size);
+    final traj = record.isEmpty ? null : DeepTrajectories._(record, _state, n);
+    for (var t = 0; t < n; t++) {
+      final dt = timeSteps?[t] ?? 1.0;
+      continuousPredictionSweep(
+        _layers,
+        _state,
+        topo,
+        dt,
+        settings.meanFieldUpdates,
+      );
+      continuousUpdateSweep(_layers, _state, topo, y, t, dt, settings);
+      out.data.setAll(t * out.cols, _state.first.expectedMean);
+      traj?._record(t, _state);
+    }
+    trajectories = traj;
+    return out;
+  }
+
   /// Back to the initial beliefs and unit weights.
   void reset() => _build();
 
@@ -255,8 +591,18 @@ final class DeepNetwork {
   /// network's own: changes take effect.
   List<Matrix?> get weights => [for (final l in _layers) l.weights];
 
+  /// Continuous networks: the fixed volatility couplings κ, bottom to top
+  /// (`child × size`, `null` for a layer that is no volatility parent).
+  /// For a continuous network [weights] holds the fixed value couplings W
+  /// (`child × size`, `null` for a layer that is no value parent). Both are
+  /// the network's own: edit them in place to set other couplings.
+  List<Matrix?> get volatilityWeights => [
+    for (final l in _layers) l.volatilityWeights,
+  ];
+
   /// Replace the weights of layers `1..n` (same shapes as [weights]).
   void setWeights(List<Matrix> weights) {
+    _requireDeep('setWeights');
     _requireLayers(2);
     if (weights.length != _layers.length - 1) {
       throw ArgumentError(
@@ -295,6 +641,7 @@ final class DeepNetwork {
   /// above the prior starts at zero. Layers that already carry one keep it.
   /// [LearningKind.synapticUncertainty] installs it itself.
   DeepNetwork installWeightBelief({List<int>? layers}) {
+    _requireDeep('installWeightBelief');
     _requireLayers();
     if (layers != null) {
       final unheld = [
@@ -362,6 +709,7 @@ final class DeepNetwork {
   /// lower layers' draws unchanged. The same [seed] gives the same weights
   /// in every run.
   DeepNetwork weightInitialisation(WeightInit strategy, {int seed = 0}) {
+    _requireDeep('weightInitialisation');
     for (var l = 1; l < _layers.length; l++) {
       final layer = _layers[l];
       // One-to-one layers keep their identity weights: every strategy draws
@@ -416,6 +764,7 @@ final class DeepNetwork {
     bool updatePrecisions = true,
     Set<LayerField> record = const {},
   }) {
+    _requireDeep('fit');
     _requireLayers(2);
     _resolveLearning(learningKind, synapticUncertainty, optimiser);
     if (weightUpdate && optimiser == null && synapticUncertainty == null) {
@@ -547,6 +896,7 @@ final class DeepNetwork {
     double timeStep = 1.0,
     bool updatePrecisions = true,
   }) {
+    _requireDeep('trace');
     _requireLayers(2);
     final xm = Matrix.row(x);
     _checkColumns(xm, _configs.last.size, 'x');
@@ -666,6 +1016,7 @@ final class DeepNetwork {
   /// The output layer's predicted mean for every row of [x], from the
   /// current network (the state is not modified). `samples × outputSize`.
   Matrix predict(Matrix x) {
+    _requireDeep('predict');
     _requireLayers();
     _checkColumns(x, _configs.last.size, 'x');
     final b = x.rows;
@@ -693,6 +1044,8 @@ final class DeepNetwork {
       final next = Float64List(child.size * b);
       matMul(next, w.data, w.cols, 1, child.size, w.cols, coupled, b);
       switch (child.kind) {
+        case LayerKind.continuous:
+          throw UnsupportedError('Continuous layers run in inputData().');
         case LayerKind.volatile:
           break;
         case LayerKind.binary:
@@ -760,6 +1113,7 @@ final class DeepNetwork {
     bool updatePrecisions = true,
     List<double>? sampleWeight,
   }) {
+    _requireDeep('batchUpdate');
     _requireLayers(2);
     _resolveLearning(learningKind, synapticUncertainty, optimiser);
     _checkColumns(x, _configs.last.size, 'x');
@@ -872,6 +1226,7 @@ final class DeepNetwork {
     LearningKind learningKind = LearningKind.precisionWeighted,
     double relativeFloor = 1e-9,
   }) {
+    _requireDeep('checkGradientHealth');
     _requireLayers(2);
     final xm = Matrix.row(x), ym = Matrix.row(y);
     _checkColumns(xm, _configs.last.size, 'x');
@@ -942,6 +1297,7 @@ final class DeepNetwork {
   /// The error message the input layer received in the last step (width 1;
   /// after [fit]).
   Float64List inputPredictionErrorOfState() {
+    _requireDeep('inputPredictionErrorOfState');
     _requireLayers(2);
     final out = Matrix(1, _configs.last.size);
     inputPredictionError(_layers, _state, _ws1, settings, out, 0);

@@ -93,6 +93,32 @@ DeepNetwork buildNetwork(Map<String, Object?> fixture, {DeepFixes? fixes}) {
     final tonic = (overrides.remove('tonic_volatility') as num?)?.toDouble();
     final tonicVol = (overrides.remove('tonic_volatility_vol') as num?)
         ?.toDouble();
+    if (layer['kind'] == 'continuous') {
+      final drift = (overrides.remove('tonic_drift') as num?)?.toDouble();
+      final ar = (overrides.remove('autoconnection_strength') as num?)
+          ?.toDouble();
+      net.addLayer(
+        layer['size'] as int,
+        kind: LayerKind.continuous,
+        fullyConnected: layer['fully_connected'] as bool? ?? true,
+        coupling: layer['coupling'] == null
+            ? null
+            : CouplingFn.parse(layer['coupling'] as String),
+        tonicVolatility: tonic,
+        tonicDrift: drift,
+        autoconnectionStrength: ar,
+        valueChildren: layer['value_children'] as int?,
+        volatilityChildren: layer['volatility_children'] as int?,
+        valueCoupling: (layer['value_coupling'] as num?)?.toDouble(),
+        volatilityCoupling: (layer['volatility_coupling'] as num?)?.toDouble(),
+        volatilityFullyConnected: layer['volatility_fully_connected'] as bool?,
+        initial: {
+          for (final e in overrides.entries)
+            LayerField.parse(e.key): (e.value as num).toDouble(),
+        },
+      );
+      continue;
+    }
     net.addLayer(
       layer['size'] as int,
       kind: LayerKind.parse(layer['kind'] as String? ?? 'volatile'),
@@ -109,6 +135,21 @@ DeepNetwork buildNetwork(Map<String, Object?> fixture, {DeepFixes? fixes}) {
           LayerField.parse(e.key): (e.value as num).toDouble(),
       },
     );
+  }
+  if (net.isContinuous) {
+    // Fixed couplings: overwrite the built ones where the fixture sets them.
+    for (final (key, live) in [
+      ('weights', net.weights),
+      ('volatility_weights', net.volatilityWeights),
+    ]) {
+      final given = fixture[key] as List<Object?>? ?? const [];
+      for (var i = 0; i < given.length; i++) {
+        if (given[i] != null) {
+          live[i + 1]!.data.setAll(0, matrix(given[i]).data);
+        }
+      }
+    }
+    return net;
   }
   net.setWeights([
     for (final w in fixture['weights'] as List<Object?>) matrix(w),
@@ -208,19 +249,50 @@ List<String> checkDeepFixture(
       op['learning_kind'] as String? ?? 'precision_weighted',
     );
     if (finiteOnly) {
-      _currentSamples = (op['x'] as List<Object?>).length;
-      final bad = kind == 'fit'
+      _currentSamples = ((op['x'] ?? op['y']) as List<Object?>).length;
+      final bad = kind == 'fit' || kind == 'input_data'
           ? (_firstNonFiniteRow(op['trajectories'] as Map<String, Object?>?) ??
                 (_anyNonFinite(op['predictions']) || _anyNonFinite(op['after'])
                     ? 0
                     : null))
           : (_anyNonFinite(op) ? 0 : null);
       if (bad != null) {
-        if (kind != 'fit' || bad == 0) break;
+        if ((kind != 'fit' && kind != 'input_data') || bad == 0) break;
         rows = bad;
       }
     }
+    // Recorded trajectories, shared by fit and input_data.
+    void trajectories(Map<String, Object?>? traj) {
+      traj?.forEach((name, perLayer) {
+        final field = LayerField.parse(name);
+        final layers = perLayer as List<Object?>;
+        for (var l = 0; l < layers.length; l++) {
+          final actual = net.trajectories!.of(field, l);
+          if (layers[l] == null || actual == null) {
+            if ((layers[l] == null) != (actual == null)) {
+              failures.add('$tag $name layer $l: presence differs');
+            }
+            continue;
+          }
+          cmp('$tag trajectory $name layer $l', matrix(layers[l]).data, actual);
+        }
+      });
+    }
+
     switch (kind) {
+      case 'input_data':
+        final record = {
+          for (final f in op['record'] as List<Object?>? ?? const [])
+            LayerField.parse(f as String),
+        };
+        final ts = op['time_steps'];
+        final pred = net.inputData(
+          matrix(op['y']),
+          timeSteps: ts == null ? null : series(ts),
+          record: record,
+        );
+        cmp('$tag predictions', matrix(op['predictions']).data, pred.data);
+        trajectories(op['trajectories'] as Map<String, Object?>?);
       case 'fit':
         final record = {
           for (final f in op['record'] as List<Object?>? ?? const [])
@@ -238,25 +310,7 @@ List<String> checkDeepFixture(
           record: record,
         );
         cmp('$tag predictions', matrix(op['predictions']).data, pred.data);
-        final traj = op['trajectories'] as Map<String, Object?>?;
-        traj?.forEach((name, perLayer) {
-          final field = LayerField.parse(name);
-          final layers = perLayer as List<Object?>;
-          for (var l = 0; l < layers.length; l++) {
-            final actual = net.trajectories!.of(field, l);
-            if (layers[l] == null || actual == null) {
-              if ((layers[l] == null) != (actual == null)) {
-                failures.add('$tag $name layer $l: presence differs');
-              }
-              continue;
-            }
-            cmp(
-              '$tag trajectory $name layer $l',
-              matrix(layers[l]).data,
-              actual,
-            );
-          }
-        });
+        trajectories(op['trajectories'] as Map<String, Object?>?);
       case 'batch_update':
         final errors = net.batchUpdate(
           matrix(op['x']),
@@ -301,7 +355,9 @@ List<String> checkDeepFixture(
     final after = op['after'] as Map<String, Object?>;
     final weights = after['weights'] as List<Object?>;
     final deltas = after['weights_precision_delta'] as List<Object?>?;
-    final ours = net.weightPrecisionDeltas;
+    final ours = net.isContinuous
+        ? List<Matrix?>.filled(net.nLayers, null)
+        : net.weightPrecisionDeltas;
     for (var l = 0; l < weights.length; l++) {
       final d = deltas?[l];
       if ((d == null) != (ours[l + 1] == null)) {
@@ -314,12 +370,19 @@ List<String> checkDeepFixture(
         );
       }
     }
-    for (var l = 0; l < weights.length; l++) {
-      cmp(
-        '$tag weights ${l + 1}',
-        matrix(weights[l]).data,
-        net.weights[l + 1]!.data,
-      );
+    for (final (key, live) in [
+      ('weights', net.weights),
+      ('volatility_weights', net.volatilityWeights),
+    ]) {
+      final ref = after[key] as List<Object?>?;
+      if (ref == null) continue;
+      for (var l = 0; l < ref.length; l++) {
+        if ((ref[l] == null) != (live[l + 1] == null)) {
+          failures.add('$tag $key ${l + 1}: presence differs');
+        } else if (ref[l] != null) {
+          cmp('$tag $key ${l + 1}', matrix(ref[l]).data, live[l + 1]!.data);
+        }
+      }
     }
     (after['state'] as Map<String, Object?>).forEach((name, perLayer) {
       final field = LayerField.parse(name);

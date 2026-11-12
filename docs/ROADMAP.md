@@ -80,7 +80,8 @@ supersedes its phase list.
   on 2000 agents 30 s (319 s).
 
 - `packages/hgf_deep` (2026-11-09): pyhgf's vectorised `DeepNetwork` (HGF
-  neural networks) in f64, matching JAX to 1e-9 on 26 fixtures. Sequential
+  neural networks) in f64, matching JAX to 1e-9 on 74 fixtures (28 of them
+  continuous-layer filters, since 2026-11-12). Sequential
   `fit` is ahead of pyhgf on small networks and ~2× behind JAX on wider ones.
   Since 2026-11-10 the batched work runs on the GPU too (`GpuDeepNetwork`
   in hgf_gpu, f32, ~1e-6 from f64): a learning step on 256 samples takes
@@ -1350,12 +1351,12 @@ volatile, binary and categorical nodes, dense or one-to-one weights, every
 volatility update, relaxed or mean-field, feedforward uncertainty, carried
 or reset precisions, tonic volatility; `fit` (sequential), `batchUpdate`
 (returns the input-layer errors), `predict`; SGD and Adam with optax's
-arithmetic; four weight initialisers. Not ported: continuous layers
-(`input_data`), `LayerStack` (a `jax.lax.scan` compile-time device with
-nothing to port), and rshgf's two-phase batch step (`batch_forward` /
+arithmetic; four weight initialisers. Not ported: `LayerStack` (a
+`jax.lax.scan` compile-time device with nothing to port), and rshgf's two-phase batch step (`batch_forward` /
 `batch_update_from_error`, a Rust-binding convenience pyhgf doesn't
 have). `synaptic_uncertainty` learning, `update_input_layer`, sample
-weights and `check_gradient_health` followed on 2026-11-12.
+weights and `check_gradient_health` followed on 2026-11-12, and
+continuous layers (`input_data`) the same day.
 
 - **Reference:** pyhgf's JAX backend in float64, not rshgf. It is a
   superset of rshgf's features, and rshgf's batched kernel is wrong (R4).
@@ -1704,6 +1705,38 @@ since the spike".
   runaway; the eHGF ones still reach it late and are compared up to it.
 - The GPU classes reject the new options for now; the GPU fixture checks
   skip fixtures that use them.
+
+#### hgf_deep: continuous layers (2026-11-12): done
+
+pyhgf's continuous `DeepNetwork` (`kind="continuous"`, `input_data`,
+`run_continuous_scan`): layers of regular continuous nodes joined by fixed
+value couplings W (the child's drift) and volatility couplings κ, filtered
+one observation at a time. `LayerKind.continuous`,
+`addLayer(valueChildren:, volatilityChildren:, valueCoupling:,
+volatilityCoupling:, volatilityFullyConnected:, tonicDrift:,
+autoconnectionStrength:)`, `DeepNetwork.inputData(y, timeSteps:, record:)`.
+The kernels are in `lib/src/continuous.dart` (width 1: there is no
+batched entry point): rHGF prediction with the MGF and Taylor terms, the
+observation layer's noise precision from a noise parent (#477), the
+relaxed value messages, the standard / eHGF / one-to-one unbounded
+posteriors, the noise prediction error, and pyhgf's update order (a noise
+parent after the observation layer's value parent; cycles rejected when
+the layer is added).
+
+- **Parity:** 28 pyhgf JAX f64 fixtures (`continuous_*`, through
+  `gen_deep_fixtures.py`'s new `input_data` op and `volatility_weights`)
+  match to 1e-9; random signed couplings under the standard update go NaN
+  at step 17 in pyhgf, and here at the same step. Mutations (MGF term, the
+  eHGF increment, the noise error's t², Lambert W, κ² in the standard
+  increment) each fail 2–20 fixtures. `continuous_test.dart` builds
+  pyhgf's own parity topologies both as continuous layers and as an hgf
+  `Network` (30 cases, 1e-9), plus the builder's validation, JSON round
+  trip and state carried across calls.
+- Continuous networks reject `fit`, `predict`, `batchUpdate`, `trace`,
+  weight initialisation and the GPU classes (`DeepKernels`), as pyhgf's
+  `_require_deep_backend` does; the GPU fixture checks skip them.
+- No upstream bugs found here; P21 does not arise (continuous layers have
+  no bias nodes, `tonic_drift` plays that role).
 
 #### macOS / Apple silicon (2026-11-12): measured
 

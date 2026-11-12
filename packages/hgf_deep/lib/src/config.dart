@@ -10,7 +10,14 @@ enum LayerKind {
 
   /// One joint N-way choice over the layer's nodes (softmax). Only valid as
   /// the output (bottom) layer.
-  categorical('categorical');
+  categorical('categorical'),
+
+  /// Regular continuous state nodes with the HGF's drift semantics
+  /// (autoregression plus a drift from the value parents), connected by
+  /// fixed value and volatility couplings. A network of continuous layers
+  /// is a filter: it cannot mix with the other kinds and runs with
+  /// [DeepNetwork.inputData] instead of `fit`.
+  continuous('continuous');
 
   const LayerKind(this.pyhgfName);
 
@@ -22,10 +29,12 @@ enum LayerKind {
     'volatile' || 'volatile-state' => volatile,
     'binary' || 'binary-state' => binary,
     'categorical' || 'categorical-state' => categorical,
+    'continuous' || 'continuous-state' => continuous,
     _ => throw ArgumentError.value(
       name,
       'name',
-      'Unknown layer kind. Choose from volatile, binary, categorical',
+      'Unknown layer kind. Choose from volatile, binary, categorical, '
+          'continuous',
     ),
   };
 }
@@ -201,6 +210,13 @@ final class LayerConfig {
     required this.tonicVolatility,
     required this.tonicVolatilityVol,
     required this.initial,
+    this.valueChild,
+    this.volatilityChild,
+    this.valueCoupling = 1.0,
+    this.volatilityCoupling = 1.0,
+    this.volatilityFullyConnected = true,
+    this.tonicDrift = 0.0,
+    this.autoconnectionStrength = 1.0,
   });
 
   /// Number of nodes.
@@ -213,17 +229,19 @@ final class LayerConfig {
   final bool addConstantInput;
 
   /// Dense (`true`) or one-to-one diagonal (`false`) weights to the layer
-  /// below.
+  /// below (for a continuous layer: to its value child).
   final bool fullyConnected;
 
   /// The coupling (activation) function applied to this layer's means when
   /// it predicts the layer below.
   final Coupling coupling;
 
-  /// Whether the layer has an internal volatility level.
+  /// Whether the layer has an internal volatility level (never for a
+  /// continuous layer, whose volatility parents are other layers).
   final bool volatilityParent;
 
   /// Value-level tonic volatility ω, or `null` when the layer has none.
+  /// Continuous layers always have one.
   final double? tonicVolatility;
 
   /// Tonic volatility of the volatility level.
@@ -231,6 +249,32 @@ final class LayerConfig {
 
   /// Initial-belief overrides, broadcast to every node.
   final Map<LayerField, double> initial;
+
+  /// Continuous layers: the index of the layer this one is the value
+  /// parent of, or `null`.
+  final int? valueChild;
+
+  /// Continuous layers: the index of the layer this one is the volatility
+  /// parent of, or `null`.
+  final int? volatilityChild;
+
+  /// Continuous layers: the base value coupling (dense entries are
+  /// `valueCoupling / size`, one-to-one entries `valueCoupling`).
+  final double valueCoupling;
+
+  /// Continuous layers: the base volatility coupling κ₀ (dense entries are
+  /// `κ₀ / size`, one-to-one entries κ₀).
+  final double volatilityCoupling;
+
+  /// Continuous layers: dense (`true`) or one-to-one κ to the volatility
+  /// child.
+  final bool volatilityFullyConnected;
+
+  /// Continuous layers: the tonic drift ρ added to the predicted mean.
+  final double tonicDrift;
+
+  /// Continuous layers: the AR(1) coefficient λ on the node's own mean.
+  final double autoconnectionStrength;
 }
 
 /// Corrections to upstream pyhgf behaviour that hgf_deep applies on top of

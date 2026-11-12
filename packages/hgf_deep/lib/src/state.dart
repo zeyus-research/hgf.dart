@@ -53,6 +53,34 @@ final class LayerState {
     );
   }
 
+  /// A continuous layer (pyhgf's `LayerState.create_continuous`): the
+  /// value-level fields, plus a volatility prediction error when another
+  /// layer is its volatility parent, and no internal volatility level.
+  factory LayerState.continuous(
+    int nodes, {
+    required bool hasVolatilityParent,
+  }) {
+    Float64List filled(double v) => Float64List(nodes)..fillRange(0, nodes, v);
+    return LayerState._(
+      nodes,
+      1,
+      filled(0),
+      filled(1),
+      filled(0),
+      filled(1),
+      filled(1),
+      filled(0),
+      filled(0),
+      null,
+      null,
+      null,
+      null,
+      null,
+      hasVolatilityParent ? filled(0) : null,
+      null,
+    );
+  }
+
   /// A width-[width] state with every sample a copy of this width-1 state.
   LayerState tile(int width) {
     assert(this.width == 1);

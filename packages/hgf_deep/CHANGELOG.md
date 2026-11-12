@@ -1,5 +1,16 @@
 ## Unreleased
 
+- Continuous layers (pyhgf's continuous `DeepNetwork`, `input_data`):
+  `LayerKind.continuous`, `addLayer(valueChildren:, volatilityChildren:,
+  valueCoupling:, volatilityCoupling:, volatilityFullyConnected:,
+  tonicDrift:, autoconnectionStrength:)`, `DeepNetwork.inputData`,
+  `volatilityWeights`, `isContinuous`, `ContinuousTopology`. Standard,
+  eHGF and unbounded updates, mean-field, noise parents of the
+  observation layer (pyhgf #477). Saved by `toJson`. 28 new pyhgf
+  fixtures within 1e-9, and checked against hgf's `Network`.
+  `addLayer(addConstantInput:)` and `tonicVolatilityVol:` are now
+  nullable (`null` keeps the previous defaults).
+
 - The rest of pyhgf's learning: `LearningKind.synapticUncertainty`
   (weight beliefs; `SynapticUncertainty` settings, `installWeightBelief`,
   `weightPrecisionDeltas`, saved by `toJson` and `snapshot`),

@@ -63,11 +63,48 @@ void main() {
       expect(sigmoidInverseTemperature(0.3, 0.0), 0.5);
     });
 
+    test('gaussianDensity is the normal pdf (pyhgf #475)', () {
+      for (final p in [0.01, 0.5, 1.0, 4.0, 1e3]) {
+        for (final (x, m) in [(0.0, 0.0), (0.3, -1.2), (2.5, 2.0)]) {
+          final ref = math.exp(
+            0.5 * math.log(p / (2 * math.pi)) - 0.5 * p * (x - m) * (x - m),
+          );
+          expect(
+            gaussianDensity(x, m, p),
+            closeTo(ref, 1e-14 * ref + 1e-300),
+            reason: 'x=$x m=$m p=$p',
+          );
+        }
+        // Integrates to one (trapezoid over ±12 sd).
+        final sd = 1 / math.sqrt(p);
+        const n = 20000;
+        final h = 24 * sd / n;
+        var sum = 0.0;
+        for (var i = 0; i <= n; i++) {
+          final w = (i == 0 || i == n) ? 0.5 : 1.0;
+          sum += w * gaussianDensity(-12 * sd + i * h, 0.0, p);
+        }
+        expect(sum * h, closeTo(1.0, 1e-9), reason: 'p=$p');
+      }
+    });
+
+    test('gaussianDensity and binarySurpriseFinitePrecision match pyhgf', () {
+      // pyhgf 1e6e98d7 (after #475), float64.
+      expect(
+        gaussianDensity(0.3, -1.2, 4.0),
+        closeTo(0.008863696823876017, 1e-17),
+      );
+      expect(
+        binarySurpriseFinitePrecision(0.9, 0.7, 3.0),
+        closeTo(0.6199013269964084, 1e-15),
+      );
+    });
+
     test('binarySurpriseFinitePrecision', () {
       // With very precise observations it reduces to the binary surprise
-      // (up to the log of pyhgf's density normalisation, π/√(2π)).
+      // (up to the log of the density normalisation, √(π/2π)).
       const p = 1e3;
-      final norm = math.log(p / math.sqrt(2 * math.pi));
+      final norm = 0.5 * math.log(p / (2 * math.pi));
       expect(
         binarySurpriseFinitePrecision(1.0, 0.7, p) + norm,
         closeTo(binarySurprise(1.0, 0.7), 1e-9),

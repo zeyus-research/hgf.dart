@@ -72,6 +72,7 @@ class ArchitectureCard extends StatelessWidget {
             LayerKind.binary => 'binary (probability of class 1)',
             LayerKind.categorical => 'categorical (one per class)',
             LayerKind.volatile => 'continuous',
+            LayerKind.continuous => 'continuous filter',
           }}',
         ),
         const SizedBox(height: 6),

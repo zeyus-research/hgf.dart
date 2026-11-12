@@ -157,6 +157,12 @@ final class DeepKernels {
       throw ArgumentError('A GPU deep network needs at least two layers.');
     }
     if (capacity < 1) throw ArgumentError.value(capacity, 'capacity');
+    if (layers.first.kind == LayerKind.continuous) {
+      throw UnsupportedError(
+        'Continuous networks are filters with no GPU kernel: use the CPU '
+        'DeepNetwork.inputData.',
+      );
+    }
     if (settings.updateInputLayer) {
       throw UnsupportedError(
         'updateInputLayer has no GPU kernel yet: use the CPU DeepNetwork.',
@@ -741,6 +747,8 @@ $body
     String S(LayerField f) => _s(l, f, 'k');
     String T(LayerField f) => _t(l, f, 'i');
     switch (c.kind) {
+      case LayerKind.continuous:
+        throw UnsupportedError('GPU deep networks have no continuous layers.');
       case LayerKind.volatile:
         final ll = _l[l];
         e
@@ -955,6 +963,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       ..writeln('  let ep = ${S(LayerField.expectedPrecision)};');
     var precision = 'prec';
     switch (layer.kind) {
+      case LayerKind.continuous:
+        throw UnsupportedError('GPU deep networks have no continuous layers.');
       case LayerKind.binary:
         e
           ..writeln('  let vpe = (mean - em) / ep;')

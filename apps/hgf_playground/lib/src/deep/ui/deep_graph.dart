@@ -263,6 +263,7 @@ class _GraphPainter extends CustomPainter {
       final kind = switch (c.kind) {
         LayerKind.binary => 'binary',
         LayerKind.categorical => 'categorical',
+        LayerKind.continuous => 'continuous',
         LayerKind.volatile =>
           l == 0 || l == net.nLayers - 1
               ? ''

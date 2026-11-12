@@ -242,15 +242,15 @@ double binarySurpriseDerivative(
   return x != 0.0 ? -1.0 / m : 1.0 / (1.0 - m);
 }
 
-/// Gaussian density at [x] as pyhgf defines it (`pyhgf.math.gaussian_density`):
-/// `π / √(2π) · exp(−π/2 (x − μ)²)`.
-///
-/// Note the leading factor is the precision itself, not its square root, as
-/// in pyhgf; this is what [binarySurpriseFinitePrecision] uses.
+/// Gaussian density at [x] with mean [mean] and precision [precision]:
+/// `√π / √(2π) · exp(−π/2 (x − μ)²)` (the `π` under the first root is the
+/// precision, the one in `√(2π)` the constant). Mirrors
+/// `pyhgf.math.gaussian_density` since pyhgf #475, which fixed the leading
+/// factor (it used to be the precision itself, so the density only
+/// normalised at π = 1).
 double gaussianDensity(double x, double mean, double precision) {
   final d = x - mean;
-  return precision /
-      math.sqrt(2.0 * math.pi) *
+  return math.sqrt(precision / (2.0 * math.pi)) *
       math.exp(-precision / 2.0 * d * d);
 }
 

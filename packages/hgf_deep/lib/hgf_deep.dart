@@ -8,6 +8,7 @@ library;
 export 'package:hgf/hgf.dart' show Coupling, CouplingFn, CustomCoupling;
 
 export 'src/config.dart';
+export 'src/continuous.dart' show ContinuousTopology;
 export 'src/deep_network.dart';
 export 'src/init.dart';
 export 'src/kernels.dart' show DeepSettings, Layer;

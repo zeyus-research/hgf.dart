@@ -15,6 +15,9 @@
   `constantNoiseVariance` (P21: pyhgf adds a bias parent's placeholder
   precision to the noise prediction error). In `toJson`/`fromJson` and
   `NetworkSpec` (`"fixes"`).
+- `gaussianDensity` is normalised for every precision (pyhgf #475):
+  the leading factor is `√π / √(2π)`, not `π / √(2π)`. This shifts
+  `binarySurpriseFinitePrecision` by `−½ log π`.
 - `lambertW0` divides the Halley terms by eʷ (pyhgf #475): finite for
   every z (it was NaN from ~2.7e151, P2).
 - `BatchNetwork.predict()`: the prediction sweep alone (with or without

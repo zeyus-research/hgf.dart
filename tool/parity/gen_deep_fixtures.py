@@ -102,18 +102,36 @@ def build(spec: dict) -> DeepNetwork:
     )
     for layer in spec["layers"]:
         kwargs = dict(layer.get("overrides", {}))
+        if layer.get("kind") == "continuous":
+            for key in (
+                "value_children",
+                "volatility_children",
+                "value_coupling",
+                "volatility_coupling",
+                "volatility_fully_connected",
+            ):
+                if key in layer:
+                    kwargs[key] = layer[key]
+            add_constant = None
+        else:
+            add_constant = layer.get("add_constant_input", True)
         net = net.add_layer(
             size=layer["size"],
             kind=layer.get("kind", "volatile"),
-            add_constant_input=layer.get("add_constant_input", True),
+            add_constant_input=add_constant,
             fully_connected=layer.get("fully_connected", True),
             coupling_fn=COUPLINGS[layer["coupling"]] if "coupling" in layer else None,
             volatility_parent=layer.get("volatility_parent"),
             **kwargs,
         )
+    # Weight matrices of layers 1..n (``None`` keeps the built one); for a
+    # continuous network the value couplings W, plus the volatility
+    # couplings κ in ``volatility_weights``.
     layers = list(net.state.layers)
-    for i, w in enumerate(spec["weights"], start=1):
-        layers[i] = dataclasses.replace(layers[i], weights_mean=jnp.asarray(w))
+    for key, field in (("weights", "weights_mean"), ("volatility_weights", "volatility_weights")):
+        for i, w in enumerate(spec.get(key) or [], start=1):
+            if w is not None:
+                layers[i] = dataclasses.replace(layers[i], **{field: jnp.asarray(w)})
     net.state = dataclasses.replace(net.state, layers=tuple(layers))
     return net
 
@@ -121,7 +139,22 @@ def build(spec: dict) -> DeepNetwork:
 def snapshot(net: DeepNetwork) -> dict:
     deltas = [layer.weights_precision_delta for layer in net.state.layers[1:]]
     return {
-        "weights": [_mat(layer.weights_mean) for layer in net.state.layers[1:]],
+        "weights": [
+            None if layer.weights_mean is None else _mat(layer.weights_mean)
+            for layer in net.state.layers[1:]
+        ],
+        **(
+            {
+                "volatility_weights": [
+                    None
+                    if layer.volatility_weights is None
+                    else _mat(layer.volatility_weights)
+                    for layer in net.state.layers[1:]
+                ]
+            }
+            if net._is_continuous
+            else {}
+        ),
         **(
             {
                 "weights_precision_delta": [
@@ -321,6 +354,24 @@ def _run(spec: dict) -> dict:
             out["quantised"] = list(h["quantised"])
         elif kind == "predict":
             out["predictions"] = _mat(net.predict(np.asarray(op["x"])))
+        elif kind == "input_data":
+            record = tuple(op.get("record", ()))
+            net.input_data(
+                np.asarray(op["y"]),
+                time_steps=None
+                if op.get("time_steps") is None
+                else np.asarray(op["time_steps"]),
+                record=record or None,
+            )
+            out["predictions"] = _mat(np.asarray(net.predictions).reshape(len(op["y"]), -1))
+            if record:
+                out["trajectories"] = {
+                    field: [
+                        None if traj is None else _mat(traj)
+                        for traj in net.trajectories[field]
+                    ]
+                    for field in record
+                }
         else:
             raise ValueError(kind)
         out["after"] = snapshot(net)
@@ -344,6 +395,8 @@ def rshgf_deviation(spec: dict, ops: list) -> float | None:
     """Largest |Rust f32 − JAX f64| over the predictions and weights."""
     if set(spec["settings"]) - RS_SUPPORTED_SETTINGS:
         return None
+    if any(layer.get("kind") == "continuous" for layer in spec["layers"]):
+        return None  # rshgf has no continuous layers
     if any(
         op.get("learning_kwargs") or op.get("sample_weight") is not None or op["op"] == "health"
         for op in spec["ops"]
@@ -890,7 +943,173 @@ def scenarios() -> dict:
         lambda layers, rng: [fit_op(layers, rng, n=40), predict_op(layers, rng)],
         310,
     )
+    continuous_scenarios(out)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Continuous layers (DeepNetwork.input_data)
+# ---------------------------------------------------------------------------
+
+CONTINUOUS_FIELDS = (
+    "mean",
+    "precision",
+    "expected_mean",
+    "expected_precision",
+    "conditional_expected_precision",
+    "effective_precision",
+    "value_prediction_error",
+    "volatility_prediction_error",
+)
+
+
+def _c(size, **kw) -> dict:
+    return {"size": size, "kind": "continuous", **kw}
+
+
+def _series(rng, n: int, size: int) -> list:
+    """A drifting, heteroscedastic series (random walk with bursts)."""
+    t = np.arange(n)[:, None]
+    scale = 0.3 + 0.7 * (np.sin(t / 7.0) > 0.5)
+    walk = np.cumsum(rng.normal(scale=0.1, size=(n, size)), axis=0)
+    return (walk + scale * rng.normal(size=(n, size))).tolist()
+
+
+def input_data_op(rng, n: int, size: int, time_steps: bool = False, record=CONTINUOUS_FIELDS) -> dict:
+    return {
+        "op": "input_data",
+        "y": _series(rng, n, size),
+        "time_steps": rng.uniform(0.1, 3.0, size=n).tolist() if time_steps else None,
+        "record": [f for f in record],
+    }
+
+
+def continuous_scenarios(out: dict) -> None:
+    seed = 500
+
+    def add(name, settings, layers, n=40, time_steps=False, calls=1, matrices=None):
+        nonlocal seed
+        seed += 1
+        rng = np.random.default_rng(seed)
+        size = layers[0]["size"]
+        record = list(CONTINUOUS_FIELDS)
+        # Only fields some layer allocates can be recorded.
+        if not any("volatility_children" in layer for layer in layers):
+            record.remove("volatility_prediction_error")
+        spec = {
+            "settings": settings,
+            "layers": layers,
+            "weights": [],
+            "ops": [
+                input_data_op(rng, n, size, time_steps, record)
+                for _ in range(calls)
+            ],
+        }
+        if matrices is not None:
+            spec["weights"], spec["volatility_weights"] = matrices(rng)
+        out[name] = spec
+
+    add("continuous_chain", {"volatility_updates": "standard"}, [_c(1), _c(1)])
+    for vol in ("standard", "eHGF", "unbounded"):
+        one = vol != "unbounded"
+        add(
+            f"continuous_noise_parent_{vol}",
+            {"volatility_updates": vol},
+            [_c(1), _c(1), _c(1, volatility_children=0, volatility_fully_connected=one)],
+        )
+        add(
+            f"continuous_three_level_{vol}",
+            {"volatility_updates": vol},
+            [_c(1), _c(1), _c(1, volatility_children=1, volatility_fully_connected=one)],
+            n=60,
+        )
+        add(
+            f"continuous_three_level_{vol}_mean_field",
+            {"volatility_updates": vol, "mean_field_updates": True},
+            [_c(1), _c(1), _c(1, volatility_children=1, volatility_fully_connected=one)],
+        )
+        add(
+            f"continuous_noise_below_value_{vol}",
+            {"volatility_updates": vol},
+            [
+                _c(1),
+                _c(1, volatility_children=0, volatility_fully_connected=one),
+                _c(1, value_children=0),
+            ],
+        )
+    add(
+        "continuous_unbounded_one_to_one",
+        {"volatility_updates": "unbounded"},
+        [
+            _c(3),
+            _c(3, fully_connected=False, value_coupling=0.8),
+            _c(3, volatility_children=1, volatility_fully_connected=False, volatility_coupling=0.6),
+            _c(3, volatility_children=0, volatility_fully_connected=False),
+        ],
+        n=50,
+    )
+    for vol in ("standard", "eHGF"):
+        for mf in (False, True):
+            tag = "_mean_field" if mf else ""
+            add(
+                f"continuous_dense_{vol}{tag}",
+                {"volatility_updates": vol, "mean_field_updates": mf},
+                [_c(2), _c(3), _c(2, volatility_children=1)],
+            )
+            # General (non-uniform) couplings: random W and κ.
+            add(
+                f"continuous_random_couplings_{vol}{tag}",
+                {"volatility_updates": vol, "mean_field_updates": mf},
+                [
+                    _c(3),
+                    _c(4, coupling="tanh"),
+                    _c(2, volatility_children=1),
+                    _c(2, volatility_children=0),
+                ],
+                n=50,
+                matrices=lambda rng: (
+                    [rng.normal(scale=0.6, size=(3, 4)).tolist(), None, None],
+                    [None, rng.normal(scale=0.5, size=(4, 2)).tolist(),
+                     rng.normal(scale=0.5, size=(3, 2)).tolist()],
+                ),
+            )
+        add(
+            f"continuous_dual_role_{vol}",
+            {"volatility_updates": vol},
+            [_c(1), _c(1), _c(1, value_children=1, volatility_children=0)],
+        )
+        add(
+            f"continuous_sigmoid_{vol}",
+            {"volatility_updates": vol, "coupling": "sigmoid"},
+            [_c(2), _c(2, fully_connected=False), _c(1, volatility_children=0)],
+        )
+    add(
+        "continuous_time_steps_overrides",
+        {"volatility_updates": "eHGF"},
+        [
+            _c(1, overrides={"precision": 4.0, "tonic_drift": 0.05}),
+            _c(
+                1,
+                overrides={
+                    "tonic_volatility": -2.0,
+                    "tonic_drift": 0.1,
+                    "autoconnection_strength": 0.9,
+                    "mean": 0.3,
+                },
+            ),
+            _c(1, volatility_children=1, volatility_coupling=0.7, overrides={"tonic_volatility": -3.0}),
+            _c(1, volatility_children=0, overrides={"precision": 2.0}),
+        ],
+        n=50,
+        time_steps=True,
+    )
+    add(
+        "continuous_carried_state",
+        {"volatility_updates": "standard", "max_posterior_precision": 1e4},
+        [_c(2), _c(2), _c(1, volatility_children=1), _c(1, volatility_children=0)],
+        n=25,
+        calls=3,
+    )
 
 
 def main() -> None:
@@ -916,6 +1135,11 @@ def main() -> None:
             "settings": spec["settings"],
             "layers": spec["layers"],
             "weights": spec["weights"],
+            **(
+                {"volatility_weights": spec["volatility_weights"]}
+                if "volatility_weights" in spec
+                else {}
+            ),
             "ops": ops,
         }
         try:

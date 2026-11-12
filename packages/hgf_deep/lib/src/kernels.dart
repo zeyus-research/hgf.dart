@@ -70,6 +70,9 @@ final class Layer {
     required this.tonicVolatility,
     required this.priorPrecision,
     required this.weights,
+    this.volatilityWeights,
+    this.tonicDrift,
+    this.autoconnectionStrength,
   });
 
   final LayerConfig config;
@@ -95,6 +98,18 @@ final class Layer {
   /// `weights_precision_delta`), same shape as [weights]; `null` until a
   /// belief is installed ([LearningKind.synapticUncertainty] installs one).
   Float64List? weightsPrecisionDelta;
+
+  /// Continuous layers: the fixed volatility coupling κ from this layer
+  /// into its volatility child, `child × size`; `null` otherwise. For a
+  /// continuous layer [weights] is the fixed value coupling into its value
+  /// child (`null` without one).
+  Matrix? volatilityWeights;
+
+  /// Continuous layers: per-node tonic drift ρ.
+  final Float64List? tonicDrift;
+
+  /// Continuous layers: per-node autoconnection strength λ.
+  final Float64List? autoconnectionStrength;
 
   int get size => config.size;
   LayerKind get kind => config.kind;
@@ -469,6 +484,8 @@ void predictLayer(
   DeepSettings settings,
 ) {
   switch (childLayer.kind) {
+    case LayerKind.continuous:
+      throw UnsupportedError('Continuous layers run in inputData().');
     case LayerKind.volatile:
       _predictVolatile(
         child,
@@ -702,6 +719,8 @@ void predictionError(
   final em = state.expectedMean;
   final vpe = state.valuePredictionError;
   switch (layer.kind) {
+    case LayerKind.continuous:
+      throw UnsupportedError('Continuous layers run in inputData().');
     case LayerKind.binary:
       for (var k = 0; k < nb; k++) {
         vpe[k] = (m[k] - em[k]) / state.expectedPrecision[k];
