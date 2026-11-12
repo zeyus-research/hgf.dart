@@ -318,6 +318,16 @@ enum UpdateStep {
   predictionErrorDp(
     'dirichlet_node_prediction_error',
     'dirichlet_node_prediction_error',
+  ),
+
+  /// An input node with noise parents (continuous volatility parents of a
+  /// leaf): the noise prediction error ε = π̂_u (Σ_b (t α_b g_b'(μ_b))² / π_b
+  /// + (u − m_u)²) − 1 (Eq. 72 of Weber et al., 2026), from the posteriors
+  /// of its value parents, so after their updates and before those of its
+  /// noise parents. pyhgf #477.
+  noisePredictionErrorContinuous(
+    'noise_prediction_error_continuous_input_node',
+    'continuous_node_noise_prediction_error',
   );
 
   const UpdateStep(this.rshgfName, this.pyhgfName);
@@ -341,4 +351,49 @@ final class UpdateSequence {
   @override
   String toString() =>
       'UpdateSequence(predictions: $predictions, updates: $updates)';
+}
+
+/// Corrections of pyhgf bugs that hgf.dart applies, each listed in
+/// `docs/upstream/README.md`. [Network.defaultFixes] ([recommended] unless
+/// the program is started with `-DHGF_UPSTREAM=true`) is what a network gets
+/// without `fixes:`; [none] reproduces pyhgf, as the parity tests do, until
+/// the fixes reach pyhgf.
+final class NetworkFixes {
+  const NetworkFixes({this.constantNoiseVariance = false});
+
+  /// Every correction off: pyhgf's behaviour.
+  static const none = NetworkFixes();
+
+  /// Every correction on.
+  static const recommended = NetworkFixes(constantNoiseVariance: true);
+
+  /// P21: the noise prediction error of an input with noise parents
+  /// (pyhgf #477) adds the posterior variance of each value parent,
+  /// `(t α g'(μ_b))² / π_b`. pyhgf reads it from a constant-state (bias)
+  /// parent too, whose `precision` is a placeholder 1, so each bias parent
+  /// adds `(t α)²` of variance a constant does not have. With this fix a
+  /// bias parent adds none, as with the equivalent tonic drift.
+  final bool constantNoiseVariance;
+
+  /// As JSON (`Network.toJson`, [NetworkSpec]'s `"fixes"`).
+  Map<String, Object?> toJson() => {
+    'constant_noise_variance': constantNoiseVariance,
+  };
+
+  /// From [toJson]'s output; missing keys are off.
+  factory NetworkFixes.fromJson(Map<String, Object?> json) => NetworkFixes(
+    constantNoiseVariance: (json['constant_noise_variance'] as bool?) ?? false,
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      other is NetworkFixes &&
+      other.constantNoiseVariance == constantNoiseVariance;
+
+  @override
+  int get hashCode => constantNoiseVariance.hashCode;
+
+  @override
+  String toString() =>
+      'NetworkFixes(constantNoiseVariance: $constantNoiseVariance)';
 }

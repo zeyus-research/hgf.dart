@@ -146,6 +146,75 @@ List<FitCase> fitCases() {
       ],
     ));
   }
+  // Noise parents of an input (pyhgf #477): node 3 is a noise parent of the
+  // input and a volatility parent of its tanh value parent, which shares
+  // the input with a bias node.
+  final noisy = Float64List.fromList([
+    for (final x in walk(240, math.Random(9))) 0.4 * _tanh(x / 2),
+  ]);
+  for (final mode in VolatilityUpdates.values) {
+    final model = HgfModel(
+      network: Network(volatilityUpdates: mode)
+        ..addNodes()
+        ..addNodes(
+          valueChildren: [0],
+          coupling: CouplingFn.tanh,
+          tonicVolatility: -3,
+        )
+        ..addNodes(kind: NodeKind.constantState, valueChildren: [0])
+        ..addNodes(volatilityChildren: [0, 1], tonicVolatility: -4),
+      response: const ObservationSurprise(TotalGaussianSurprise()),
+      parameters: [
+        Parameter.node(
+          'omega2',
+          1,
+          NodeField.tonicVolatility,
+          prior: const Normal(-3, 2),
+        ),
+        Parameter.node(
+          'omegaNoise',
+          3,
+          NodeField.tonicVolatility,
+          prior: const Normal(-4, 2),
+        ),
+        Parameter.node(
+          'epsilonU',
+          0,
+          NodeField.tonicVolatility,
+          prior: const Normal(0, 1),
+        ),
+        Parameter.volatilityCoupling(
+          'kappaU',
+          3,
+          0,
+          prior: const HalfNormal(2),
+        ),
+        Parameter.valueCoupling('alpha', 1, 0, prior: const Normal(1, 0.3)),
+        Parameter.valueCoupling('bias', 2, 0, prior: const Normal(0, 0.3)),
+      ],
+    );
+    final observed = Float64List(noisy.length)..fillRange(0, noisy.length, 1);
+    for (var t = 60; t < 70; t++) {
+      observed[t] = 0;
+    }
+    final steps = Float64List.fromList([
+      for (var t = 0; t < noisy.length; t++) t % 3 == 0 ? 0.5 : 1.25,
+    ]);
+    cases.add((
+      name:
+          'noise parent ${mode.name}: tanh and bias value parents, missing '
+          'observations, time steps',
+      model: model,
+      subjects: [
+        Subject(inputs: noisy),
+        Subject(inputs: noisy, observed: observed, timeSteps: steps),
+      ],
+      points: [
+        [-3.0, -4.0, 0.0, 1.0, 1.0, 0.1],
+        [-2.0, -3.0, 0.5, 0.6, 0.8, -0.2],
+      ],
+    ));
+  }
   {
     final d = walk(200, math.Random(5));
     cases.add((
@@ -309,3 +378,8 @@ List<FitCase> fitCases() {
 /// Evaluates every case's points for every subject on the CPU and on
 /// [fitter], with and without gradients and the Jacobian; returns the
 /// mismatches (and logs the largest errors with [log]).
+
+double _tanh(double x) {
+  final e = math.exp(2 * x);
+  return (e - 1) / (e + 1);
+}

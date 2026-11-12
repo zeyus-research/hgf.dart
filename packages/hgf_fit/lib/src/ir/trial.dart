@@ -686,6 +686,13 @@ final class _Pass {
   NodeKind kind(int i) => net.kindOf(i);
   bool isLeaf(int i) =>
       net.valueChildrenOf(i).isEmpty && net.volatilityChildrenOf(i).isEmpty;
+
+  /// An input node with noise parents (pyhgf's `is_noise_child`, #477): a
+  /// continuous leaf with volatility parents.
+  bool isNoiseChild(int i) =>
+      kind(i) == NodeKind.continuousState &&
+      isLeaf(i) &&
+      net.volatilityParentsOf(i).isNotEmpty;
   bool get meanField => net.meanFieldUpdates;
 
   CouplingFn couplingFn(int parent) {
@@ -723,6 +730,8 @@ final class _Pass {
         _predictionErrorContinuous(i);
       case UpdateStep.predictionErrorBinary:
         _predictionErrorBinary(i);
+      case UpdateStep.noisePredictionErrorContinuous:
+        _noisePredictionErrorContinuous(i);
       case UpdateStep.posteriorContinuous:
         _posteriorStandard(i, meanField: false);
       case UpdateStep.posteriorContinuousMeanField:
@@ -766,6 +775,7 @@ final class _Pass {
   };
 
   void _predictionContinuous(int i, {required bool meanField}) {
+    final input = isLeaf(i);
     final driftTerms = <Ex>[r(i, NodeField.tonicDrift)];
     final vcvTerms = <Ex>[];
     for (final p in net.valueParentsOf(i)) {
@@ -778,7 +788,7 @@ final class _Pass {
       }
       final fn = couplingFn(p);
       driftTerms.add(alpha * g(fn, pm));
-      if (!meanField) {
+      if (!meanField && !input) {
         final cc = let(tmp('c'), dt * alpha * dg(fn, pm));
         vcvTerms.add(cc * cc / r(p, NodeField.expectedPrecision));
       }
@@ -788,27 +798,40 @@ final class _Pass {
     for (final p in volParents) {
       final kappa = kap(p, i);
       volTerms.add(kappa * r(p, NodeField.expectedMean));
-      if (!meanField) {
+      // An input's volatility parents are noise parents, without MGF terms.
+      if (!meanField && !input) {
         volTerms.add(
           (kappa * kappa) / (Lit('2.0f') * r(p, NodeField.expectedPrecision)),
         );
       }
     }
     final drift = let('drift', sum(driftTerms));
-    final totvol = let('totvol', sum(volTerms));
-    final input = isLeaf(i);
-    final fixedLeaf = input && volParents.isEmpty;
     final lambda = let('lambda', r(i, NodeField.autoconnectionStrength));
     final prec = let('prec', r(i, NodeField.precision));
     final expMean = let('expMean', lambda * r(i, NodeField.mean) + dt * drift);
+    final carried = let('carried', (lambda * lambda) / prec);
+    if (input) {
+      // Observed exactly, no drift between observations: the precision of
+      // the observation noise, π̂ = exp(−(ε_u + Σ κ μ̂_q)) with noise
+      // parents q (γ = 1), else the prior π (γ = 0). pyhgf #477.
+      final Ex ep;
+      if (volParents.isEmpty) {
+        ep = prec;
+      } else {
+        ep = let('noisePrec', exp(-sum(volTerms)));
+      }
+      w(i, NodeField.currentVariance, carried);
+      w(i, NodeField.expectedMean, expMean);
+      w(i, NodeField.effectivePrecision, volParents.isEmpty ? zero : one);
+      w(i, NodeField.expectedPrecision, ep);
+      w(i, NodeField.conditionalExpectedPrecision, ep);
+      return;
+    }
+    final totvol = let('totvol', sum(volTerms));
     final pv = let('pv', dt * exp(totvol));
     // f64: pv ≤ 1e-128 becomes NaN; here pv ≤ 0 (underflow) flags the
     // element.
     flag(gt(pv, zero));
-    final carried = let(
-      'carried',
-      input ? one / prec : (lambda * lambda) / prec,
-    );
     Ex? cond;
     final Ex expected;
     if (!meanField) {
@@ -821,17 +844,8 @@ final class _Pass {
     w(i, NodeField.currentVariance, carried);
     w(i, NodeField.expectedMean, expMean);
     w(i, NodeField.effectivePrecision, pv * expected);
-    if (!fixedLeaf) {
-      w(i, NodeField.expectedPrecision, expected);
-      w(
-        i,
-        NodeField.conditionalExpectedPrecision,
-        meanField ? expected : cond!,
-      );
-    } else {
-      w(i, NodeField.expectedPrecision, prec);
-      w(i, NodeField.conditionalExpectedPrecision, prec);
-    }
+    w(i, NodeField.expectedPrecision, expected);
+    w(i, NodeField.conditionalExpectedPrecision, meanField ? expected : cond!);
   }
 
   void _predictionBinary(int i) {
@@ -871,14 +885,54 @@ final class _Pass {
       r(i, NodeField.mean) - r(i, NodeField.expectedMean),
     );
     w(i, NodeField.valuePredictionError, delta);
-    w(
-      i,
-      NodeField.volatilityPredictionError,
-      (epx / r(i, NodeField.precision)) + epx * delta * delta - one,
-    );
+    // A noise child sends its noise prediction error instead
+    // ([_noisePredictionErrorContinuous]).
+    if (!isNoiseChild(i)) {
+      w(
+        i,
+        NodeField.volatilityPredictionError,
+        (epx / r(i, NodeField.precision)) + epx * delta * delta - one,
+      );
+    }
     if (!leaf) {
       w(i, NodeField.observed, sel(zero, one, anyObserved(i)));
     }
+  }
+
+  /// The noise prediction error of input [i] (Eq. 72 of Weber et al.,
+  /// 2026; pyhgf #477): ε = π̂_u (Σ_b (t α_b g_b'(μ_b))² / π_b
+  /// + (u − m_u)²) − 1, with m_u the prediction of u from the value
+  /// parents' posteriors.
+  void _noisePredictionErrorContinuous(int i) {
+    final meanTerms = <Ex>[r(i, NodeField.expectedMean)];
+    final varTerms = <Ex>[];
+    for (final p in net.valueParentsOf(i)) {
+      final alpha = a(p, i);
+      final pm = r(p, NodeField.mean), pem = r(p, NodeField.expectedMean);
+      if (kind(p) == NodeKind.constantState) {
+        // Linear. A bias parent is known exactly; pyhgf reads its
+        // placeholder `precision` (1) here, adding (t α)² of variance
+        // ([NetworkFixes.constantNoiseVariance], P21).
+        meanTerms.add(dt * alpha * (pm - pem));
+        if (!net.fixes.constantNoiseVariance) {
+          final cc = let(tmp('c'), dt * alpha);
+          varTerms.add(cc * cc / r(p, NodeField.precision));
+        }
+        continue;
+      }
+      final fn = couplingFn(p);
+      meanTerms.add(dt * alpha * (g(fn, pm) - g(fn, pem)));
+      final cc = let(tmp('c'), dt * alpha * dg(fn, pm));
+      varTerms.add(cc * cc / r(p, NodeField.precision));
+    }
+    final pmean = let('npm', sum(meanTerms));
+    final pvar = let('npv', sum(varTerms));
+    final d = let('nd', r(i, NodeField.mean) - pmean);
+    w(
+      i,
+      NodeField.volatilityPredictionError,
+      r(i, NodeField.expectedPrecision) * (pvar + d * d) - one,
+    );
   }
 
   void _predictionErrorBinary(int i) {
@@ -957,28 +1011,34 @@ final class _Pass {
     ]);
   }
 
-  /// The standard volatility precision increments of [i].
-  List<Ex> volatilityPrecisionWpe(int i) => [
+  /// The standard volatility precision increments of [i] (of its noise
+  /// children only with [noiseOnly]).
+  List<Ex> volatilityPrecisionWpe(int i, {bool noiseOnly = false}) => [
     for (final ch in net.volatilityChildrenOf(i))
-      () {
-        final kappa = kap(i, ch);
-        final e = r(ch, NodeField.effectivePrecision);
-        final v = r(ch, NodeField.volatilityPredictionError);
-        final ke = let(tmp('ke'), kappa * e);
-        return (Lit('0.5f') * ke * ke +
-                ke * ke * v -
-                Lit('0.5f') * kappa * kappa * e * v) *
-            r(ch, NodeField.observed);
-      }(),
+      if (!noiseOnly || isNoiseChild(ch)) standardIncrement(i, ch),
   ];
 
-  Ex volatilityMeanWpe(int i, Ex prec) => sum([
+  /// ½ (κγ)² + (κγ)² Δ − ½ κ² γ Δ of volatility child [ch]; for a noise
+  /// child ½ κ² (1 + ε) (Eq. 78 of Weber et al., 2026).
+  Ex standardIncrement(int i, int ch) => () {
+    final kappa = kap(i, ch);
+    final e = r(ch, NodeField.effectivePrecision);
+    final v = r(ch, NodeField.volatilityPredictionError);
+    final ke = let(tmp('ke'), kappa * e);
+    return (Lit('0.5f') * ke * ke +
+            ke * ke * v -
+            Lit('0.5f') * kappa * kappa * e * v) *
+        r(ch, NodeField.observed);
+  }();
+
+  Ex volatilityMeanWpe(int i, Ex prec, {bool noiseOnly = false}) => sum([
     for (final ch in net.volatilityChildrenOf(i))
-      (kap(i, ch) *
-              r(ch, NodeField.effectivePrecision) *
-              r(ch, NodeField.volatilityPredictionError)) /
-          (Lit('2.0f') * prec) *
-          r(ch, NodeField.observed),
+      if (!noiseOnly || isNoiseChild(ch))
+        (kap(i, ch) *
+                r(ch, NodeField.effectivePrecision) *
+                r(ch, NodeField.volatilityPredictionError)) /
+            (Lit('2.0f') * prec) *
+            r(ch, NodeField.observed),
   ]);
 
   Ex observedOrPredicted(int i, Cond hasObs, Ex wpe) {
@@ -1059,14 +1119,17 @@ final class _Pass {
     final children = net.volatilityChildrenOf(i);
     final incs = <Ex>[
       for (var q = 0; q < children.length; q++)
-        ehgfIncrement(
-          i,
-          children[q],
-          q,
-          mgf
-              ? effectiveTonic(i, children[q]) + mgfTerms(children[q])
-              : effectiveTonic(i, children[q]),
-        ),
+        if (isNoiseChild(children[q]))
+          standardIncrement(i, children[q])
+        else
+          ehgfIncrement(
+            i,
+            children[q],
+            q,
+            mgf
+                ? effectiveTonic(i, children[q]) + mgfTerms(children[q])
+                : effectiveTonic(i, children[q]),
+          ),
     ];
     final wpe = let(
       'wpe',
@@ -1077,20 +1140,29 @@ final class _Pass {
 
   void _posteriorUnbounded(int i) {
     final mf = meanField;
-    final children = net.volatilityChildrenOf(i);
+    // Noise children enter the effective prior (Eqs. 74 and 78 of Weber et
+    // al., 2026), not the expansions (pyhgf #477).
+    final all = net.volatilityChildrenOf(i);
+    final children = [
+      for (final ch in all)
+        if (!isNoiseChild(ch)) ch,
+    ];
+    final hasNoise = children.length != all.length;
     final emi = let('emi', r(i, NodeField.expectedMean));
     final Ex pp, pm;
-    if (net.valueChildrenOf(i).isEmpty) {
+    if (net.valueChildrenOf(i).isEmpty && !hasNoise) {
       pp = let('pp', r(i, NodeField.expectedPrecision));
       pm = let('pm', emi);
     } else {
       final vpw = let('vpw', valuePrecisionWpe(i, meanField: mf));
+      final npw = let('npw', sum(volatilityPrecisionWpe(i, noiseOnly: true)));
       pp = let(
         'pp',
-        max(r(i, NodeField.expectedPrecision) + vpw, F32.minNormal),
+        max(r(i, NodeField.expectedPrecision) + vpw + npw, F32.minNormal),
       );
       final vmw = let('vmw', valueMeanWpe(i, pp, meanField: mf));
-      pm = let('pm', emi + vmw);
+      final nmw = let('nmw', volatilityMeanWpe(i, pp, noiseOnly: true));
+      pm = let('pm', emi + vmw + nmw);
     }
     final nc = children.length;
     // Per child: observed, coupling, ω̃, previous variance, b, vope.
@@ -1435,13 +1507,12 @@ fn logAddExp(a: f32, b: f32) -> f32 {
   return m + log(exp(a - m) + exp(b - m));
 }
 fn lambertW0(z: f32) -> f32 {
+  // Halley on (w eʷ − z) / eʷ, as pyhgf #475: no overflow for finite z.
   var w = log(z + 1.0f);
   for (var i = 0; i < 6; i++) {
-    let ew = exp(w);
-    let f = w * ew - z;
-    let f1 = (w + 1.0f) * ew;
-    let f2 = (w + 2.0f) * ew;
-    let st = (2.0f * f * f1) / (2.0f * f1 * f1 - f * f2);
+    let f = w - z * exp(-w);
+    let w1 = w + 1.0f;
+    let st = (2.0f * f * w1) / (2.0f * w1 * w1 - f * (w + 2.0f));
     w -= st;
     // 1e-12 in f64.
     if (abs(st) <= 1e-6f * abs(w)) { break; }

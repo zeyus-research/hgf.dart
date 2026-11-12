@@ -1,5 +1,10 @@
 ## Unreleased
 
+- The trial IR (GPU kernels, `IrReverse`) has pyhgf #477's noise parents
+  and `NetworkFixes`; the export plan carries `fixes`, the Dart export
+  writes them when not the default, and the Python export warns where
+  P21's fix makes pyhgf differ. Noise-parent models in the shared fit
+  cases (reverse = forward, exact Hessians).
 - Reverse-mode gradients on the CPU: `HgfModel(gradientMode:)` (`auto` by
   default: reverse above `reverseAbove` = 16 parameters, where it costs a
   flat 8–12 likelihoods against forward mode's `1 + 0.6·k`).

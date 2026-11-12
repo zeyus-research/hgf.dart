@@ -180,6 +180,22 @@ against 3.8 ms for pyhgf's JAX backend.
 - A coupling function belongs to the parent and applies to all its value
   children (as in rshgf).
 
+### Fixes of pyhgf bugs: `NetworkFixes` (on by default)
+
+`Network(fixes:)` takes the corrections of pyhgf bugs to apply
+([docs/upstream](../../docs/upstream/README.md)). Without `fixes:` a
+network gets `Network.defaultFixes`: `NetworkFixes.recommended` (all on),
+or `NetworkFixes.none`, pyhgf's behaviour, when the program is started
+with `-DHGF_UPSTREAM=true`. Set `Network.defaultFixes = NetworkFixes.none`
+to match pyhgf until the fixes reach it (the parity tests do).
+
+- `constantNoiseVariance` (P21): the noise prediction error of an input
+  with noise parents (pyhgf #477) adds each value parent's posterior
+  variance; pyhgf reads a bias (constant-state) parent's placeholder
+  precision there, so every bias parent adds `(t α)²` of observation
+  noise. With the fix a bias parent adds none, as the equivalent tonic
+  drift on the input would.
+
 ### Opt-in divergence: `ehgfMgfCorrection`
 
 `Network(volatilityUpdates: VolatilityUpdates.eHGF, ehgfMgfCorrection: true)`

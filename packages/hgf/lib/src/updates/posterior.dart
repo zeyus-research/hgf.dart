@@ -91,16 +91,23 @@ extension on Network {
   @pragma('vm:unsafe:no-bounds-checks')
   double _volatilityPrecisionWpe(int i, double wpe) {
     for (var e = _volcStart[i], end = _volcStart[i + 1]; e < end; e++) {
-      final c = _volcIdx[e];
-      final kappa = _volcK[e];
-      final eff = _effectivePrecision[c];
-      final vope = _volatilityPredictionError[c];
-      final ke = kappa * eff;
-      wpe +=
-          (0.5 * ke * ke + ke * ke * vope - 0.5 * kappa * kappa * eff * vope) *
-          _observed[c];
+      wpe += _standardVolatilityIncrement(_volcIdx[e], _volcK[e]);
     }
     return wpe;
+  }
+
+  /// ½ (κγ)² + (κγ)² Δ − ½ κ² γ Δ of volatility child [c], cancelled if it
+  /// was not observed. For a noise child γ = 1 and Δ = ε: ½ κ² (1 + ε)
+  /// (Eq. 78 of Weber et al., 2026).
+  @pragma('vm:prefer-inline')
+  @pragma('wasm:prefer-inline')
+  @pragma('vm:unsafe:no-bounds-checks')
+  double _standardVolatilityIncrement(int c, double kappa) {
+    final eff = _effectivePrecision[c];
+    final vope = _volatilityPredictionError[c];
+    final ke = kappa * eff;
+    return (0.5 * ke * ke + ke * ke * vope - 0.5 * kappa * kappa * eff * vope) *
+        _observed[c];
   }
 
   /// Volatility-coupling mean increment from the volatility children of [i].
@@ -205,6 +212,11 @@ extension on Network {
       wpe = _valueCouplingPrecisionWpe(i, meanField);
       for (var e = _volcStart[i], end = _volcStart[i + 1]; e < end; e++) {
         final c = _volcIdx[e];
+        if (_isNoiseChild(c)) {
+          // ½ κ² (1 + ε) (Eq. 78 of Weber et al., 2026): never negative.
+          wpe += _standardVolatilityIncrement(c, _volcK[e]);
+          continue;
+        }
         var tonic = _effectiveTonicVolatility(i, c);
         if (!meanField && ehgfMgfCorrection) tonic += _mgfTerms(c);
         wpe += _ehgfVolatilityIncrement(c, _volcK[e], mean, tonic, t);
@@ -255,21 +267,59 @@ extension on Network {
     final expectedMean = _expectedMean[i];
 
     // Effective prior: the prediction, combined with the value-coupling terms
-    // when the node also has value children.
+    // when the node also has value children, and with the quadratic terms of
+    // its noise children (input nodes; Eqs. 74 and 78 of Weber et al., 2026),
+    // which are left out of the expansions below (pyhgf #477).
+    final volStart = _volcStart[i], volEnd = _volcStart[i + 1];
+    var hasNoiseChildren = false;
+    for (var e = volStart; e < volEnd; e++) {
+      if (_isNoiseChild(_volcIdx[e])) {
+        hasNoiseChildren = true;
+        break;
+      }
+    }
     double priorPrecision, priorMean;
-    if (_vcStart[i] == _vcStart[i + 1]) {
+    if (_vcStart[i] == _vcStart[i + 1] && !hasNoiseChildren) {
       priorPrecision = _expectedPrecision[i];
       priorMean = expectedMean;
     } else {
       final mf = meanFieldUpdates;
+      var noisePrecisionWpe = 0.0;
+      if (hasNoiseChildren) {
+        for (var e = volStart; e < volEnd; e++) {
+          final c = _volcIdx[e];
+          if (_isNoiseChild(c)) {
+            noisePrecisionWpe += _standardVolatilityIncrement(c, _volcK[e]);
+          }
+        }
+      }
       priorPrecision = _maxNan(
-        _expectedPrecision[i] + _valueCouplingPrecisionWpe(i, mf),
+        _expectedPrecision[i] +
+            _valueCouplingPrecisionWpe(i, mf) +
+            noisePrecisionWpe,
         minPosteriorPrecision,
       );
-      priorMean = expectedMean + _valueCouplingMeanWpe(i, priorPrecision, mf);
+      var noiseMeanWpe = 0.0;
+      if (hasNoiseChildren) {
+        for (var e = volStart; e < volEnd; e++) {
+          final c = _volcIdx[e];
+          if (_isNoiseChild(c)) {
+            noiseMeanWpe +=
+                (_volcK[e] *
+                    _effectivePrecision[c] *
+                    _volatilityPredictionError[c]) /
+                (2.0 * priorPrecision) *
+                _observed[c];
+          }
+        }
+      }
+      priorMean =
+          expectedMean +
+          _valueCouplingMeanWpe(i, priorPrecision, mf) +
+          noiseMeanWpe;
     }
 
-    // Observed volatility children.
+    // Observed volatility children other than noise children.
     final u = _u;
     final coupling = u.coupling,
         tonic = u.tonic,
@@ -277,9 +327,9 @@ extension on Network {
         beAux = u.beAux,
         vope = u.vope;
     var nc = 0;
-    for (var e = _volcStart[i], end = _volcStart[i + 1]; e < end; e++) {
+    for (var e = volStart; e < volEnd; e++) {
       final c = _volcIdx[e];
-      if (_observed[c] == 0.0) continue;
+      if (_observed[c] == 0.0 || _isNoiseChild(c)) continue;
       final d = _mean[c] - _expectedMean[c];
       final b = 1.0 / _precision[c] + d * d;
       coupling[nc] = _volcK[e];

@@ -14,13 +14,13 @@ cd tool/parity && uv run python ../../docs/upstream/pyhgf/<script>.py
 Run the dart2wasm repros with `docs/upstream/dart2wasm/run.sh` (needs `dart`
 and `node`; `taskset -c 2 ./run.sh` gives steadier timings).
 
-Checked against pyhgf `6be12eb4` (0.3.2) and Dart 3.13.7; `hgf_deep` (P18,
-P19) against pyhgf `1e6e98d7` (after #475–#477).
+Checked against pyhgf `1e6e98d7` (0.3.2 with #475–#477) and Dart 3.13.7.
+#475 fixed P2 and P13 upstream (kept below for the record).
 
 | id | where | issue | severity | reported |
 |---|---|---|---|---|
 | [P1](#p1) | pyhgf JAX + rshgf | relaxed eHGF diverges (missing MGF terms) | **high**: NaN | [ ] |
-| [P2](#p2) | pyhgf JAX + rshgf | `lambert_w0` NaN for z ≳ 2.7e151 | medium | [ ] |
+| [P2](#p2) | pyhgf JAX + rshgf | `lambert_w0` NaN for z ≳ 2.7e151 | medium | fixed in #475 |
 | [P3](#p3) | pyhgf JAX | update-sequence move loop mutates the list it iterates | low | [ ] |
 | [P4](#p4) | pyhgf JAX | a parent of two ef-state nodes crashes the scheduler | medium: crash | [ ] |
 | [P5](#p5) | pyhgf JAX | `add_ef_state` ignores `xis` | low | [ ] |
@@ -31,7 +31,7 @@ P19) against pyhgf `1e6e98d7` (after #475–#477).
 | [P10](#p10) | pyhgf JAX | `categorical-state` with `n_nodes > 1` builds a broken graph | medium | [ ] |
 | [P11](#p11) | pyhgf JAX | `add_categorical_state` ignores `binary_parameters`; docstring says `3n + 2` nodes | low | [ ] |
 | [P12](#p12) | pyhgf JAX | categorical α = ±∞ on missing observations | low | [ ] |
-| [P13](#p13) | pyhgf JAX | `dirichlet_kullback_leibler` NaN once Σα > 171 (Γ overflows) | low | [ ] |
+| [P13](#p13) | pyhgf JAX | `dirichlet_kullback_leibler` NaN once Σα > 171 (Γ overflows) | low | fixed in #475 |
 | [P14](#p14) | pyhgf JAX | dp-state ignores `observed`: missing samples are clustered (NaN opens a NaN cluster) | medium | [ ] |
 | [P15](#p15) | pyhgf JAX | dp-state results depend on JAX's PRNG mode and precision; the tests pin the legacy mode | low | [ ] |
 | [P16](#p16) | pyhgf JAX | dp-state `batch_size` ≠ number of clusters fails inside the scan | low | [ ] |
@@ -39,6 +39,7 @@ P19) against pyhgf `1e6e98d7` (after #475–#477).
 | [P18](#p18) | pyhgf JAX + rshgf | `DeepNetwork`'s volatility levels run away (all three updates), then NaN: the value posterior's precision floor lets the curvature term cancel the evidence | **high**: NaN | [ ] |
 | [P19](#p19) | pyhgf JAX | `DeepNetwork`: exp overflow and a cancelling reconstruction turn a runaway volatility level into NaN; an improper 0/0 posterior after it | medium: NaN | [ ] |
 | [P20](#p20) | pyhgf JAX | dp-state defines no surprise, so a dp network can't be fitted (suggestion: the CRP predictive) | feature | [ ] |
+| [P21](#p21) | pyhgf JAX + rshgf | the noise prediction error (#477) counts a bias parent's placeholder precision as (t α)² of variance | medium: biased noise learning | [ ] |
 | [R1](#r1) | rshgf | ef-state ignores `observed`; univariate fixed rate only | medium | [ ] |
 | [R2](#r2) | rshgf | hot-path costs (string compares, allocations, clones) | perf | [ ] |
 | [R3](#r3) | rshgf | GELU coupling uses a 1.5e-7 `erfc` approximation (called exact) | low | [ ] |
@@ -102,8 +103,9 @@ the expansion that needed it.
 **Fix:** divide `f`, `f1`, `f2` by `eʷ` first (`w − z e⁻ʷ`, `w + 1`, `w + 2`):
 the step is unchanged and nothing overflows. Starting from
 `log z − log log z` for large z also saves iterations.
-**hgf.dart:** `lambertW0` keeps the same behaviour (NaN from ~2.7e151) for
-parity.
+**Fixed upstream** in #475 (the divided form, from `log z`). **hgf.dart:**
+`lambertW0` divides by `eʷ` too (finite for every finite z), in `Network`,
+`BatchNetwork` and the GPU kernels.
 
 ### P3
 
@@ -283,7 +285,8 @@ below that (15-120 in the runs tried), but slowly learning binary HGFs (a
 confident prior on their value parents) get there. **Fix:** differences of
 `gammaln` (with `gammasgn` if negative α must give NaN as now).
 **hgf.dart:** computes it in log space with the sign of Γ, so it matches
-pyhgf wherever pyhgf is finite and stays finite here.
+pyhgf wherever pyhgf is finite and stays finite here. **Fixed upstream** in
+#475 (`gammaln` differences).
 
 ### P14
 
@@ -540,9 +543,41 @@ autodiff through the assignment.
 missing observation), with the `DpSurprise` response function;
 `Trajectories.nodeSurprise` stays NaN for dp nodes, as in pyhgf.
 
+### P21
+
+**The noise prediction error of an input with noise parents counts a bias
+parent's placeholder precision as variance** (pyhgf #477:
+`continuous_node_noise_prediction_error`; rshgf
+`noise_prediction_error_continuous_input_node`).
+Repro: [`pyhgf/noise_constant_variance.py`](pyhgf/noise_constant_variance.py).
+
+```
+JAX   trial 0: ε bias -0.327856, ε drift -0.487856, (Δε / π̂_u) = 0.160000 = (t α)² = 0.16000000000000003
+JAX   noise parent mean after 200 trials: bias -1.3802, drift -5.6004
+rshgf trial 0: (Δε / π̂_u) = 1.000000 = (t α)² = 1.0
+```
+
+The noise prediction error ε = π̂_u (Σ_b (t α_b g_b'(μ_b))² / π_b
++ (u − m_u)²) − 1 adds each value parent's posterior variance. A
+constant-state (bias) parent keeps `precision` = 1 as a placeholder
+(`add_constant_state` sets `expected_precision` to ∞ so the prediction's
+Taylor term vanishes, but leaves `precision` at 1.0), so every bias parent
+adds (t α)² to the expected squared noise. A bias is known exactly; the same
+model with a tonic drift α on the input instead has no such term. The extra
+variance is a floor under the noise estimate: in the repro the noise parent
+settles at −1.38 instead of −5.60.
+
+**Fix:** skip constant-state parents in the variance sum (their mean shift
+is 0 anyway).
+**hgf.dart:** `NetworkFixes.constantNoiseVariance`, on by default
+(`NetworkFixes.recommended`); `NetworkFixes.none`, `Network.defaultFixes` or
+`-DHGF_UPSTREAM=true` give pyhgf's behaviour, which the parity tests use
+(the `noise_parent_bias*` fixtures). The Python export warns when it
+applies.
+
 ## rshgf
 
-P1 and P2 apply to rshgf too.
+P1 applies to rshgf too (and P2 did, until #475).
 
 ### R1
 

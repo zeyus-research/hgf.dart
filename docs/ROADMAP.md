@@ -1308,9 +1308,9 @@ rest is the sampler's own host work per chain and leapfrog step.
   - [ ] Continuous layers (`kind="continuous"`, `input_data`): a
     vectorised notation for a nodal continuous `Network` in pyhgf (its
     tests check them against `Network`), so hgf_deep can build the
-    equivalent hgf `Network`. Needs pyhgf #477 (noise parents of
-    continuous input nodes) in hgf first: the observation layer's
-    volatility parent follows those semantics.
+    equivalent hgf `Network`. pyhgf #477 (noise parents of continuous
+    input nodes), which the observation layer's volatility parent follows,
+    is in hgf since 2026-11-12 (see "Noise parents of input nodes" below).
   - [ ] The new learning features on the GPU (`GpuDeepNetwork` and
     `GpuDeepEnsemble` reject them with an `UnsupportedError`).
 - [x] Tangents in the codegen (exact gradients on the GPU), then a GPU
@@ -1726,6 +1726,42 @@ Linux i7-7700 + RX 7600 XT.
 - The melos bench scripts pin to a core with `taskset` only where it
   exists, and `tool/bench_compare.dart` takes `--out` and reads the CPU
   name on macOS.
+
+#### Noise parents of input nodes, pyhgf #477 (2026-11-12): done
+
+A volatility parent of a continuous input is now a noise parent (Weber et
+al., 2026, Eqs. 64–78): it sets the precision of the observation noise,
+π̂_u = exp(−(ε_u + Σ κ μ̂_q)) with γ_u = 1, and learns from the noise
+prediction error ε = π̂_u (Σ_b (t α_b g_b'(μ_b))² / π_b + (u − m_u)²) − 1,
+computed from the value parents' posteriors (a new step,
+`UpdateStep.noisePredictionErrorContinuous`, after their updates and
+before the noise parents'). Noise children take the standard increment
+½κ²(1 + ε) under every scheme: the eHGF uses it for them, the unbounded
+update moves them into its effective prior, and a parent whose only
+volatility children are noise children gets the standard update. Inputs
+carry λ²/π (no more 1/π special case). In `Network`, `BatchNetwork`
+(values bit for bit, tangents against finite differences), and the trial
+IR (GPU kernels, CPU reverse mode, exact Hessians).
+
+- **Fixtures regenerated at pyhgf `1e6e98d7`** (all 61, and 21 new
+  `noise_parent_*` ones: the three schemes, mean-field, non-unit couplings,
+  a noise parent that is also a state volatility parent and a value
+  parent, two noise parents with a tanh value parent, missing
+  observations, time steps, bias parents). #475's changes (Lambert W from
+  the log argument, `gammaln` KL) stay within tolerance. 358 parity
+  tests; `codegen_python_test` passes again.
+- **P21** (new upstream bug, both backends): the noise prediction error
+  reads a bias parent's placeholder `precision` 1 as variance, a floor of
+  (t α)² under the learnt noise. Fixed by `NetworkFixes.constantNoiseVariance`,
+  on by default; `NetworkFixes.none` / `Network.defaultFixes` /
+  `-DHGF_UPSTREAM=true` give pyhgf (the parity tests use it). Carried by
+  `Network.toJson`, `NetworkSpec` (`"fixes"`), the export plan and the Dart
+  export; the Python export warns where it applies.
+- **P2** (fixed upstream by #475): `lambertW0` divides the Halley terms by
+  eʷ, finite for every z (CPU, batch block, WGSL).
+- GPU: 95/95 on Metal with the noise-parent fit cases (forward and
+  reverse); `noise_parent_time_steps` is f32-sensitive (a total that
+  cancels to ~−1, where pyhgf's own float32 is 3.6e-5 off).
 
 ### Phase 8: App -> HGF GUI modelling
 
@@ -2192,8 +2228,8 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
   - [ ] [P1](upstream/README.md#p1) relaxed eHGF diverges (missing MGF
         terms; JAX and rshgf). Fix ready (`gen_fixtures.py`); hgf.dart has
         it opt-in as `ehgfMgfCorrection`. **The one that matters most.**
-  - [ ] [P2](upstream/README.md#p2) `lambert_w0` NaN for z ≳ 2.7e151 (`f1²`
-        overflows).
+  - [x] [P2](upstream/README.md#p2) `lambert_w0` NaN for z ≳ 2.7e151 (`f1²`
+        overflows). Fixed upstream in #475; hgf.dart follows.
   - [ ] [P3](upstream/README.md#p3) the update-sequence move loop mutates
         the list it iterates, scrambling the deferred steps (hgf.dart
         replays it).
@@ -2214,8 +2250,8 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
         says `3n + 2` nodes (it's `2n + 2`).
   - [ ] [P12](upstream/README.md#p12) categorical α = ±∞ on missing
         observations.
-  - [ ] [P13](upstream/README.md#p13) `dirichlet_kullback_leibler` NaN once
-        Σα > 171 (Γ overflows).
+  - [x] [P13](upstream/README.md#p13) `dirichlet_kullback_leibler` NaN once
+        Σα > 171 (Γ overflows). Fixed upstream in #475.
   - [ ] [P14](upstream/README.md#p14) dp-state ignores `observed`: missing
         samples are clustered, a NaN one opens a NaN cluster. Fix ready
         (`gen_fixtures.py`); hgf.dart skips them.
@@ -2232,6 +2268,10 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
   - [ ] [P20](upstream/README.md#p20) dp-state defines no surprise, so dp
         networks can't be fitted (suggestion: the CRP predictive with the
         base measure for new clusters; 2026-11-10).
+  - [ ] [P21](upstream/README.md#p21) the noise prediction error (#477)
+        counts a bias parent's placeholder precision as (t α)² of variance
+        (JAX and rshgf; 2026-11-12). hgf.dart fixes it by default
+        (`NetworkFixes`).
 - **rshgf**
   - [ ] [R1](upstream/README.md#r1) ef-state ignores `observed`; univariate
         fixed rate only.
@@ -2314,9 +2354,10 @@ code is done (2026-11-11: Dart and pyhgf/PyMC scripts from the playground
 or `dart run hgf_fit:export`). 2026-11-12: hgf_deep has the rest of
 pyhgf's learning (weight beliefs, sample weights, `update_input_layer`),
 reverse mode is wired into `GpuFitter` and runs on the CPU too (with exact
-Hessians), and the benchmarks ran on an Apple M3 Pro. Next are pyhgf #477
-(noise parents of continuous input nodes; `codegen_python_test` fails on
-it since pyhgf moved) and then hgf_deep's continuous layers, real-time
+Hessians), and the benchmarks ran on an Apple M3 Pro; pyhgf #477 (noise
+parents of continuous input nodes) is ported, with fixtures at pyhgf
+`1e6e98d7` and the P21 fix (`NetworkFixes`). Next are hgf_deep's
+continuous layers, real-time
 sources / LSL, vector node kinds on the GPU, a faster dp candidate
 search, and the choice-task follow-ups (stickiness, lapse rate, a model
 builder).

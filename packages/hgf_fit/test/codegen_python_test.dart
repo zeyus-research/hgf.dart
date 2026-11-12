@@ -65,6 +65,8 @@ String? _mismatch(List<double> want, List<double> got, double relTol) {
 }
 
 void main() {
+  // pyhgf as it is, until hgf.dart's fixes reach it.
+  Network.defaultFixes = NetworkFixes.none;
   final venv = File(_python).existsSync();
 
   test(

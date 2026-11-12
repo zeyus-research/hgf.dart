@@ -37,6 +37,24 @@ final class PythonExport {
   final List<String> _warnings = [];
 
   /// `build_network()`.
+  /// Whether an input with noise parents has a constant-state value parent
+  /// ([NetworkFixes.constantNoiseVariance] changes its updates).
+  bool _biasIntoNoiseChild() {
+    final net = plan.build();
+    for (final i in net.inputIdxs) {
+      if (net.kindOf(i) != NodeKind.continuousState ||
+          net.volatilityParentsOf(i).isEmpty) {
+        continue;
+      }
+      if (net
+          .valueParentsOf(i)
+          .any((p) => net.kindOf(p) == NodeKind.constantState)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   String buildNetwork() {
     final b = StringBuffer()
       ..writeln('def build_network():')
@@ -55,6 +73,14 @@ final class PythonExport {
         'The network uses hgf.dart\'s eHGF MGF correction '
         '(ehgfMgfCorrection), which pyhgf leaves out: its eHGF updates '
         'differ.',
+      );
+    }
+    if (plan.fixes.constantNoiseVariance && _biasIntoNoiseChild()) {
+      _warnings.add(
+        'An input with a noise parent has a bias (constant-state) value '
+        'parent: pyhgf adds (t·α)² of variance for it to the noise '
+        'prediction error, which hgf.dart corrects '
+        '(NetworkFixes.constantNoiseVariance): its noise updates differ.',
       );
     }
     if (plan.maxPosteriorPrecision != 1e10) {

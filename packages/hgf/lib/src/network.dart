@@ -39,6 +39,7 @@ const int _kPredictionErrorCategorical = 13;
 const int _kPosteriorCategorical = 14;
 const int _kPredictionDp = 15;
 const int _kPredictionErrorDp = 16;
+const int _kNoisePredictionErrorContinuous = 17;
 
 const int _kindContinuous = 0;
 const int _kindBinary = 1;
@@ -117,7 +118,16 @@ class Network {
     this.ehgfMgfCorrection = false,
     this.maxPosteriorPrecision = 1e10,
     this.precisionClippingValue = 1e-6,
-  });
+    NetworkFixes? fixes,
+  }) : fixes = fixes ?? defaultFixes;
+
+  /// The [NetworkFixes] a network built without `fixes:` gets:
+  /// [NetworkFixes.recommended], or [NetworkFixes.none] (pyhgf's
+  /// behaviour) when the program is started with `-DHGF_UPSTREAM=true`.
+  /// The parity tests set it to [NetworkFixes.none].
+  static NetworkFixes defaultFixes = const bool.fromEnvironment('HGF_UPSTREAM')
+      ? NetworkFixes.none
+      : NetworkFixes.recommended;
 
   /// Rebuilds a network from [toJson]'s output. Custom couplings are looked
   /// up by name in [couplings].
@@ -168,6 +178,9 @@ class Network {
   /// mean-field prediction has no such terms). Checked against pyhgf's JAX
   /// backend patched with the same change (`*_mgf_correction` fixtures).
   final bool ehgfMgfCorrection;
+
+  /// The corrections of pyhgf bugs this network applies.
+  final NetworkFixes fixes;
 
   /// Upper bound applied to every posterior precision write.
   double maxPosteriorPrecision;
@@ -659,6 +672,9 @@ class Network {
   Uint8List _couplingFn = _u8; // CouplingFn.index or _kCustomCoupling
   List<Coupling> _couplings = const []; // per node, declared on the parent
   Uint8List _isLeaf = _u8; // no value and no volatility children
+  // Continuous leaves with volatility parents, which are noise parents
+  // (pyhgf's `is_noise_child`, #477).
+  Uint8List _noiseChild = _u8;
   Int32List _inputs = _i32;
 
   // Input columns: input k reads `_inputDim[k]` values from column
@@ -810,6 +826,14 @@ class Network {
     _volcStart = _csrStart(n, (d) => d.volatilityChildren);
     _volcIdx = _csrIdx(_volcStart, (d) => d.volatilityChildren);
     _volcK = _csrK(_volcStart, (d) => d.volatilityChildStrengths);
+    _noiseChild = Uint8List(n);
+    for (var i = 0; i < n; i++) {
+      if (_kind[i] == _kindContinuous &&
+          _isLeaf[i] == 1 &&
+          _volpStart[i] != _volpStart[i + 1]) {
+        _noiseChild[i] = 1;
+      }
+    }
 
     // Initial state: kind defaults, then user parameters, then (as pyhgf's
     // `input_idxs`) inputs get no autoconnection and no tonic volatility.
@@ -854,6 +878,10 @@ class Network {
     assert(UpdateStep.predictionErrorBinary.index == _kPredictionErrorBinary);
     assert(UpdateStep.predictionDp.index == _kPredictionDp);
     assert(UpdateStep.predictionErrorDp.index == _kPredictionErrorDp);
+    assert(
+      UpdateStep.noisePredictionErrorContinuous.index ==
+          _kNoisePredictionErrorContinuous,
+    );
     final seq = _buildUpdateSequence();
     _predNode = Int32List.fromList([for (final s in seq.predictions) s.$1]);
     _predStep = Uint8List.fromList([
@@ -1056,7 +1084,7 @@ class Network {
     for (final f in NodeField.values) {
       if (_column(f).length != n) throw StateError('Bad column ${f.name}');
     }
-    for (final a in [_kind, _couplingFn, _isLeaf]) {
+    for (final a in [_kind, _couplingFn, _isLeaf, _noiseChild]) {
       if (a.length != n) throw StateError('Bad node table');
     }
     if (_inputDim.length != _inputs.length ||
@@ -1975,6 +2003,8 @@ class Network {
         _predictionErrorContinuous(node);
       case _kPredictionErrorBinary:
         _predictionErrorBinary(node);
+      case _kNoisePredictionErrorContinuous:
+        _noisePredictionErrorContinuous(node, t);
       default:
         _dispatchVectorStep(step, node);
     }

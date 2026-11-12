@@ -144,18 +144,19 @@ const double _twoOverSqrtPi = 1.1283791670955126;
 /// Principal branch of the Lambert W function for `z >= 0`.
 ///
 /// Halley iterations from `ln(z + 1)`, the scheme of `pyhgf.math.lambert_w0`
-/// and rshgf (at most six), so the backends agree to machine precision.
-/// Unlike pyhgf it stops once a step is below `1e-12·|w|`: Halley converges
-/// cubically, so the remaining steps would only move `w` by rounding
-/// (and each costs an exp).
+/// and rshgf (at most six), so the backends agree to machine precision. As
+/// since pyhgf #475, `w·eʷ − z` and its derivatives are divided by `eʷ`
+/// (`f = w − z e⁻ʷ`, `f′ = w + 1`, `f″ = w + 2`), which leaves the Halley
+/// step unchanged and keeps it finite for every finite z (before, `f′²`
+/// overflowed from z ≈ 2.7e151: [P2]). Unlike pyhgf it stops once a step is
+/// below `1e-12·|w|`: Halley converges cubically, so the remaining steps
+/// would only move `w` by rounding (and each costs an exp).
 double lambertW0(double z) {
   var w = math.log(z + 1.0);
   for (var i = 0; i < 6; i++) {
-    final ew = fastExp(w);
-    final f = w * ew - z;
-    final f1 = (w + 1.0) * ew;
-    final f2 = (w + 2.0) * ew;
-    final step = (2.0 * f * f1) / (2.0 * f1 * f1 - f * f2);
+    final f = w - z * fastExp(-w);
+    final w1 = w + 1.0;
+    final step = (2.0 * f * w1) / (2.0 * w1 * w1 - f * (w + 2.0));
     w -= step;
     if (step.abs() <= 1e-12 * w.abs()) break;
   }

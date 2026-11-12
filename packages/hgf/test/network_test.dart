@@ -36,21 +36,74 @@ void main() {
       expect(traj.at(1, NodeField.mean, 0), closeTo(0.10090748, 1e-6));
     });
 
+    // Node 2 is a noise parent of the input (pyhgf #477, Eqs. 64-78 of
+    // Weber et al., 2026).
     test('two-node HGF with a volatility parent on the input', () {
       final net = Network()
         ..addNodes()
         ..addNodes(valueChildren: [0])
         ..addNodes(volatilityChildren: [0]);
       final traj = net.inputSeries([0.2]);
+      expect(traj.at(0, NodeField.expectedPrecision, 0), closeTo(1.0, 1e-6));
       expect(
-        traj.at(0, NodeField.expectedPrecision, 0),
-        closeTo(0.2715764, 1e-6),
+        traj.at(0, NodeField.volatilityPredictionError, 0),
+        closeTo(-0.48564331, 1e-6),
       );
-      expect(traj.at(1, NodeField.precision, 0), closeTo(1.3574047, 1e-6));
-      expect(traj.at(1, NodeField.mean, 0), closeTo(0.0553101, 1e-6));
-      expect(traj.at(2, NodeField.precision, 0), closeTo(1.0834352, 1e-6));
-      expect(traj.at(2, NodeField.mean, 0), closeTo(-0.10491979, 1e-6));
+      expect(traj.at(1, NodeField.precision, 0), closeTo(1.98201379, 1e-6));
+      expect(
+        traj.at(1, NodeField.expectedPrecision, 0),
+        closeTo(0.98201379, 1e-6),
+      );
+      expect(traj.at(1, NodeField.mean, 0), closeTo(0.10090747, 1e-6));
+      expect(traj.at(2, NodeField.precision, 0), closeTo(1.23919213, 1e-6));
+      expect(
+        traj.at(2, NodeField.expectedPrecision, 0),
+        closeTo(0.98201379, 1e-6),
+      );
+      expect(traj.at(2, NodeField.mean, 0), closeTo(-0.19595158, 1e-6));
     });
+
+    // pyhgf's test_noise_parent_learns_the_observation_noise: the predicted
+    // noise variance converges to the noise's (rel 0.1), relaxed and
+    // mean-field. (Own random series: numpy's draws are not reproducible
+    // here.)
+    for (final meanField in [false, true]) {
+      test('a noise parent learns the observation noise '
+          '(meanField: $meanField)', () {
+        final rng = math.Random(1);
+        double normal() =>
+            math.sqrt(-2 * math.log(1 - rng.nextDouble())) *
+            math.cos(2 * math.pi * rng.nextDouble());
+        const n = 3000;
+        var value = 0.0;
+        final noise = Float64List(n), u = Float64List(n);
+        for (var t = 0; t < n; t++) {
+          value += math.sqrt(0.5) * normal();
+          noise[t] = normal();
+          u[t] = value + noise[t];
+        }
+        final traj =
+            (Network(meanFieldUpdates: meanField)
+                  ..addNodes()
+                  ..addNodes(valueChildren: [0], tonicVolatility: math.log(0.5))
+                  ..addNodes(volatilityChildren: [0], tonicVolatility: -6.0))
+                .inputSeries(u);
+        final ep = traj.series(0, NodeField.expectedPrecision);
+        var predicted = 0.0, mean = 0.0, sq = 0.0;
+        for (var t = n ~/ 2; t < n; t++) {
+          predicted += 1.0 / ep[t];
+          mean += noise[t];
+        }
+        const half = n - n ~/ 2;
+        predicted /= half;
+        mean /= half;
+        for (var t = n ~/ 2; t < n; t++) {
+          sq += (noise[t] - mean) * (noise[t] - mean);
+        }
+        final variance = sq / half;
+        expect((predicted - variance).abs() / variance, lessThan(0.1));
+      });
+    }
   });
 
   group('structure', () {
@@ -434,6 +487,14 @@ void main() {
     for (final z in [0.0, 0.5, 1.0, 10.0, 1e6]) {
       final w = lambertW0(z);
       expect(w * math.exp(w), closeTo(z, 1e-9 * (1 + z)));
+    }
+    // Finite where the undivided Halley step overflowed (P2, before pyhgf
+    // #475), and equal to the log-argument form.
+    for (final z in [2.0e151, 1e152, 1e200, 1e300, double.maxFinite]) {
+      final w = lambertW0(z);
+      expect(w.isFinite, isTrue, reason: '$z');
+      expect(w + math.log(w), closeTo(math.log(z), 1e-12 * math.log(z)));
+      expect(w, closeTo(lambertW0Log(math.log(z)), 1e-12 * w));
     }
   });
 

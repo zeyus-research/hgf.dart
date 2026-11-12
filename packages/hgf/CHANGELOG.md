@@ -1,5 +1,22 @@
 ## Unreleased
 
+- Noise parents of continuous input nodes (pyhgf #477): a volatility
+  parent of an input sets the precision of its observation noise,
+  `exp(−(ε_u + Σ κ μ̂_q))` (γ = 1), and learns from the noise prediction
+  error (the new `UpdateStep.noisePredictionErrorContinuous`, from the
+  value parents' posteriors). Noise children take the standard increment
+  under every scheme (inside the unbounded update's effective prior).
+  Inputs carry λ²/π, and an input without noise parent has γ = 0.
+  `Network` and `BatchNetwork` (bit for bit, tangents included). Fixtures
+  regenerated at pyhgf `1e6e98d7`, with 21 `noise_parent_*` scenarios.
+- `NetworkFixes` (`Network(fixes:)`, `Network.defaultFixes`,
+  `-DHGF_UPSTREAM=true`): corrections of pyhgf bugs, on by default
+  (`recommended`), off for parity (`none`). The first is
+  `constantNoiseVariance` (P21: pyhgf adds a bias parent's placeholder
+  precision to the noise prediction error). In `toJson`/`fromJson` and
+  `NetworkSpec` (`"fixes"`).
+- `lambertW0` divides the Halley terms by eʷ (pyhgf #475): finite for
+  every z (it was NaN from ~2.7e151, P2).
 - `BatchNetwork.predict()`: the prediction sweep alone (with or without
   tangents), reused by the next `step`, as `Network.predict` is; for
   drawing a choice from the predictions before the observation.

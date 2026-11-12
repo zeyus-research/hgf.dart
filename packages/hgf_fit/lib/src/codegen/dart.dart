@@ -33,6 +33,11 @@ final class DartExport {
         'volatilityUpdates: VolatilityUpdates.${plan.volatilityUpdates.name}',
       if (plan.meanFieldUpdates) 'meanFieldUpdates: true',
       if (plan.ehgfMgfCorrection) 'ehgfMgfCorrection: true',
+      if (plan.fixes != NetworkFixes.recommended)
+        plan.fixes == NetworkFixes.none
+            ? 'fixes: NetworkFixes.none'
+            : 'fixes: NetworkFixes(constantNoiseVariance: '
+                  '${plan.fixes.constantNoiseVariance})',
       if (plan.maxPosteriorPrecision != 1e10)
         'maxPosteriorPrecision: ${dartDouble(plan.maxPosteriorPrecision)}',
       if (plan.precisionClippingValue != 1e-6)

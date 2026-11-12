@@ -19,6 +19,8 @@ import 'types.dart';
 ///
 /// `"ehgf_mgf_correction": true` in `"network"` turns on
 /// [Network.ehgfMgfCorrection], an hgf.dart extension that pyhgf ignores.
+/// `"fixes"` in `"network"` (as [NetworkFixes.toJson]) sets
+/// [Network.fixes]; without it the network gets [Network.defaultFixes].
 final class NetworkSpec {
   NetworkSpec.fromJson(Map<String, Object?> json)
     : json = Map.unmodifiable(json);
@@ -36,6 +38,10 @@ final class NetworkSpec {
       ),
       meanFieldUpdates: (net['mean_field_updates'] as bool?) ?? false,
       ehgfMgfCorrection: (net['ehgf_mgf_correction'] as bool?) ?? false,
+      fixes: switch (net['fixes']) {
+        final Map<String, Object?> f => NetworkFixes.fromJson(f),
+        _ => null,
+      },
       maxPosteriorPrecision:
           (net['max_posterior_precision'] as num?)?.toDouble() ?? 1e10,
       precisionClippingValue:

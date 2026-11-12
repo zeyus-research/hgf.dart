@@ -45,6 +45,8 @@ void expectTrajectories(
 }
 
 void main() {
+  // pyhgf as it is, until hgf.dart's fixes reach it.
+  Network.defaultFixes = NetworkFixes.none;
   final dir = Directory('test/fixtures');
   final files =
       dir

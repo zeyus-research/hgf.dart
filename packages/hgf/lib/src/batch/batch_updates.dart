@@ -75,11 +75,9 @@ void _lambertW0Block(Float64List z, Float64List w, Uint8List done, int n) {
     for (var a = 0; a < n; a++) {
       if (done[a] != 0) continue;
       final wa = w[a];
-      final ew = fastExp(wa);
-      final f = wa * ew - z[a];
-      final f1 = (wa + 1.0) * ew;
-      final f2 = (wa + 2.0) * ew;
-      final step = (2.0 * f * f1) / (2.0 * f1 * f1 - f * f2);
+      final f = wa - z[a] * fastExp(-wa);
+      final w1 = wa + 1.0;
+      final step = (2.0 * f * w1) / (2.0 * w1 * w1 - f * (wa + 2.0));
       final wn = wa - step;
       w[a] = wn;
       if (step.abs() <= 1e-12 * wn.abs()) {
@@ -139,6 +137,9 @@ extension on BatchNetwork {
       }
     }
 
+    // An input's volatility parents are noise parents: Σ κ μ̂ without the
+    // MGF terms is the log variance of its observation noise.
+    final isInput = _isLeaf[i] == 1;
     final volpK = _volpK;
     final volStart = _volpStart[i], volEnd = _volpStart[i + 1];
     for (var k = volStart; k < volEnd; k++) {
@@ -146,19 +147,23 @@ extension on BatchNetwork {
       for (var j = 0; j < m; j++) {
         final kappa = volpK[kb + j];
         totalVolatility[j] += kappa * expectedMean[pb + j];
-        totalVolatility[j] +=
-            (kappa * kappa) / (2.0 * expectedPrecision[pb + j]);
+        if (!isInput) {
+          totalVolatility[j] +=
+              (kappa * kappa) / (2.0 * expectedPrecision[pb + j]);
+        }
       }
     }
 
-    final isInput = _isLeaf[i] == 1;
-    final fixedLeaf = isInput && volStart == volEnd;
     final mean = _mean,
         precision = _precision,
         autoconnection = _autoconnectionStrength,
         currentVariance = _currentVariance,
         effectivePrecision = _effectivePrecision,
         conditionalExpectedPrecision = _conditionalExpectedPrecision;
+    if (isInput) {
+      _bStoreInputPrediction(i, t, lo, hi, totalVolatility);
+      return;
+    }
     for (var j = 0; j < m; j++) {
       final ie = base + j;
       final lambda = autoconnection[ie];
@@ -166,7 +171,7 @@ extension on BatchNetwork {
       final expMean = lambda * mean[ie] + t * drift[j];
       final pvRaw = t * fastExp(totalVolatility[j]);
       final predictedVolatility = pvRaw > 1e-128 ? pvRaw : double.nan;
-      final carriedVariance = isInput ? 1.0 / prec : (lambda * lambda) / prec;
+      final carriedVariance = (lambda * lambda) / prec;
       final conditional =
           1.0 / floorPredictedVariance(carriedVariance + predictedVolatility);
       final expected =
@@ -177,12 +182,48 @@ extension on BatchNetwork {
       currentVariance[ie] = carriedVariance;
       expectedMean[ie] = expMean;
       effectivePrecision[ie] = predictedVolatility * expected;
-      if (!fixedLeaf) {
-        expectedPrecision[ie] = expected;
-        conditionalExpectedPrecision[ie] = conditional;
+      expectedPrecision[ie] = expected;
+      conditionalExpectedPrecision[ie] = conditional;
+    }
+  }
+
+  /// The prediction of input node [i] (`Network._storeInputPrediction`),
+  /// given the drift in `_s.f0` and `logNoiseVariance[j]` = ε_u + Σ κ μ̂_q
+  /// over its noise parents.
+  @pragma('vm:unsafe:no-bounds-checks')
+  void _bStoreInputPrediction(
+    int i,
+    double t,
+    int lo,
+    int hi,
+    Float64List logNoiseVariance,
+  ) {
+    final nb = _b, m = hi - lo, base = i * nb + lo;
+    final drift = _s.f0;
+    final hasNoiseParents = _volpStart[i] != _volpStart[i + 1];
+    final mean = _mean,
+        precision = _precision,
+        autoconnection = _autoconnectionStrength,
+        expectedMean = _expectedMean,
+        expectedPrecision = _expectedPrecision,
+        currentVariance = _currentVariance,
+        effectivePrecision = _effectivePrecision,
+        conditionalExpectedPrecision = _conditionalExpectedPrecision;
+    for (var j = 0; j < m; j++) {
+      final ie = base + j;
+      final lambda = autoconnection[ie];
+      final prec = precision[ie];
+      currentVariance[ie] = (lambda * lambda) / prec;
+      expectedMean[ie] = lambda * mean[ie] + t * drift[j];
+      if (hasNoiseParents) {
+        final noisePrecision = fastExp(-logNoiseVariance[j]);
+        expectedPrecision[ie] = noisePrecision;
+        conditionalExpectedPrecision[ie] = noisePrecision;
+        effectivePrecision[ie] = 1.0;
       } else {
         expectedPrecision[ie] = prec;
         conditionalExpectedPrecision[ie] = prec;
+        effectivePrecision[ie] = 0.0;
       }
     }
   }
@@ -225,8 +266,10 @@ extension on BatchNetwork {
       }
     }
 
-    final isInput = _isLeaf[i] == 1;
-    final fixedLeaf = isInput && volStart == volEnd;
+    if (_isLeaf[i] == 1) {
+      _bStoreInputPrediction(i, t, lo, hi, totalVolatility);
+      return;
+    }
     final mean = _mean,
         precision = _precision,
         autoconnection = _autoconnectionStrength,
@@ -240,19 +283,14 @@ extension on BatchNetwork {
       final expMean = lambda * mean[ie] + t * drift[j];
       final pvRaw = t * fastExp(totalVolatility[j]);
       final predictedVolatility = pvRaw > 1e-128 ? pvRaw : double.nan;
-      final carriedVariance = isInput ? 1.0 / prec : (lambda * lambda) / prec;
+      final carriedVariance = (lambda * lambda) / prec;
       final expected =
           1.0 / floorPredictedVariance(carriedVariance + predictedVolatility);
       currentVariance[ie] = carriedVariance;
       expectedMean[ie] = expMean;
       effectivePrecision[ie] = predictedVolatility * expected;
-      if (!fixedLeaf) {
-        expectedPrecision[ie] = expected;
-        conditionalExpectedPrecision[ie] = expected;
-      } else {
-        expectedPrecision[ie] = prec;
-        conditionalExpectedPrecision[ie] = prec;
-      }
+      expectedPrecision[ie] = expected;
+      conditionalExpectedPrecision[ie] = expected;
     }
   }
 
@@ -300,13 +338,68 @@ extension on BatchNetwork {
         vape = _valuePredictionError,
         vope = _volatilityPredictionError,
         observed = _observed;
+    // A noise child sends its noise prediction error instead of Δ
+    // (`_bNoisePredictionErrorContinuous`).
+    final noiseChild = _noiseChild[i] == 1;
     for (var j = 0; j < m; j++) {
       final ie = base + j;
       final ep = expectedPrecision[ie];
       final delta = mean[ie] - expectedMean[ie];
       vape[ie] = delta;
-      vope[ie] = (ep / precision[ie]) + ep * delta * delta - 1.0;
+      if (!noiseChild) {
+        vope[ie] = (ep / precision[ie]) + ep * delta * delta - 1.0;
+      }
       if (!isLeaf) observed[ie] = flags[j] != 0 ? 1.0 : 0.0;
+    }
+  }
+
+  /// `Network._noisePredictionErrorContinuous`: ε = π̂_u (Σ_b (t α_b
+  /// g_b'(μ_b))² / π_b + (u − m_u)²) − 1 into the volatility prediction
+  /// error of input [i].
+  @pragma('vm:unsafe:no-bounds-checks')
+  void _bNoisePredictionErrorContinuous(int i, double t, int lo, int hi) {
+    final nb = _b, m = hi - lo, base = i * nb + lo;
+    final s = _s;
+    final postMean = s.f0, postVar = s.f1;
+    final mean = _mean,
+        expectedMean = _expectedMean,
+        precision = _precision,
+        vpK = _vpK;
+    for (var j = 0; j < m; j++) {
+      postMean[j] = expectedMean[base + j];
+      postVar[j] = 0.0;
+    }
+    final fixConstant = fixes.constantNoiseVariance;
+    for (var k = _vpStart[i], end = _vpStart[i + 1]; k < end; k++) {
+      final p = _vpIdx[k];
+      final pb = p * nb + lo, kb = k * nb + lo;
+      final cf = _couplingFn[p];
+      final fn = cf == 0 ? null : _couplingOf(cf, p);
+      // A bias parent adds no variance (P21).
+      final known = fixConstant && _kind[p] == _kindConstant;
+      for (var j = 0; j < m; j++) {
+        final alpha = vpK[kb + j];
+        final pm = mean[pb + j], pem = expectedMean[pb + j];
+        double shift, gPrime;
+        if (fn == null) {
+          shift = pm - pem;
+          gPrime = 1.0;
+        } else {
+          shift = fn.f(pm) - fn.f(pem);
+          gPrime = fn.df(pm);
+        }
+        postMean[j] += t * alpha * shift;
+        if (known) continue;
+        final coeff = t * alpha * gPrime;
+        postVar[j] += coeff * coeff / precision[pb + j];
+      }
+    }
+    final vope = _volatilityPredictionError,
+        expectedPrecision = _expectedPrecision;
+    for (var j = 0; j < m; j++) {
+      final ie = base + j;
+      final d = mean[ie] - postMean[j];
+      vope[ie] = expectedPrecision[ie] * (postVar[j] + d * d) - 1.0;
     }
   }
 
@@ -462,16 +555,25 @@ extension on BatchNetwork {
   }
 
   /// `acc[j] +=` the standard volatility precision increment from the
-  /// volatility children of [i] (`Network._volatilityPrecisionWpe`).
+  /// volatility children of [i] (`Network._volatilityPrecisionWpe`), or
+  /// from its noise children only with [noiseOnly].
   @pragma('vm:unsafe:no-bounds-checks')
-  void _bVolatilityPrecisionWpe(int i, int lo, int m, Float64List acc) {
+  void _bVolatilityPrecisionWpe(
+    int i,
+    int lo,
+    int m,
+    Float64List acc, {
+    bool noiseOnly = false,
+  }) {
     final nb = _b;
     final volcK = _volcK,
         eff = _effectivePrecision,
         vope = _volatilityPredictionError,
         observed = _observed;
     for (var k = _volcStart[i], end = _volcStart[i + 1]; k < end; k++) {
-      final cb = _volcIdx[k] * nb + lo, kb = k * nb + lo;
+      final c = _volcIdx[k];
+      if (noiseOnly && _noiseChild[c] == 0) continue;
+      final cb = c * nb + lo, kb = k * nb + lo;
       for (var j = 0; j < m; j++) {
         final ce = cb + j;
         final kappa = volcK[kb + j];
@@ -486,15 +588,17 @@ extension on BatchNetwork {
   }
 
   /// `out[j]` = the volatility mean increment from the volatility children
-  /// of [i] at `nodePrecision[j]` (`Network._volatilityMeanWpe`).
+  /// of [i] at `nodePrecision[j]` (`Network._volatilityMeanWpe`), or from
+  /// its noise children only with [noiseOnly].
   @pragma('vm:unsafe:no-bounds-checks')
   void _bVolatilityMeanWpe(
     int i,
     int lo,
     int m,
     Float64List nodePrecision,
-    Float64List out,
-  ) {
+    Float64List out, {
+    bool noiseOnly = false,
+  }) {
     for (var j = 0; j < m; j++) {
       out[j] = 0.0;
     }
@@ -504,7 +608,9 @@ extension on BatchNetwork {
         vope = _volatilityPredictionError,
         observed = _observed;
     for (var k = _volcStart[i], end = _volcStart[i + 1]; k < end; k++) {
-      final cb = _volcIdx[k] * nb + lo, kb = k * nb + lo;
+      final c = _volcIdx[k];
+      if (noiseOnly && _noiseChild[c] == 0) continue;
+      final cb = c * nb + lo, kb = k * nb + lo;
       for (var j = 0; j < m; j++) {
         final ce = cb + j;
         out[j] +=
@@ -513,6 +619,15 @@ extension on BatchNetwork {
             observed[ce];
       }
     }
+  }
+
+  /// Whether [i] has noise children (inputs among its volatility children).
+  @pragma('vm:unsafe:no-bounds-checks')
+  bool _hasNoiseChildren(int i) {
+    for (var k = _volcStart[i], end = _volcStart[i + 1]; k < end; k++) {
+      if (_noiseChild[_volcIdx[k]] == 1) return true;
+    }
+    return false;
   }
 
   @pragma('vm:prefer-inline')
@@ -618,9 +733,27 @@ extension on BatchNetwork {
     _bValuePrecisionWpe(i, lo, m, meanField, wpe);
     final mgf = !meanField && ehgfMgfCorrection;
     final volcK = _volcK;
+    final eff = _effectivePrecision,
+        vopeC = _volatilityPredictionError,
+        observedC = _observed;
     for (var k = _volcStart[i], end = _volcStart[i + 1]; k < end; k++) {
       final c = _volcIdx[k];
       final cb = c * nb + lo, kb = k * nb + lo;
+      if (_noiseChild[c] == 1) {
+        // ½ κ² (1 + ε) (Eq. 78 of Weber et al., 2026), as in the standard
+        // update (`_bVolatilityPrecisionWpe`).
+        for (var j = 0; j < m; j++) {
+          final ce = cb + j;
+          final kappa = volcK[kb + j];
+          final e = eff[ce];
+          final v = vopeC[ce];
+          final ke = kappa * e;
+          wpe[j] +=
+              (0.5 * ke * ke + ke * ke * v - 0.5 * kappa * kappa * e * v) *
+              observedC[ce];
+        }
+        continue;
+      }
       for (var j = 0; j < m; j++) {
         var tonic = _bEffectiveTonicVolatility(i, c, lo + j);
         if (mgf) tonic += _bMgfTerms(c, lo + j);
@@ -691,27 +824,37 @@ extension on BatchNetwork {
     for (var j = 0; j < m; j++) {
       em[j] = expectedMean[base + j];
     }
-    if (_vcStart[i] == _vcStart[i + 1]) {
+    // With the noise children's quadratic terms (pyhgf #477), which the
+    // expansions below leave out.
+    final hasNoise = _hasNoiseChildren(i);
+    if (_vcStart[i] == _vcStart[i + 1] && !hasNoise) {
       for (var j = 0; j < m; j++) {
         pp[j] = expectedPrecision[base + j];
         pm[j] = em[j];
       }
     } else {
       final mf = meanFieldUpdates;
+      final noise = s.f4;
       _bValuePrecisionWpe(i, lo, m, mf, tmp);
       for (var j = 0; j < m; j++) {
+        noise[j] = 0.0;
+      }
+      if (hasNoise) _bVolatilityPrecisionWpe(i, lo, m, noise, noiseOnly: true);
+      for (var j = 0; j < m; j++) {
         pp[j] = _maxNan(
-          expectedPrecision[base + j] + tmp[j],
+          expectedPrecision[base + j] + tmp[j] + noise[j],
           minPosteriorPrecision,
         );
       }
       _bValueMeanWpe(i, lo, m, pp, mf, tmp);
+      _bVolatilityMeanWpe(i, lo, m, pp, noise, noiseOnly: true);
       for (var j = 0; j < m; j++) {
-        pm[j] = em[j] + tmp[j];
+        pm[j] = em[j] + tmp[j] + noise[j];
       }
     }
 
-    // Observed volatility children, one slot each.
+    // Observed volatility children other than noise children, one slot
+    // each.
     for (var j = 0; j < m; j++) {
       nc[j] = 0;
     }
@@ -719,6 +862,7 @@ extension on BatchNetwork {
     final volcK = _volcK, currentVariance = _currentVariance;
     for (var k = _volcStart[i], end = _volcStart[i + 1]; k < end; k++) {
       final c = _volcIdx[k];
+      if (_noiseChild[c] == 1) continue;
       final cb = c * nb + lo, kb = k * nb + lo;
       for (var j = 0; j < m; j++) {
         final ce = cb + j;

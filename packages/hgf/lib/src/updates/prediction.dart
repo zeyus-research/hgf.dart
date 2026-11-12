@@ -9,11 +9,15 @@ extension on Network {
   /// * π̄ = 1 / (λ²/π + Ω)            (conditional; no parent uncertainty)
   /// * π̂ = 1 / (1/π̄ + Σ_b (Δt α_b g'(μ̂_b))² / π̂_b)   (marginal)
   /// * Ω = Δt·exp(ω + Σ_j κ_j μ̂_j + Σ_j κ_j² / (2 π̂_j))
+  ///
+  /// An input node (a leaf) takes the precision of its observation noise
+  /// instead ([_storeInputPrediction]).
   @pragma('vm:unsafe:no-bounds-checks')
   void _predictionContinuous(int i, double t) {
     final mean = _mean[i];
     final lambda = _autoconnectionStrength[i];
     final precision = _precision[i];
+    final isInput = _isLeaf[i] == 1;
 
     var driftrate = _tonicDrift[i];
     var valueCouplingVariance = 0.0;
@@ -36,10 +40,17 @@ extension on Network {
       valueCouplingVariance += coeff * coeff / _expectedPrecision[p];
     }
     final expectedMean = lambda * mean + t * driftrate;
+    // Carried variance: scaling the belief by λ scales its variance by λ².
+    final carriedVariance = (lambda * lambda) / precision;
+    _currentVariance[i] = carriedVariance;
+    _expectedMean[i] = expectedMean;
+    if (isInput) {
+      _storeInputPrediction(i);
+      return;
+    }
 
     var totalVolatility = _tonicVolatility[i];
-    final volStart = _volpStart[i], volEnd = _volpStart[i + 1];
-    for (var e = volStart; e < volEnd; e++) {
+    for (var e = _volpStart[i], end = _volpStart[i + 1]; e < end; e++) {
       final p = _volpIdx[e];
       final kappa = _volpK[e];
       totalVolatility += kappa * _expectedMean[p];
@@ -48,10 +59,6 @@ extension on Network {
 
     final pvRaw = t * fastExp(totalVolatility);
     final predictedVolatility = pvRaw > 1e-128 ? pvRaw : double.nan;
-    final isInput = _isLeaf[i] == 1;
-    final carriedVariance = isInput
-        ? 1.0 / precision
-        : (lambda * lambda) / precision;
     final conditional =
         1.0 / floorPredictedVariance(carriedVariance + predictedVolatility);
     final expected =
@@ -60,17 +67,9 @@ extension on Network {
           carriedVariance + predictedVolatility + valueCouplingVariance,
         );
 
-    _currentVariance[i] = carriedVariance;
-    _expectedMean[i] = expectedMean;
     _effectivePrecision[i] = predictedVolatility * expected;
-    if (!(isInput && volStart == volEnd)) {
-      _expectedPrecision[i] = expected;
-      _conditionalExpectedPrecision[i] = conditional;
-    } else {
-      // Leaf without random walk: conditional == marginal == prior precision.
-      _expectedPrecision[i] = precision;
-      _conditionalExpectedPrecision[i] = precision;
-    }
+    _expectedPrecision[i] = expected;
+    _conditionalExpectedPrecision[i] = conditional;
   }
 
   /// Mean-field prediction of a continuous node (no Taylor / MGF terms).
@@ -88,32 +87,57 @@ extension on Network {
       driftrate += _vpK[e] * (cf == 0 ? pMean : _couplingOf(cf, p).f(pMean));
     }
     final expectedMean = lambda * mean + t * driftrate;
+    final carriedVariance = (lambda * lambda) / precision;
+    _currentVariance[i] = carriedVariance;
+    _expectedMean[i] = expectedMean;
+    if (_isLeaf[i] == 1) {
+      _storeInputPrediction(i);
+      return;
+    }
 
     var totalVolatility = _tonicVolatility[i];
-    final volStart = _volpStart[i], volEnd = _volpStart[i + 1];
-    for (var e = volStart; e < volEnd; e++) {
+    for (var e = _volpStart[i], end = _volpStart[i + 1]; e < end; e++) {
       totalVolatility += _volpK[e] * _expectedMean[_volpIdx[e]];
     }
 
     final pvRaw = t * fastExp(totalVolatility);
     final predictedVolatility = pvRaw > 1e-128 ? pvRaw : double.nan;
-    final isInput = _isLeaf[i] == 1;
-    final carriedVariance = isInput
-        ? 1.0 / precision
-        : (lambda * lambda) / precision;
     final expected =
         1.0 / floorPredictedVariance(carriedVariance + predictedVolatility);
 
-    _currentVariance[i] = carriedVariance;
-    _expectedMean[i] = expectedMean;
     _effectivePrecision[i] = predictedVolatility * expected;
-    if (!(isInput && volStart == volEnd)) {
-      _expectedPrecision[i] = expected;
-      _conditionalExpectedPrecision[i] = expected;
-    } else {
+    _expectedPrecision[i] = expected;
+    _conditionalExpectedPrecision[i] = expected;
+  }
+
+  /// The predicted precisions of input node [i], which is observed exactly
+  /// and does not drift between observations (pyhgf #477, Weber et al.,
+  /// 2026, appendix on noise parents): without volatility parent, both are
+  /// its `precision`, the precision of the observation noise, and γ = 0.
+  /// Its volatility parents are noise parents, which set that precision,
+  /// π̂_u = exp(−(ε_u + Σ_q κ_q μ̂_q)) (Eq. 66, ε_u its tonic volatility),
+  /// and γ = 1 (Eq. 73). The same under the relaxed and the mean-field
+  /// predictions.
+  @pragma('vm:prefer-inline')
+  @pragma('wasm:prefer-inline')
+  @pragma('vm:unsafe:no-bounds-checks')
+  void _storeInputPrediction(int i) {
+    final volStart = _volpStart[i], volEnd = _volpStart[i + 1];
+    if (volStart == volEnd) {
+      final precision = _precision[i];
       _expectedPrecision[i] = precision;
       _conditionalExpectedPrecision[i] = precision;
+      _effectivePrecision[i] = 0.0;
+      return;
     }
+    var logNoiseVariance = _tonicVolatility[i];
+    for (var e = volStart; e < volEnd; e++) {
+      logNoiseVariance += _volpK[e] * _expectedMean[_volpIdx[e]];
+    }
+    final noisePrecision = fastExp(-logNoiseVariance);
+    _expectedPrecision[i] = noisePrecision;
+    _conditionalExpectedPrecision[i] = noisePrecision;
+    _effectivePrecision[i] = 1.0;
   }
 
   /// Prediction of a binary node: μ̂ = s(Σ_b μ̂_b), clipped to [v, 1 - v];

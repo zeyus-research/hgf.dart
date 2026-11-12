@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Noise parents of input nodes (pyhgf #477) in the kernels, through the
+  IR; the WGSL `lambertW0` no longer overflows (pyhgf #475).
 - Reverse mode in `GpuFitter`: `FitKernel(reverse: true)` (√T
   checkpoints, split across dispatches like the forward pass) and
   `GpuFitter(gradientMode:, reverseAbove:)`, `auto` by default (reverse

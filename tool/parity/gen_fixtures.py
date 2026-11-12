@@ -180,6 +180,111 @@ def continuous_input_volatility(volatility_updates: str) -> dict:
     }
 
 
+def noise_parent(volatility_updates: str, mean_field: bool = False, unit: bool = False) -> dict:
+    """The input of pyhgf's ``test_noise_parent.py`` (#477): a value parent x
+    and a noise parent a, each with a volatility parent. The tonic noise
+    ε_u = 0.2 is a shift of ε_u / κ_u of the mean of a. Non-unit couplings
+    (JAX only) unless ``unit``."""
+
+    def edge(child: int, strength: float):
+        return [child] if unit else {"idxs": [child], "strengths": [strength]}
+
+    kappa_u = 1.0 if unit else 1.4
+    return {
+        "network": {"volatility_updates": volatility_updates, "mean_field_updates": mean_field},
+        "nodes": [
+            {"kind": "continuous-state"},  # 0: u
+            {  # 1: x
+                "kind": "continuous-state",
+                "value_children": [0],
+                "params": {"mean": 0.5, "tonic_volatility": -2.0},
+            },
+            {  # 2: x2
+                "kind": "continuous-state",
+                "volatility_children": edge(1, 0.7),
+                "params": {"mean": 1.0, "tonic_volatility": -6.0},
+            },
+            {  # 3: a, the noise parent
+                "kind": "continuous-state",
+                "volatility_children": edge(0, kappa_u),
+                "params": {"mean": 0.2 / kappa_u, "tonic_volatility": -4.0},
+            },
+            {  # 4: a2
+                "kind": "continuous-state",
+                "volatility_children": edge(3, 0.8),
+                "params": {"mean": 1.0, "tonic_volatility": -6.0},
+            },
+        ],
+    }
+
+
+def noise_parent_mixed(volatility_updates: str) -> dict:
+    """A noise parent (3) with a noise child (input 0), a state volatility
+    child (2) and a value child (input 1): the eHGF and unbounded updates
+    with noise children among their volatility children, and the unbounded
+    effective prior with both value and noise terms."""
+    return {
+        "network": {"volatility_updates": volatility_updates},
+        "nodes": [
+            {"kind": "continuous-state", "n_nodes": 2, "params": {"precision": 4.0}},  # 0, 1
+            {"kind": "continuous-state", "value_children": [0, 1], "params": {"tonic_volatility": -2.0}},  # 2
+            {
+                "kind": "continuous-state",
+                "volatility_children": [0, 2],
+                "value_children": [1],
+                "params": {"tonic_volatility": -4.0},
+            },  # 3
+            {"kind": "continuous-state", "volatility_children": [3], "params": {"tonic_volatility": -5.0}},  # 4
+        ],
+    }
+
+
+def noise_parent_two(volatility_updates: str) -> dict:
+    """An input with two noise parents and a value parent coupled by tanh."""
+    return {
+        "network": {"volatility_updates": volatility_updates},
+        "nodes": [
+            {"kind": "continuous-state"},  # 0
+            {
+                "kind": "continuous-state",
+                "value_children": [0],
+                "coupling_fn": "tanh",
+                "params": {"tonic_volatility": -3.0},
+            },  # 1
+            {"kind": "continuous-state", "volatility_children": [0], "params": {"tonic_volatility": -4.0}},  # 2
+            {
+                "kind": "continuous-state",
+                "volatility_children": [0],
+                "params": {"mean": -0.5, "tonic_volatility": -3.0},
+            },  # 3
+        ],
+    }
+
+
+def noise_parent_bias(strength: float | None = None) -> dict:
+    """A bias (constant-state) value parent of an input with a noise parent:
+    pyhgf adds the bias node's placeholder precision to the noise prediction
+    error (P21, which hgf.dart corrects unless ``NetworkFixes.none``)."""
+    spec = noise_parent_two("unbounded")
+    spec["nodes"].append(
+        {
+            "kind": "constant-state",
+            "value_children": [0] if strength is None else {"idxs": [0], "strengths": [strength]},
+        }
+    )
+    return spec
+
+
+def jumps(n_trials: int = 300, seed: int = 7) -> np.ndarray:
+    """pyhgf's ``test_noise_parent._inputs``: draws from a Gaussian whose mean
+    and standard deviation jump."""
+    rng = np.random.default_rng(seed)
+    trials = np.arange(n_trials)
+    means = rng.normal(0.0, 3.0, n_trials // 50 + 1)[trials // 50]
+    stds = rng.choice([0.5, 1.0, 2.5], n_trials // 75 + 1)[trials // 75]
+    return means + stds * rng.normal(size=n_trials)
+
+
 def binary_hgf(levels: int, volatility_updates: str = "unbounded") -> dict:
     nodes = [
         {"kind": "binary-state"},
@@ -795,6 +900,49 @@ def scenarios() -> list[dict]:
             }
         )
         out.append({"name": f"multi_structure_{mode}", "spec": multi_structure(mode), "inputs": two_inputs})
+    # Noise parents of continuous input nodes (pyhgf #477).
+    # Scaled to keep every node well conditioned in every mode: the tanh
+    # parent runs away (g' -> 0) once the inputs leave tanh's range.
+    j = jumps()
+    jj = np.stack([j / 3.0, 0.5 * np.tanh(j / 3.0)], axis=1)
+    jt = 0.3 * np.tanh(j / 3.0)
+    for mode in ("unbounded", "eHGF", "standard"):
+        out.append({"name": f"noise_parent_{mode}", "spec": noise_parent(mode), "inputs": j})
+        out.append(
+            {
+                "name": f"noise_parent_mean_field_{mode}",
+                "spec": noise_parent(mode, mean_field=True),
+                "inputs": j,
+            }
+        )
+        out.append({"name": f"noise_parent_unit_{mode}", "spec": noise_parent(mode, unit=True), "inputs": j})
+        out.append({"name": f"noise_parent_mixed_{mode}", "spec": noise_parent_mixed(mode), "inputs": jj})
+        out.append({"name": f"noise_parent_two_{mode}", "spec": noise_parent_two(mode), "inputs": jt})
+    out.append(
+        {
+            "name": "noise_parent_missing",
+            "spec": noise_parent_mixed("unbounded"),
+            "inputs": jj,
+            "observed": missing_mask(len(j), 2),
+        }
+    )
+    out.append({"name": "noise_parent_bias", "spec": noise_parent_bias(), "inputs": jt + 1.0})
+    out.append(
+        {
+            "name": "noise_parent_bias_strength",
+            "spec": noise_parent_bias(0.4),
+            "inputs": jt + 0.4,
+            "time_steps": irregular_time_steps(len(j)),
+        }
+    )
+    out.append(
+        {
+            "name": "noise_parent_time_steps",
+            "spec": noise_parent_two("eHGF"),
+            "inputs": jt,
+            "time_steps": irregular_time_steps(len(j)),
+        }
+    )
     for mode in ("unbounded", "eHGF", "standard"):
         out.append(
             {

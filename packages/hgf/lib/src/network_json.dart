@@ -41,6 +41,7 @@ Map<String, Object?> _networkToJson(Network network) {
     'volatility_updates': network.volatilityUpdates.pyhgfName,
     'mean_field_updates': network.meanFieldUpdates,
     'ehgf_mgf_correction': network.ehgfMgfCorrection,
+    'fixes': network.fixes.toJson(),
     'max_posterior_precision': _encodeDouble(network.maxPosteriorPrecision),
     'precision_clipping_value': _encodeDouble(network.precisionClippingValue),
     'nodes': [
@@ -111,6 +112,10 @@ Network _networkFromJson(
     ),
     meanFieldUpdates: json['mean_field_updates'] as bool,
     ehgfMgfCorrection: json['ehgf_mgf_correction'] as bool,
+    fixes: switch (json['fixes']) {
+      final Map<String, Object?> f => NetworkFixes.fromJson(f),
+      _ => null, // snapshots from before NetworkFixes: the default
+    },
     maxPosteriorPrecision: _decodeDouble(json['max_posterior_precision']),
     precisionClippingValue: _decodeDouble(json['precision_clipping_value']),
   );

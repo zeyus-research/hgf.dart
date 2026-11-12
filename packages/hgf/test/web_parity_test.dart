@@ -11,6 +11,7 @@ library;
 
 import 'dart:convert';
 
+import 'package:hgf/hgf.dart' show Network, NetworkFixes;
 import 'package:test/test.dart';
 
 import 'src/batch_check.dart';
@@ -36,6 +37,8 @@ void hybridMain(StreamChannel<Object?> channel) {
 ''';
 
 void main() {
+  // pyhgf as it is, until hgf.dart's fixes reach it.
+  Network.defaultFixes = NetworkFixes.none;
   late List<Map<String, Object?>> fixtures;
 
   setUpAll(() async {

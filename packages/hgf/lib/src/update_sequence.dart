@@ -77,13 +77,23 @@ extension on Network {
           i,
     ];
 
+    // Input nodes with noise parents, which send them a noise prediction
+    // error after their value parents' updates (pyhgf #477).
+    final nope = [
+      for (var i = 0; i < _n; i++)
+        if (_isNoiseChildDef(i)) i,
+    ];
+
     while (true) {
       var progressed = false;
 
+      // All children have sent their prediction errors, and the noise
+      // children among the volatility children their noise prediction errors.
       final eligiblePo = [
         for (final idx in po)
           if (!_defs[idx].valueChildren.any(pe.contains) &&
-              !_defs[idx].volatilityChildren.any(pe.contains))
+              !_defs[idx].volatilityChildren.any(pe.contains) &&
+              !_defs[idx].volatilityChildren.any(nope.contains))
             idx,
       ];
       for (final idx in eligiblePo) {
@@ -94,6 +104,19 @@ extension on Network {
         progressed = true;
       }
       po.removeWhere(eligiblePo.contains);
+
+      // Noise prediction errors: the node's prediction error is done and its
+      // value parents are updated, since it reads their posteriors.
+      final eligibleNope = [
+        for (final idx in nope)
+          if (!pe.contains(idx) && !_defs[idx].valueParents.any(po.contains))
+            idx,
+      ];
+      for (final idx in eligibleNope) {
+        out.add((idx, UpdateStep.noisePredictionErrorContinuous));
+        progressed = true;
+      }
+      nope.removeWhere(eligibleNope.contains);
 
       // As in pyhgf, an ef-state node without parents (fixed rate) takes its
       // step on the first pass, even when it has children (a dp-state
@@ -147,7 +170,7 @@ extension on Network {
       }
       pe.removeWhere(eligiblePe.contains);
 
-      if (pe.isEmpty && po.isEmpty) break;
+      if (pe.isEmpty && po.isEmpty && nope.isEmpty) break;
       if (!progressed) break;
     }
     _moveDeferredSteps(out);
@@ -171,9 +194,21 @@ extension on Network {
     }
   }
 
+  /// pyhgf's `is_noise_child`: a continuous node without children and with
+  /// volatility parents (which are then noise parents).
+  bool _isNoiseChildDef(int i) {
+    final d = _defs[i];
+    return d.kind == NodeKind.continuousState &&
+        !d.hasChildren &&
+        d.volatilityParents.isNotEmpty;
+  }
+
   UpdateStep _posteriorStep(_NodeDef d) {
     final mf = meanFieldUpdates;
-    if (d.volatilityChildren.isNotEmpty) {
+    // Noise children take the update of Eqs. 74 and 78 of Weber et al.
+    // (2026) under every scheme: only the other volatility children call for
+    // the eHGF or unbounded update.
+    if (d.volatilityChildren.any((c) => !_isNoiseChildDef(c))) {
       switch (volatilityUpdates) {
         case VolatilityUpdates.eHGF:
           return mf

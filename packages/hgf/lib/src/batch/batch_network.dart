@@ -88,6 +88,7 @@ final class BatchNetwork {
       _couplingFn = net._couplingFn,
       _couplings = net._couplings,
       _isLeaf = net._isLeaf,
+      _noiseChild = net._noiseChild,
       _inputs = net._inputs,
       _vpStart = net._vpStart,
       _vpIdx = net._vpIdx,
@@ -182,6 +183,7 @@ final class BatchNetwork {
       _activeDirs = Int32List(k),
       meanFieldUpdates = net.meanFieldUpdates,
       ehgfMgfCorrection = net.ehgfMgfCorrection,
+      fixes = net.fixes,
       maxPosteriorPrecision = net.maxPosteriorPrecision,
       precisionClippingValue = net.precisionClippingValue {
     for (final s in [..._predStep, ..._updStep]) {
@@ -210,7 +212,7 @@ final class BatchNetwork {
 
   /// Highest step code the batched kernels implement: the scalar kinds and
   /// the vector kinds (`batch_vectors.dart`).
-  static const int _kLastBatchedStep = _kPredictionErrorDp;
+  static const int _kLastBatchedStep = _kNoisePredictionErrorContinuous;
 
   /// Memory for the dp-state proposal row caches ([DpScratch]), one slot
   /// per element of a block.
@@ -244,7 +246,7 @@ final class BatchNetwork {
   /// clusters).
   final int blockSize;
 
-  final Uint8List _kind, _couplingFn, _isLeaf;
+  final Uint8List _kind, _couplingFn, _isLeaf, _noiseChild;
   final List<Coupling> _couplings;
   final Int32List _inputs;
   final Int32List _vpStart, _vpIdx, _vcStart, _vcIdx;
@@ -345,6 +347,9 @@ final class BatchNetwork {
 
   /// As [Network.ehgfMgfCorrection].
   final bool ehgfMgfCorrection;
+
+  /// As [Network.fixes].
+  final NetworkFixes fixes;
 
   /// As [Network.maxPosteriorPrecision], for every element.
   double maxPosteriorPrecision;
@@ -1250,6 +1255,8 @@ final class BatchNetwork {
         _bPredictionErrorContinuous(node, lo, hi);
       case _kPredictionErrorBinary:
         _bPredictionErrorBinary(node, lo, hi);
+      case _kNoisePredictionErrorContinuous:
+        _bNoisePredictionErrorContinuous(node, t, lo, hi);
       default:
         _bDispatchVector(step, node, lo, hi);
     }
