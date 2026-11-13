@@ -78,7 +78,7 @@ final class PythonExport {
     if (plan.fixes.constantNoiseVariance && _biasIntoNoiseChild()) {
       _warnings.add(
         'An input with a noise parent has a bias (constant-state) value '
-        'parent: pyhgf adds (t·α)² of variance for it to the noise '
+        'parent: pyhgf adds α² of variance for it to the noise '
         'prediction error, which hgf.dart corrects '
         '(NetworkFixes.constantNoiseVariance): its noise updates differ.',
       );

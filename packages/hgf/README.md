@@ -192,7 +192,7 @@ to match pyhgf until the fixes reach it (the parity tests do).
 - `constantNoiseVariance` (P21): the noise prediction error of an input
   with noise parents (pyhgf #477) adds each value parent's posterior
   variance; pyhgf reads a bias (constant-state) parent's placeholder
-  precision there, so every bias parent adds `(t α)²` of observation
+  precision there, so every bias parent adds `α²` of observation
   noise. With the fix a bias parent adds none, as the equivalent tonic
   drift on the input would.
 

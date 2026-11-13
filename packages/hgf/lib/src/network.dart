@@ -1990,9 +1990,9 @@ class Network {
       case _kPredictionBinary:
         _predictionBinary(node);
       case _kPosteriorContinuous:
-        _posteriorContinuous(node, meanField: false);
+        _posteriorContinuous(node, t, meanField: false);
       case _kPosteriorContinuousMeanField:
-        _posteriorContinuous(node, meanField: true);
+        _posteriorContinuous(node, t, meanField: true);
       case _kPosteriorContinuousEhgf:
         _posteriorContinuousEhgf(node, t, meanField: false);
       case _kPosteriorContinuousEhgfMeanField:

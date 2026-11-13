@@ -9,6 +9,12 @@ builds the Rust extension `rshgf`, and needs `cargo`.
 # (CARGO_TARGET_DIR keeps cargo's build output out of the pyhgf checkout)
 CARGO_TARGET_DIR=/tmp/cargo-target uv sync
 
+# after ../pyhgf changes: rebuild it. A plain `uv sync` keeps the old build
+# (uv doesn't see source changes in a non-editable path dependency), and the
+# fixtures would still be stamped with the checkout's commit.
+CARGO_TARGET_DIR=/tmp/cargo-target uv sync --reinstall-package pyhgf
+uv run python -c "import pyhgf; print(pyhgf.__version__)"  # = ../pyhgf's
+
 uv run python gen_fixtures.py               # all scenarios
 uv run python gen_fixtures.py binary_2level # just some
 uv run python bench_python.py --repeat 7    # JAX (float64) + rshgf timings

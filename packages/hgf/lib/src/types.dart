@@ -321,7 +321,7 @@ enum UpdateStep {
   ),
 
   /// An input node with noise parents (continuous volatility parents of a
-  /// leaf): the noise prediction error ε = π̂_u (Σ_b (t α_b g_b'(μ_b))² / π_b
+  /// leaf): the noise prediction error ε = π̂_u (Σ_b (α_b g_b'(μ_b))² / π_b
   /// + (u − m_u)²) − 1 (Eq. 72 of Weber et al., 2026), from the posteriors
   /// of its value parents, so after their updates and before those of its
   /// noise parents. pyhgf #477.
@@ -369,9 +369,9 @@ final class NetworkFixes {
 
   /// P21: the noise prediction error of an input with noise parents
   /// (pyhgf #477) adds the posterior variance of each value parent,
-  /// `(t α g'(μ_b))² / π_b`. pyhgf reads it from a constant-state (bias)
+  /// `(α g'(μ_b))² / π_b`. pyhgf reads it from a constant-state (bias)
   /// parent too, whose `precision` is a placeholder 1, so each bias parent
-  /// adds `(t α)²` of variance a constant does not have. With this fix a
+  /// adds `α²` of variance a constant does not have. With this fix a
   /// bias parent adds none, as with the equivalent tonic drift.
   final bool constantNoiseVariance;
 

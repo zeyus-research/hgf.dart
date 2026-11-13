@@ -40,7 +40,7 @@ extension on Network {
 
   /// Precision increment from the value children of [i].
   @pragma('vm:unsafe:no-bounds-checks')
-  double _valueCouplingPrecisionWpe(int i, bool meanField) {
+  double _valueCouplingPrecisionWpe(int i, bool meanField, double t) {
     var wpe = 0.0;
     final start = _vcStart[i], end = _vcStart[i + 1];
     if (start == end) return wpe;
@@ -48,7 +48,13 @@ extension on Network {
     final parentMean = _mean[i];
     for (var e = start; e < end; e++) {
       final c = _vcIdx[e];
-      final alpha = _vcK[e];
+      // Derivative of the child's prediction with respect to the parent's value,
+      // up to the coupling function: the time step scales the drift of a
+      // continuous state child, not the prediction of an input node.
+      final timeStepScale = _kind[c] == _kindContinuous && _isLeaf[c] == 0
+          ? t
+          : 1.0;
+      final alpha = _vcK[e] * timeStepScale;
       double gPrimeSq, secondTerm;
       if (cf == 0) {
         gPrimeSq = 1.0;
@@ -70,7 +76,12 @@ extension on Network {
   /// Mean increment from the value children of [i], given the node's
   /// posterior precision.
   @pragma('vm:unsafe:no-bounds-checks')
-  double _valueCouplingMeanWpe(int i, double nodePrecision, bool meanField) {
+  double _valueCouplingMeanWpe(
+    int i,
+    double nodePrecision,
+    bool meanField,
+    double t,
+  ) {
     var wpe = 0.0;
     final start = _vcStart[i], end = _vcStart[i + 1];
     if (start == end) return wpe;
@@ -79,8 +90,13 @@ extension on Network {
     for (var e = start; e < end; e++) {
       final c = _vcIdx[e];
       final childVape = _valuePredictionError[c] * _observed[c];
+      // Time step scales drift, only continuous-state children
+      final timeStepScale = _kind[c] == _kindContinuous && _isLeaf[c] == 0
+          ? t
+          : 1.0;
+      final alpha = _vcK[e] * timeStepScale;
       wpe +=
-          (_vcK[e] * gPrime * _relaxedGain(c, meanField) / nodePrecision) *
+          (alpha * gPrime * _relaxedGain(c, meanField) / nodePrecision) *
           childVape;
     }
     return wpe;
@@ -178,14 +194,17 @@ extension on Network {
   // -------------------------------------------------------------------------
 
   @pragma('vm:unsafe:no-bounds-checks')
-  void _posteriorContinuous(int i, {required bool meanField}) {
+  void _posteriorContinuous(int i, double t, {required bool meanField}) {
     final hasObs = _hasObservations(i);
     final wpe = hasObs
-        ? _volatilityPrecisionWpe(i, _valueCouplingPrecisionWpe(i, meanField))
+        ? _volatilityPrecisionWpe(
+            i,
+            _valueCouplingPrecisionWpe(i, meanField, t),
+          )
         : 0.0;
     final precision = _observedOrPredicted(i, hasObs, wpe);
     final meanWpe =
-        _valueCouplingMeanWpe(i, precision, meanField) +
+        _valueCouplingMeanWpe(i, precision, meanField, t) +
         _volatilityMeanWpe(i, precision);
     _precision[i] = precision;
     _mean[i] = _expectedMean[i] + meanWpe;
@@ -202,14 +221,14 @@ extension on Network {
     final ep = _expectedPrecision[i];
     final mean =
         _expectedMean[i] +
-        _valueCouplingMeanWpe(i, ep, meanField) +
+        _valueCouplingMeanWpe(i, ep, meanField, t) +
         _volatilityMeanWpe(i, ep);
     _mean[i] = mean;
 
     final hasObs = _hasObservations(i);
     var wpe = 0.0;
     if (hasObs) {
-      wpe = _valueCouplingPrecisionWpe(i, meanField);
+      wpe = _valueCouplingPrecisionWpe(i, meanField, t);
       for (var e = _volcStart[i], end = _volcStart[i + 1]; e < end; e++) {
         final c = _volcIdx[e];
         if (_isNoiseChild(c)) {
@@ -295,7 +314,7 @@ extension on Network {
       }
       priorPrecision = _maxNan(
         _expectedPrecision[i] +
-            _valueCouplingPrecisionWpe(i, mf) +
+            _valueCouplingPrecisionWpe(i, mf, t) +
             noisePrecisionWpe,
         minPosteriorPrecision,
       );
@@ -315,7 +334,7 @@ extension on Network {
       }
       priorMean =
           expectedMean +
-          _valueCouplingMeanWpe(i, priorPrecision, mf) +
+          _valueCouplingMeanWpe(i, priorPrecision, mf, t) +
           noiseMeanWpe;
     }
 

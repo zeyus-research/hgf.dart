@@ -1242,9 +1242,9 @@ final class BatchNetwork {
       case _kPredictionBinary:
         _bPredictionBinary(node, lo, hi);
       case _kPosteriorContinuous:
-        _bPosteriorContinuous(node, lo, hi, false);
+        _bPosteriorContinuous(node, t, lo, hi, false);
       case _kPosteriorContinuousMeanField:
-        _bPosteriorContinuous(node, lo, hi, true);
+        _bPosteriorContinuous(node, t, lo, hi, true);
       case _kPosteriorContinuousEhgf:
         _bPosteriorContinuousEhgf(node, t, lo, hi, false);
       case _kPosteriorContinuousEhgfMeanField:
