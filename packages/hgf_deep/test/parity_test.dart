@@ -23,10 +23,23 @@ void main() {
     expect(files, isNotEmpty, reason: 'Run `melos run fixtures:deep` first');
   });
 
+  // Fixtures whose reference is ill-conditioned, with a wider relative
+  // tolerance (as hgf's parity suite widens it where pyhgf's backends
+  // disagree).
+  //
+  // input_layer_feedforward_tonic: in op 2 (synaptic fit) layer 1 runs away
+  // (docs/upstream P18/P19), its exponent roughly doubling per step (1e24,
+  // 1e44, 1e83, 1e192, then NaN). A last-ulp difference from JAX/XLA
+  // (1.8e-13 on a prediction) grows with it: ~1e-12 at 1e9, ~1e-11 at
+  // 1e100, 4.4e-9 at 1e192. Ops 0 and 1 agree to ~1e-15; the NaN onset
+  // must still match exactly.
+  const relTolOverrides = {'input_layer_feedforward_tonic': 1e-8};
+
   for (final file in files) {
     final fixture = jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
+    final rel = relTolOverrides[fixture['name']] ?? relTol;
     test('${fixture['name']} matches pyhgf (JAX f64)', () {
-      final failures = checkDeepFixture(fixture);
+      final failures = checkDeepFixture(fixture, rel: rel);
       expect(failures, isEmpty, reason: failures.take(12).join('\n'));
     });
   }

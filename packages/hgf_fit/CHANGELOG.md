@@ -1,5 +1,9 @@
 ## Unreleased
 
+- The trial IR follows pyhgf #478 (input drift and noise prediction error
+  without Δt, t·α on value messages from state children), so `IrReverse`
+  and the GPU kernels match `Network` with `timeSteps`. The Python
+  export's P21 warning says α².
 - The trial IR (GPU kernels, `IrReverse`) has pyhgf #477's noise parents
   and `NetworkFixes`; the export plan carries `fixes`, the Dart export
   writes them when not the default, and the Python export warns where

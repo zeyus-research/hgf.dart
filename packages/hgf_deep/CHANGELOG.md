@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Continuous layers follow pyhgf #478: the observation layer's drift and
+  noise prediction error take no Δt, and a state layer's value messages
+  to its parent take t·W. The 28 `continuous_*` fixtures regenerated at
+  pyhgf `d9958ece`. `input_layer_feedforward_tonic` is checked at rel
+  1e-8: its synaptic fit runs away (P18/P19), growing a last-ulp JAX
+  difference to 4.4e-9 by 1e192.
 - Continuous layers (pyhgf's continuous `DeepNetwork`, `input_data`):
   `LayerKind.continuous`, `addLayer(valueChildren:, volatilityChildren:,
   valueCoupling:, volatilityCoupling:, volatilityFullyConnected:,
