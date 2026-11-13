@@ -43,3 +43,6 @@ tool/rs_native_bench/target/
 
 # JAX on ROCm (tool/parity/jax_rocm.sh)
 tool/parity/.venv-rocm/
+
+# direnv
+.envrc
