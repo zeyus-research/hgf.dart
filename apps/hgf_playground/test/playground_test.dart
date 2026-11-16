@@ -145,10 +145,7 @@ void main() {
       expect(pg.network.meanFieldUpdates, isTrue);
       expect(pg.totalSurprise, isNot(relaxed));
       // The settings travel with the network's JSON (fitting, export).
-      expect(
-        Network.fromJson(pg.network.toJson()).meanFieldUpdates,
-        isTrue,
-      );
+      expect(Network.fromJson(pg.network.toJson()).meanFieldUpdates, isTrue);
       pg
         ..setMeanField(false)
         ..setEhgfMgfCorrection(true);
