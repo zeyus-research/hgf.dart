@@ -85,6 +85,9 @@ final class _TokenSource implements TrialSource {
 
   @override
   String response() => '@r';
+
+  @override
+  String previousResponse() => '@pr';
 }
 
 /// Compiles IR trees to register code, numbering values: an operation on
@@ -216,6 +219,7 @@ final class IrReverse {
     final observed = [for (var q = 0; q < nIn; q++) c.reg['@ob$q'] = c.fresh()];
     final present = c.reg['@rp'] = c.fresh();
     final resp = c.reg['@r'] = c.fresh();
+    final previous = c.reg['@pr'] = c.fresh();
     // The carried slots, in slot order.
     final carried = [
       for (final v in tc.slotOfVar.keys)
@@ -288,6 +292,7 @@ final class IrReverse {
       observedRegs: Int32List.fromList(observed),
       presentReg: present,
       responseReg: resp,
+      previousReg: previous,
       carriedSlots: Int32List.fromList([
         for (final v in carried) tc.slotOfVar[v]!,
       ]),
@@ -315,6 +320,7 @@ final class IrReverse {
     required Int32List observedRegs,
     required int presentReg,
     required int responseReg,
+    required int previousReg,
     required Int32List carriedSlots,
     required Int32List carriedRegs,
     required Int32List finalRegs,
@@ -329,6 +335,7 @@ final class IrReverse {
        _ob = observedRegs,
        _rp = presentReg,
        _r = responseReg,
+       _pr = previousReg,
        _carriedSlots = carriedSlots,
        _carried = carriedRegs,
        _finals = finalRegs,
@@ -356,7 +363,7 @@ final class IrReverse {
   final Int32List _code;
   final int _primal;
   final List<(int, double)> _consts;
-  final int _dt, _logT, _rp, _r, _objective;
+  final int _dt, _logT, _rp, _r, _pr, _objective;
   final Int32List _in, _ob, _carriedSlots, _carried, _finals, _carriedAdj;
 
   /// Slots whose initial value the likelihood depends on (the others'
@@ -812,6 +819,8 @@ final class IrReverse {
         final r = on ? s.responses![t] : double.nan;
         regs[_rp * w + i] = r.isNaN ? 0.0 : 1.0;
         regs[_r * w + i] = r.isNaN ? 0.0 : r;
+        final p = on && t > 0 ? s.responses![t - 1] : double.nan;
+        regs[_pr * w + i] = p.isNaN ? -1.0 : p;
       }
     }
   }

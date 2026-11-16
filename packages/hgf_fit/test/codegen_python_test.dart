@@ -194,7 +194,10 @@ void main() {
       _dir.createSync(recursive: true);
       final cases = [
         for (final c in fitCases())
-          if (c.name.startsWith('Expr') || c.name.startsWith('expression')) c,
+          if (c.name.startsWith('Expr') ||
+              c.name.startsWith('expression') ||
+              c.name.startsWith('choice extras'))
+            c,
       ];
       final want = <List<double>>[];
       final harness = StringBuffer()

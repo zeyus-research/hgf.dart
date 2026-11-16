@@ -272,4 +272,11 @@ final class _Source implements TrialSource {
 
   @override
   String response() => 'bitcast<f32>(resp[$_r])';
+
+  @override
+  String previousResponse() {
+    final i = perElement ? '(max(t, 1u) - 1u) * B + e' : '(max(t, 1u) - 1u)';
+    return 'select(-1.0f, bitcast<f32>(resp[$i]), '
+        't > 0u && (resp[$i] & 0x7fffffffu) <= 0x7f800000u)';
+  }
 }

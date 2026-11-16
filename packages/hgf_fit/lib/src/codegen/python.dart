@@ -281,6 +281,7 @@ final class PythonExport {
     }
     final params = [for (final p in r.parameters.keys) names[p] = unique(p)];
     names[ExprReadout.responseVariable] = 'responses';
+    names[ExprReadout.previousVariable] = 'previous';
     String py(Expr e) => pyExpr(e, (v) => names[v]!);
     final what = switch (r.kind) {
       ExprReadoutKind.choice => 'option k chosen with probability ∝ exp(vₖ)',
@@ -293,6 +294,14 @@ final class PythonExport {
         '${[for (final p in params) ', $p'].join()}):',
       )
       ..writeln('    """hgf_fit\'s ExprReadout (${r.kind.name}): $what."""');
+    if (r.readsPreviousResponse) {
+      b
+        ..writeln('    previous = jnp.concatenate(')
+        ..writeln(
+          '        [jnp.full(1, -1.0), jnp.nan_to_num(responses[:-1], nan=-1.0)]',
+        )
+        ..writeln('    )');
+    }
     for (final MapEntry(:key, :value) in r.beliefs.entries) {
       b.writeln(
         '    ${names[key]} = net.node_trajectories[${value.node}]'
@@ -442,11 +451,10 @@ final class PythonExport {
   static Map<String, double> _responseParameters(Map<String, Object?> j) =>
       switch (j['type']) {
         'GaussianReadout' => {'precision': readJsonDouble(j['precision'])},
-        'BinarySoftmaxReadout' ||
-        'CategoricalSoftmaxReadout' ||
-        'SoftmaxReadout' => {
+        'BinarySoftmaxReadout' || 'CategoricalSoftmaxReadout' => {
           'inverseTemperature': readJsonDouble(j['inverseTemperature']),
         },
+        'SoftmaxReadout' => const FitCodec().decodeResponse(j).parameters,
         'ExprReadout' => ExprReadout.fromJson(j).parameters,
         _ => const {},
       };
@@ -469,9 +477,16 @@ final class PythonExport {
           for (final o in j['options'] as List<Object?>)
             '{${[for (final t in (o as List<Object?>).cast<Map<String, Object?>>()) '${t['node']}: ${pyFloat(readJsonDouble(t['weight']))}'].join(', ')}}',
         ];
+        final extra = [
+          if (j['stickiness'] != null) 'stickiness=${values['stickiness']}',
+          if (j['lapse'] != null) 'lapse=${values['lapse']}',
+          if (j['bias'] != null)
+            'bias=[${[for (var k = 0; k < options.length; k++) values['bias_$k']].join(', ')}]',
+        ];
         return 'softmax_surprise(net, data["responses"], '
             '[${options.join(', ')}], ${field()}, '
-            '${values['inverseTemperature']})';
+            '${values['inverseTemperature']}'
+            '${[for (final e in extra) ', $e'].join()})';
       case 'ExprReadout':
         final r = ExprReadout.fromJson(j);
         return 'expr_readout_surprise(net, data["responses"]'
@@ -831,17 +846,35 @@ def categorical_softmax_surprise(net, responses, node, beta):
     return _total(s, responses)
 
 
-def softmax_surprise(net, responses, options, field, beta):
-    """Option k chosen with probability ∝ exp(β vₖ), vₖ = Σ weight · belief
-    over its nodes (hgf_fit's SoftmaxReadout)."""
+def softmax_surprise(
+    net, responses, options, field, beta, stickiness=None, lapse=None, bias=None
+):
+    """Option k chosen with probability ∝ exp(uₖ), uₖ = β vₖ + biasₖ +
+    stickiness · [k = previous response], vₖ = Σ weight · belief over its
+    nodes; with a lapse ε, (1 − ε) softmax(u)ₖ + ε / K (hgf_fit's
+    SoftmaxReadout)."""
+    zero = jnp.zeros(responses.shape[0])
     values = jnp.stack(
         [
-            sum(w * net.node_trajectories[n][field] for n, w in option.items())
+            sum(
+                (w * net.node_trajectories[n][field] for n, w in option.items()),
+                zero,
+            )
             for option in options
         ],
         1,
     )
-    logp = jax.nn.log_softmax(beta * values, axis=1)
+    u = beta * values
+    if bias is not None:
+        u = u + jnp.stack([jnp.asarray(b) for b in bias])
+    if stickiness is not None:
+        prev = jnp.concatenate([jnp.full(1, jnp.nan), responses[:-1]])
+        u = u + stickiness * (prev[:, None] == jnp.arange(len(options)))
+    logp = jax.nn.log_softmax(u, axis=1)
+    if lapse is not None:
+        logp = jnp.logaddexp(
+            jnp.log1p(-lapse) + logp, jnp.log(lapse / len(options))
+        )
     k = jnp.nan_to_num(responses).astype(int)
     s = -jnp.take_along_axis(logp, k[:, None], axis=1)[:, 0]
     return _total(s, responses)

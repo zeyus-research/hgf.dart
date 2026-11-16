@@ -139,6 +139,18 @@ void main() {
       ),
       throwsArgumentError,
     );
+    expect(
+      () => ExprReadout.choice(['previous', '0'], parameters: {'previous': 1}),
+      throwsArgumentError,
+    );
+    expect(
+      ExprReadout.choice(
+        ['where(previous == 0, k, 0)', '0'],
+        parameters: {'k': 1},
+      ).readsPreviousResponse,
+      isTrue,
+    );
+    expect(ExprReadout.choice(['1', '0']).readsPreviousResponse, isFalse);
   });
 
   test('round-trips through FitCodec', () {

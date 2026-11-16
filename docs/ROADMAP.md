@@ -2303,7 +2303,8 @@ fitting, export) reads it.
    (`hgf_fit/ir.dart`), which gives the GPU kernel and exact gradients.
    Custom couplings and `ResponseModel.fn` closures stop being stubs
    in the exports.
-3. [ ] **Choice follow-ups:** a stickiness (perseveration) term, a
+3. [x] **Choice follow-ups** (done 2026-11-17, see "Choice follow-ups"
+   below): a stickiness (perseveration) term, a
    lapse rate and a per-option bias (intercept: "nothing" needs a value
    of its own; today an option must name a node) on `SoftmaxReadout`,
    CPU, GPU and export.
@@ -2410,9 +2411,44 @@ candidate search.
   their header (the CSV must hold them).
 - In a document's `ExprReadout`, `<address>.<field>` variables
   (`ball_v.expected_mean`, `cat.2.mean`) bind themselves.
-- Left: printing transforms as pandas in the Python export; a previous
-  response in readout expressions (with step 3's stickiness); the
+- Left: printing transforms as pandas in the Python export; the
   builder UI (expression fields with live errors) comes with the canvas.
+  (The previous response in readout expressions came with step 3.)
+
+#### Choice follow-ups (2026-11-17): done
+
+- **`SoftmaxReadout`** has three optional terms, each a parameter only
+  when set (null leaves it out, so existing models keep their parameter
+  lists): `bias` (per-option intercepts `bias_0`, `bias_1`, …; an option
+  may now be empty, `{}`, and is then worth its bias alone, e.g. "do
+  nothing"; only differences matter, so fit all but one), `stickiness`
+  (`κ`, added to the option chosen on the previous trial; nothing on the
+  first trial or after a miss) and `lapse` (`ε`: `(1 − ε) softmax(u) + ε /
+  K`). Utility `uₖ = β vₖ + bₖ + κ [k = prev]`; parameters in the order
+  `inverseTemperature`, `stickiness`, `lapse`, `bias_k`. Exact gradients
+  (checked against finite differences), `FitCodec`, Dart and pyhgf
+  exports (`softmax_surprise(…, stickiness=, lapse=, bias=)`).
+- **The previous response** reaches response models through
+  `ResponseModel.surpriseAfter` / `surprisePartialsAfter` / `sampleAfter`
+  (defaults call the plain methods, so custom models and
+  `ResponseModel.fn` are unchanged; `readsPreviousResponse` says who
+  uses it). `simulate` and `simulateChoices` pass the previous draw.
+  In the IR, `TrialSource.previousResponse()` (−1 where there is none):
+  the CPU reverse mode, the batch kernel, the fit kernel (`respPrev`) and
+  the gradient kernel.
+- **`ExprReadout`** reads `previous` (−1 where there is none), so
+  `where(previous == 0, kappa, 0)` writes a stickiness by hand; GPU and
+  pyhgf exports included.
+- Tests: two fit cases (the IGT plus a "pass" option with all three
+  terms and a missed choice; a bandit `ExprReadout` with stickiness
+  through `previous`) run through the CPU gradients, reverse mode and
+  Hessians, the GPU fit tests and both exports; simulated choices show
+  the repeat rate rising with `κ > 0` and falling with `κ < 0`, a large "pass" bias
+  passing, and a lapse of 1 choosing uniformly.
+- Left for later: a decaying choice trace (choice kernel, Wilson &
+  Collins 2019) instead of one-back stickiness, which needs carried
+  state; the playground presets don't expose the new terms yet (the
+  builder's readout node will).
 
 **Driving example: the user's 6-person hyperscanning experiment.** A
 ball balancing on a beam (an elevator): a participant lifts the left or
@@ -2590,8 +2626,8 @@ nodes) is ported (2026-11-13). The playground switches between relaxed
 and mean-field updates and has the eHGF MGF switch (2026-11-16). Phase 9, the model
 builder, started 2026-11-16 (LSL / real-time sources shelved until
 after it): the model document and expressions (couplings, readouts and
-data transforms) are done (2026-11-16); next the choice follow-ups, then
-the canvas in slices. Vector node kinds on the GPU and a
+data transforms) are done (2026-11-16), and the choice follow-ups
+(stickiness, lapse, option bias; 2026-11-17); next the canvas in slices. Vector node kinds on the GPU and a
 faster dp candidate search can run alongside.
 
 ```sh

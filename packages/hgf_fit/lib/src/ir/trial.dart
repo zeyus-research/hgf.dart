@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:hgf/hgf.dart' hide lambertW0, logAddExp;
 
 import 'expr.dart';
@@ -96,21 +98,34 @@ final class GpuBinarySoftmax extends GpuResponse {
 }
 
 /// `SoftmaxReadout`: a choice among options worth `vₖ = Σ w · belief`,
-/// option `k` with probability `exp(β vₖ) / Σⱼ exp(β vⱼ)`. Parameter:
-/// `inverseTemperature`.
+/// option `k` with utility `uₖ = β vₖ + bₖ + κ [k = previous]` and
+/// probability `(1 − ε) softmax(u)ₖ + ε / K`. Parameters:
+/// `inverseTemperature`, then `stickiness` (κ), `lapse` (ε) and `bias_k`
+/// where they are set (null: left out).
 final class GpuSoftmax extends GpuResponse {
   const GpuSoftmax({
     required this.options,
     this.field = NodeField.expectedMean,
     this.inverseTemperature = 1.0,
+    this.stickiness,
+    this.lapse,
+    this.bias,
   });
 
   final List<Map<int, double>> options;
   final NodeField field;
   final double inverseTemperature;
+  final double? stickiness;
+  final double? lapse;
+  final List<double>? bias;
 
   @override
-  List<double> get defaults => [inverseTemperature];
+  List<double> get defaults => [
+    inverseTemperature,
+    ?stickiness,
+    ?lapse,
+    ...?bias,
+  ];
 
   @override
   bool get usesResponses => true;
@@ -171,6 +186,10 @@ abstract interface class TrialSource {
 
   /// The response (`f32`; only read where [responsePresent]).
   String response();
+
+  /// The previous trial's response (`f32`), or `-1` where there is none (the
+  /// first trial, or a missed response): no option's index.
+  String previousResponse();
 }
 
 /// The result of [TrialCompiler.compile].
@@ -252,17 +271,17 @@ final class TrialCompiler {
         }
       case GpuBinarySoftmax(:final node):
         _checkNode(node);
-      case GpuSoftmax(:final options, :final field):
+      case GpuSoftmax(:final options, :final field, :final bias):
         if (!gpuNodeFields.contains(field)) {
           throw UnsupportedError('No GPU slot for $field');
         }
         if (options.length < 2) {
           throw ArgumentError.value(options, 'options', 'Needs two or more');
         }
+        if (bias != null && bias.length != options.length) {
+          throw ArgumentError.value(bias, 'bias', 'Needs one per option');
+        }
         for (final o in options) {
-          if (o.isEmpty) {
-            throw ArgumentError.value(options, 'options', 'An option is empty');
-          }
           o.keys.forEach(_checkNode);
         }
       case GpuExprReadout(:final beliefs):
@@ -1484,20 +1503,42 @@ final class _Pass {
         final p = let('prob', one / (one + exp(-z)));
         final q = let('qprob', one / (one + exp(z)));
         s = sel(zero, binarySurprise(ne(resp, zero), p, q), present);
-      case GpuSoftmax(:final options, :final field):
-        // log Σ exp(β vₖ) − β v_resp; a response that is no option's index
-        // picks none (the CPU engine rejects it).
+      case GpuSoftmax(
+        :final options,
+        :final field,
+        :final stickiness,
+        :final lapse,
+        :final bias,
+      ):
+        // log Σ exp(uₖ) − u_resp, uₖ = β vₖ + bₖ + κ [k = previous]; a
+        // response that is no option's index picks none (the CPU engine
+        // rejects it). With a lapse ε: −log((1 − ε) q + ε / K).
         final present = letCond('present', Cond(source.responsePresent()));
         final resp = let('resp', Lit(source.response()));
+        var j = 1;
+        final kappa = stickiness == null ? null : rp(j++);
+        final eps = lapse == null ? null : rp(j++);
+        final b0 = j;
+        final prev = kappa == null
+            ? null
+            : let('prev', Lit(source.previousResponse()));
         final z = [
           for (var k = 0; k < options.length; k++)
             let(
               'z$k',
-              rp(0) *
-                  sum([
-                    for (final MapEntry(:key, :value) in options[k].entries)
-                      value == 1.0 ? r(key, field) : lit(value) * r(key, field),
-                  ]),
+              sum([
+                if (options[k].isNotEmpty)
+                  rp(0) *
+                      sum([
+                        for (final MapEntry(:key, :value) in options[k].entries)
+                          value == 1.0
+                              ? r(key, field)
+                              : lit(value) * r(key, field),
+                      ]),
+                if (bias != null) rp(b0 + k),
+                if (kappa != null)
+                  sel(zero, kappa, eq(prev!, lit(k.toDouble()))),
+              ]),
             ),
         ];
         var lse = z.first;
@@ -1508,7 +1549,17 @@ final class _Pass {
           for (var k = 0; k < z.length; k++)
             sel(zero, z[k], eq(resp, lit(k.toDouble()))),
         ]);
-        s = sel(zero, lse - chosen, present);
+        final Ex nll;
+        if (eps == null) {
+          nll = lse - chosen;
+        } else {
+          final logq = let('logq', chosen - lse);
+          nll = -logAddExp(
+            log(one - eps) + logq,
+            log(eps) - lit(math.log(options.length)),
+          );
+        }
+        s = sel(zero, nll, present);
       case GpuExprReadout(
         :final kind,
         :final expressions,
@@ -1518,11 +1569,15 @@ final class _Pass {
         final present = letCond('present', Cond(source.responsePresent()));
         final resp = let('resp', Lit(source.response()));
         final params = parameters.keys.toList();
+        Ex? prev;
         Ex variable(String name) {
           if (beliefs[name] case final b?) return r(b.node, b.field);
           final j = params.indexOf(name);
           if (j >= 0) return rp(j);
           if (name == 'response') return resp;
+          if (name == 'previous') {
+            return prev ??= let('prev', Lit(source.previousResponse()));
+          }
           throw StateError('Unbound variable $name');
         }
 

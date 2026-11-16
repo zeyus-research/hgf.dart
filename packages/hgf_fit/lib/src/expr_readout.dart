@@ -42,8 +42,10 @@ enum ExprReadoutKind {
 /// ```
 ///
 /// A variable is a belief (in [beliefs]), a parameter (in [parameters],
-/// fitted by name with `Parameter.response`) or `response`. A missing
-/// response (NaN) scores 0.
+/// fitted by name with `Parameter.response`), `response`, or `previous`:
+/// the previous trial's response, `-1` where there is none (the first
+/// trial, or a missed response), so `where(previous == 2, kappa, 0)` adds
+/// a stickiness to option 2. A missing response (NaN) scores 0.
 final class ExprReadout extends ResponseModel {
   ExprReadout._(
     this.kind,
@@ -54,13 +56,15 @@ final class ExprReadout extends ResponseModel {
       parameters = Map.unmodifiable(parameters) {
     final names = [...this.beliefs.keys, ...this.parameters.keys];
     final clash = names.toSet().length != names.length;
-    if (clash || names.contains(responseVariable)) {
+    if (clash ||
+        names.contains(responseVariable) ||
+        names.contains(previousVariable)) {
       throw ArgumentError(
         'Beliefs and parameters need distinct names, and none may be '
-        '"$responseVariable"',
+        '"$responseVariable" or "$previousVariable"',
       );
     }
-    _vars = [...names, responseVariable];
+    _vars = [...names, responseVariable, previousVariable];
     for (final e in expressions) {
       if (e.isDataOnly) {
         throw FormatException(
@@ -70,8 +74,9 @@ final class ExprReadout extends ResponseModel {
       for (final v in e.variables) {
         if (!_vars.contains(v)) {
           throw FormatException(
-            '"$v" is not a belief, a parameter'
-            '${kind == ExprReadoutKind.surprise ? ' or "response"' : ''}',
+            '"$v" is not a belief, a parameter, '
+            '${kind == ExprReadoutKind.surprise ? '"response" ' : ''}'
+            'or "previous"',
           );
         }
         if (v == responseVariable && kind != ExprReadoutKind.surprise) {
@@ -92,7 +97,10 @@ final class ExprReadout extends ResponseModel {
                 : null,
         ],
     ];
-    _env = Float64List(nb + np + 1);
+    _env = Float64List(nb + np + 2);
+    readsPreviousResponse = expressions.any(
+      (e) => e.variables.contains(previousVariable),
+    );
   }
 
   /// Option `k` worth `options[k]` (see [ExprReadoutKind.choice]).
@@ -139,6 +147,12 @@ final class ExprReadout extends ResponseModel {
 
   /// The variable holding the response, in a surprise expression.
   static const responseVariable = 'response';
+
+  /// The variable holding the previous trial's response (`-1`: none).
+  static const previousVariable = 'previous';
+
+  @override
+  late final bool readsPreviousResponse;
 
   final ExprReadoutKind kind;
 
@@ -245,6 +259,7 @@ final class ExprReadout extends ResponseModel {
     BatchNetwork network,
     int element,
     double response,
+    double previous,
     Float64List params,
     int offset,
   ) {
@@ -256,6 +271,7 @@ final class ExprReadout extends ResponseModel {
       _env[i++] = params[offset + j];
     }
     _env[i] = response;
+    _env[i + 1] = previous.isNaN ? -1.0 : previous;
   }
 
   /// `log Σ exp(vₖ)`, stably.
@@ -295,9 +311,20 @@ final class ExprReadout extends ResponseModel {
     double response,
     Float64List params,
     int offset,
+  ) => surpriseAfter(network, element, t, response, double.nan, params, offset);
+
+  @override
+  double surpriseAfter(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    double previous,
+    Float64List params,
+    int offset,
   ) {
     if (response.isNaN) return 0.0;
-    _load(network, element, response, params, offset);
+    _load(network, element, response, previous, params, offset);
     final double s;
     switch (kind) {
       case ExprReadoutKind.choice:
@@ -320,9 +347,30 @@ final class ExprReadout extends ResponseModel {
     Float64List params,
     int offset,
     ResponsePartials partials,
+  ) => surprisePartialsAfter(
+    network,
+    element,
+    t,
+    response,
+    double.nan,
+    params,
+    offset,
+    partials,
+  );
+
+  @override
+  double surprisePartialsAfter(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    double previous,
+    Float64List params,
+    int offset,
+    ResponsePartials partials,
   ) {
     if (response.isNaN) return 0.0;
-    _load(network, element, response, params, offset);
+    _load(network, element, response, previous, params, offset);
     // ∂S/∂(each expression's value).
     final Float64List dS;
     final double s;
@@ -371,8 +419,19 @@ final class ExprReadout extends ResponseModel {
     Float64List params,
     int offset,
     math.Random rng,
+  ) => sampleAfter(network, element, t, double.nan, params, offset, rng);
+
+  @override
+  double sampleAfter(
+    BatchNetwork network,
+    int element,
+    int t,
+    double previous,
+    Float64List params,
+    int offset,
+    math.Random rng,
   ) {
-    _load(network, element, double.nan, params, offset);
+    _load(network, element, double.nan, previous, params, offset);
     switch (kind) {
       case ExprReadoutKind.choice:
         final v = _optionValues();

@@ -352,6 +352,10 @@ final class DartExport {
             'field: NodeField.${field()}',
           if (readJsonDouble(j['inverseTemperature']) != 1.0)
             'inverseTemperature: ${d('inverseTemperature')}',
+          if (j['stickiness'] != null) 'stickiness: ${d('stickiness')}',
+          if (j['lapse'] != null) 'lapse: ${d('lapse')}',
+          if (j['bias'] case final List<Object?> b)
+            'bias: [${b.map((x) => dartDouble(readJsonDouble(x))).join(', ')}]',
         ];
         if (options.every((o) => o.length == 1 && o.single.weight == 1.0)) {
           return _call('SoftmaxReadout.nodes', [

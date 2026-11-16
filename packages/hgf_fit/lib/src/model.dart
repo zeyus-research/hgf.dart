@@ -701,10 +701,12 @@ final class HgfModel {
           perElement: perElement,
         );
         for (var j = 0; j < b; j++) {
-          out[subjectOf[g.elements[j]]][t] = response.sample(
+          final o = out[subjectOf[g.elements[j]]];
+          o[t] = response.sampleAfter(
             batch,
             j,
             t,
+            t > 0 ? o[t - 1] : double.nan,
             params,
             j * p,
             rng,
@@ -781,7 +783,15 @@ final class HgfModel {
         rowObs.fillRange(0, rowObs.length, 0.0);
         for (var j = 0; j < b; j++) {
           final s = subjectOf[g.elements[j]];
-          final choice = response.sample(batch, j, t, params, j * p, rng);
+          final choice = response.sampleAfter(
+            batch,
+            j,
+            t,
+            t > 0 ? choices[s][t - 1] : double.nan,
+            params,
+            j * p,
+            rng,
+          );
           choices[s][t] = choice;
           if (choice.isNaN) continue;
           final ci = choice.toInt();
@@ -1064,11 +1074,12 @@ final class _BoundResponse extends ResponseFunction {
       offset,
       network.tangents,
     );
-    return model.surprisePartials(
+    return model.surprisePartialsAfter(
       network,
       element,
       t,
       r == null ? double.nan : r[t],
+      r == null || t == 0 ? double.nan : r[t - 1],
       params,
       offset,
       p,
@@ -1082,11 +1093,12 @@ final class _BoundResponse extends ResponseFunction {
   @override
   double batchSurprise(BatchNetwork network, int t, int element) {
     final r = responses[element];
-    return model.surprise(
+    return model.surpriseAfter(
       network,
       element,
       t,
       r == null ? double.nan : r[t],
+      r == null || t == 0 ? double.nan : r[t - 1],
       params,
       element * nParams,
     );

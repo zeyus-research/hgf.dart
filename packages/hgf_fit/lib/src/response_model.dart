@@ -110,6 +110,49 @@ abstract class ResponseModel {
     math.Random rng,
   ) => throw UnsupportedError('$runtimeType cannot simulate responses');
 
+  /// Whether the model reads the previous trial's response (e.g.
+  /// [SoftmaxReadout.stickiness]). The callers always go through
+  /// [surpriseAfter], [surprisePartialsAfter] and [sampleAfter], which
+  /// such a model overrides; the others ignore `previous`.
+  bool get readsPreviousResponse => false;
+
+  /// [surprise], given the response on trial `t − 1` ([previous]; NaN on the
+  /// first trial and after a missed one).
+  double surpriseAfter(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    double previous,
+    Float64List params,
+    int offset,
+  ) => surprise(network, element, t, response, params, offset);
+
+  /// [surprisePartials], given the response on trial `t − 1`.
+  double surprisePartialsAfter(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    double previous,
+    Float64List params,
+    int offset,
+    ResponsePartials partials,
+  ) =>
+      surprisePartials(network, element, t, response, params, offset, partials);
+
+  /// [sample], given the response on trial `t − 1` (the previous draw when
+  /// simulating).
+  double sampleAfter(
+    BatchNetwork network,
+    int element,
+    int t,
+    double previous,
+    Float64List params,
+    int offset,
+    math.Random rng,
+  ) => sample(network, element, t, params, offset, rng);
+
   /// This response model as JSON, with a `"type"` key, for `FitCodec` (e.g. to
   /// send a model to a Web Worker). The built-in ones are covered; a custom
   /// one overrides this and gives the `FitCodec` a decoder for its type.
@@ -583,15 +626,33 @@ final class CategoricalSoftmaxReadout extends ResponseModel {
 /// with `HgfModel.simulateChoices` to simulate a task where only the chosen
 /// option's outcome is seen.
 ///
+/// Three optional terms, each a parameter when set (null leaves it out):
+///
+/// - [bias]: a per-option intercept `bₖ` (parameters `bias_0`, `bias_1`, …),
+///   so an option can be worth something of its own; an option with no
+///   nodes (`{}`) is worth its bias alone (e.g. "do nothing"). Only
+///   differences between biases matter: fit all but one.
+/// - [stickiness]: `κ`, added to the option chosen on the previous trial
+///   (perseveration for `κ > 0`, alternation for `κ < 0`). Nothing is added
+///   on the first trial or after a missed response.
+/// - [lapse]: `ε`, the probability of choosing at random:
+///   `pₖ = (1 − ε) softmax(u)ₖ + ε / K`. Give it a prior on (0, 1).
+///
+/// With all three, option `k`'s utility is `uₖ = β vₖ + bₖ + κ [k = prev]`
+/// (the bias and stickiness are on the utility scale, not multiplied by β).
+///
 /// A response is the chosen option's index (`0`, `1`, …; NaN: no
-/// response). Parameter: `inverseTemperature` (default
-/// [inverseTemperature]); `β = 0` chooses at random, large `β` the option
-/// of highest value.
+/// response). Parameters: `inverseTemperature` (default
+/// [inverseTemperature]; `β = 0` chooses at random, large `β` the option
+/// of highest value), then `stickiness`, `lapse` and `bias_k` where set.
 final class SoftmaxReadout extends ResponseModel {
   const SoftmaxReadout({
     required this.options,
     this.field = NodeField.expectedMean,
     this.inverseTemperature = 1.0,
+    this.stickiness,
+    this.lapse,
+    this.bias,
   });
 
   /// One option per node, valued at that node's [field].
@@ -599,15 +660,22 @@ final class SoftmaxReadout extends ResponseModel {
     List<int> nodes, {
     NodeField field = NodeField.expectedMean,
     double inverseTemperature = 1.0,
+    double? stickiness,
+    double? lapse,
+    List<double>? bias,
   }) : this(
          options: [
            for (final n in nodes) {n: 1.0},
          ],
          field: field,
          inverseTemperature: inverseTemperature,
+         stickiness: stickiness,
+         lapse: lapse,
+         bias: bias,
        );
 
-  /// Each option's value as weights on the nodes' [field].
+  /// Each option's value as weights on the nodes' [field] (empty: worth
+  /// its [bias] alone).
   final List<Map<int, double>> options;
 
   /// The belief the values are read from (default: the prediction).
@@ -616,10 +684,29 @@ final class SoftmaxReadout extends ResponseModel {
   /// Default β when it isn't fitted.
   final double inverseTemperature;
 
+  /// Default stickiness `κ`, or null for none.
+  final double? stickiness;
+
+  /// Default lapse rate `ε`, or null for none.
+  final double? lapse;
+
+  /// Default per-option biases (one per option), or null for none.
+  final List<double>? bias;
+
+  int get _iLapse => stickiness == null ? 1 : 2;
+  int get _iBias => _iLapse + (lapse == null ? 0 : 1);
+
   @override
   Map<String, double> get parameters => {
     'inverseTemperature': inverseTemperature,
+    'stickiness': ?stickiness,
+    'lapse': ?lapse,
+    if (bias case final b?)
+      for (var k = 0; k < b.length; k++) 'bias_$k': b[k],
   };
+
+  @override
+  bool get readsPreviousResponse => stickiness != null;
 
   @override
   Map<String, Object?> toJson() => {
@@ -633,6 +720,9 @@ final class SoftmaxReadout extends ResponseModel {
     ],
     'field': field.pyhgfName,
     'inverseTemperature': jsonDouble(inverseTemperature),
+    if (stickiness case final k?) 'stickiness': jsonDouble(k),
+    if (lapse case final e?) 'lapse': jsonDouble(e),
+    if (bias case final b?) 'bias': [for (final x in b) jsonDouble(x)],
   };
 
   @override
@@ -640,10 +730,10 @@ final class SoftmaxReadout extends ResponseModel {
     if (options.length < 2) {
       throw ArgumentError.value(options, 'options', 'Needs two or more');
     }
+    if (bias case final b? when b.length != options.length) {
+      throw ArgumentError.value(b, 'bias', 'Needs one per option');
+    }
     for (final o in options) {
-      if (o.isEmpty) {
-        throw ArgumentError.value(options, 'options', 'An option is empty');
-      }
       for (final n in o.keys) {
         _checkNode(network, n);
       }
@@ -658,19 +748,53 @@ final class SoftmaxReadout extends ResponseModel {
     return v;
   }
 
-  /// `log Σⱼ exp(β vⱼ)`, computed stably.
-  double _logNormaliser(BatchNetwork network, int element, double beta) {
+  /// `uₖ = β vₖ + bₖ + κ [k = previous]`.
+  double _utility(
+    BatchNetwork network,
+    int element,
+    int k,
+    double previous,
+    Float64List params,
+    int offset,
+  ) {
+    var u = params[offset] * _value(network, element, k);
+    if (bias != null) u += params[offset + _iBias + k];
+    if (stickiness != null && previous == k) u += params[offset + 1];
+    return u;
+  }
+
+  /// `log Σⱼ exp(uⱼ)`, computed stably.
+  double _logNormaliser(
+    BatchNetwork network,
+    int element,
+    double previous,
+    Float64List params,
+    int offset,
+  ) {
     var top = double.negativeInfinity;
     for (var k = 0; k < options.length; k++) {
-      final z = beta * _value(network, element, k);
+      final z = _utility(network, element, k, previous, params, offset);
       if (z > top) top = z;
     }
     if (!top.isFinite) return top;
     var sum = 0.0;
     for (var k = 0; k < options.length; k++) {
-      sum += math.exp(beta * _value(network, element, k) - top);
+      sum += math.exp(
+        _utility(network, element, k, previous, params, offset) - top,
+      );
     }
     return top + math.log(sum);
+  }
+
+  /// `−log((1 − ε) q + ε / K)` from `log q`, or `−log q` without a lapse.
+  double _nll(double logq, Float64List params, int offset) {
+    if (lapse == null) return -logq;
+    final eps = params[offset + _iLapse];
+    final a = math.log(1 - eps) + logq;
+    final b = math.log(eps / options.length);
+    final m = math.max(a, b);
+    if (m == double.negativeInfinity) return double.infinity;
+    return -(m + math.log(math.exp(a - m) + math.exp(b - m)));
   }
 
   int _choice(double response) {
@@ -693,14 +817,23 @@ final class SoftmaxReadout extends ResponseModel {
     double response,
     Float64List params,
     int offset,
+  ) => surpriseAfter(network, element, t, response, double.nan, params, offset);
+
+  @override
+  double surpriseAfter(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    double previous,
+    Float64List params,
+    int offset,
   ) {
     if (response.isNaN) return 0.0;
-    final beta = params[offset];
     final r = _choice(response);
-    return _nanToInf(
-      _logNormaliser(network, element, beta) -
-          beta * _value(network, element, r),
-    );
+    final z = _logNormaliser(network, element, previous, params, offset);
+    final ur = _utility(network, element, r, previous, params, offset);
+    return _nanToInf(_nll(ur - z, params, offset));
   }
 
   @override
@@ -715,26 +848,62 @@ final class SoftmaxReadout extends ResponseModel {
     Float64List params,
     int offset,
     ResponsePartials partials,
+  ) => surprisePartialsAfter(
+    network,
+    element,
+    t,
+    response,
+    double.nan,
+    params,
+    offset,
+    partials,
+  );
+
+  @override
+  double surprisePartialsAfter(
+    BatchNetwork network,
+    int element,
+    int t,
+    double response,
+    double previous,
+    Float64List params,
+    int offset,
+    ResponsePartials partials,
   ) {
     if (response.isNaN) return 0.0;
     final beta = params[offset];
     final r = _choice(response);
-    final z = _logNormaliser(network, element, beta);
-    final vr = _value(network, element, r);
-    // S = log Σ exp(β vⱼ) − β vᵣ: ∂S/∂vₖ = β (pₖ − [k = r]),
-    // ∂S/∂β = Σ pₖ vₖ − vᵣ; each vₖ is linear in the beliefs.
-    var dBeta = -vr;
+    final z = _logNormaliser(network, element, previous, params, offset);
+    final logq = _utility(network, element, r, previous, params, offset) - z;
+    final s = _nll(logq, params, offset);
+    // S = −log p_r, p_r = (1 − ε) q_r + ε / K, q = softmax(u):
+    // ∂S/∂uₖ = w (qₖ − [k = r]) with w = (1 − ε) q_r / p_r (1 without a
+    // lapse), ∂S/∂ε = (q_r − 1/K) / p_r; uₖ = β vₖ + bₖ + κ [k = prev], each
+    // vₖ linear in the beliefs.
+    var w = 1.0;
+    if (lapse != null) {
+      final eps = params[offset + _iLapse];
+      final qr = math.exp(logq), pInv = math.exp(s);
+      w = (1 - eps) * qr * pInv;
+      partials.addParameter(_iLapse, (qr - 1 / options.length) * pInv);
+    }
+    var dBeta = 0.0;
     for (var k = 0; k < options.length; k++) {
       final v = _value(network, element, k);
-      final p = math.exp(beta * v - z);
-      dBeta += p * v;
-      final dv = beta * (p - (k == r ? 1.0 : 0.0));
+      final q = math.exp(
+        _utility(network, element, k, previous, params, offset) - z,
+      );
+      final du = w * (q - (k == r ? 1.0 : 0.0));
+      dBeta += du * v;
+      final dv = beta * du;
       for (final MapEntry(:key, :value) in options[k].entries) {
         partials.add(key, field, dv * value);
       }
+      if (bias != null) partials.addParameter(_iBias + k, du);
+      if (stickiness != null && previous == k) partials.addParameter(1, du);
     }
     partials.addParameter(0, dBeta);
-    return _nanToInf(z - beta * vr);
+    return _nanToInf(s);
   }
 
   @override
@@ -745,16 +914,31 @@ final class SoftmaxReadout extends ResponseModel {
     Float64List params,
     int offset,
     math.Random rng,
+  ) => sampleAfter(network, element, t, double.nan, params, offset, rng);
+
+  @override
+  double sampleAfter(
+    BatchNetwork network,
+    int element,
+    int t,
+    double previous,
+    Float64List params,
+    int offset,
+    math.Random rng,
   ) {
-    final beta = params[offset];
-    final z = _logNormaliser(network, element, beta);
+    final z = _logNormaliser(network, element, previous, params, offset);
     if (!z.isFinite) return double.nan;
+    final eps = lapse == null ? 0.0 : params[offset + _iLapse];
+    final n = options.length;
     var u = rng.nextDouble();
-    for (var k = 0; k < options.length - 1; k++) {
-      u -= math.exp(beta * _value(network, element, k) - z);
+    for (var k = 0; k < n - 1; k++) {
+      final q = math.exp(
+        _utility(network, element, k, previous, params, offset) - z,
+      );
+      u -= (1 - eps) * q + eps / n;
       if (u < 0) return k.toDouble();
     }
-    return (options.length - 1).toDouble();
+    return (n - 1).toDouble();
   }
 }
 

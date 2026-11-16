@@ -201,6 +201,11 @@ final class FitCodec {
         ],
         field: NodeField.parse(json['field'] as String),
         inverseTemperature: readJsonDouble(json['inverseTemperature']),
+        stickiness: json['stickiness'] == null
+            ? null
+            : readJsonDouble(json['stickiness']),
+        lapse: json['lapse'] == null ? null : readJsonDouble(json['lapse']),
+        bias: (json['bias'] as List?)?.map(readJsonDouble).toList(),
       ),
       'ExprReadout' => ExprReadout.fromJson(json),
       'ObservationSurprise' => ObservationSurprise(switch (json['function']) {

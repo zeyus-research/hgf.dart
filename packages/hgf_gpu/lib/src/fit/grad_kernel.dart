@@ -397,4 +397,8 @@ final class _Source implements TrialSource {
 
   @override
   String response() => 'resp[t * B + e]';
+
+  @override
+  String previousResponse() =>
+      'select(-1.0f, resp[(max(t, 1u) - 1u) * B + e], t > 0u)';
 }

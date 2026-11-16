@@ -541,6 +541,9 @@ final class _FitSource implements TrialSource {
 
   @override
   String response() => 'respAt(respOff, t)';
+
+  @override
+  String previousResponse() => 'respPrev(respOff, t)';
 }
 
 const String _fitPrelude =
@@ -560,5 +563,11 @@ fn respPresent(off: u32, t: u32) -> bool {
 fn respAt(off: u32, t: u32) -> f32 {
   if (off == ${noData}u) { return 0.0f; }
   return bitcast<f32>(data[off + t]);
+}
+fn respPrev(off: u32, t: u32) -> f32 {
+  if (off == ${noData}u || t == 0u) { return -1.0f; }
+  let bits = data[off + t - 1u];
+  if ((bits & 0x7fffffffu) > 0x7f800000u) { return -1.0f; }
+  return bitcast<f32>(bits);
 }
 ''';

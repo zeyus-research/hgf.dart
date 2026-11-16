@@ -236,6 +236,57 @@ void main() {
       );
     });
 
+    test('stickiness, lapse and bias shape simulated choices', () {
+      HgfModel model() => HgfModel(
+        network: IowaGamblingTask.network(),
+        response: const SoftmaxReadout(
+          options: [
+            {0: 1.0},
+            {1: 1.0},
+            {2: 1.0},
+            {3: 1.0},
+            {},
+          ],
+          stickiness: 0.0,
+          lapse: 0.0,
+          bias: [0, 0, 0, 0, 0],
+        ),
+        parameters: [
+          Parameter.response('stickiness', prior: const Normal(0, 1)),
+          Parameter.response('lapse', prior: const Uniform(0, 1)),
+          Parameter.response('bias_4', prior: const Normal(0, 1)),
+        ],
+      );
+      List<double> run(List<double> x) {
+        final rng = math.Random(3);
+        return model()
+            .simulateChoices(
+              [Subject(inputs: IowaGamblingTask.outcomes(2000, rng))],
+              [x],
+              rng,
+              reveals: const [...IowaGamblingTask.reveals, <int>[]],
+            )
+            .single
+            .responses!;
+      }
+
+      double repeats(List<double> c) {
+        var n = 0;
+        for (var t = 1; t < c.length; t++) {
+          if (c[t] == c[t - 1]) n++;
+        }
+        return n / (c.length - 1);
+      }
+
+      expect(repeats(run([3, 0, 0])), greaterThan(0.6));
+      expect(repeats(run([-3, 0, 0])), lessThan(0.1));
+      final passes = run([0, 0, 4]).where((c) => c == 4).length / 2000;
+      expect(passes, greaterThan(0.8));
+      // A lapse of 1 chooses uniformly whatever the bias.
+      final uniform = run([0, 1, 6]).where((c) => c == 4).length / 2000;
+      expect(uniform, closeTo(0.2, 0.04));
+    });
+
     test('parameter recovery on simulated IGT agents (MAP)', () {
       final model = _igt();
       final rng = math.Random(11);

@@ -360,6 +360,66 @@ List<FitCase> fitCases() {
     ));
   }
   {
+    // The Iowa Gambling Task with a fifth option, "pass" (worth its bias
+    // alone, reveals nothing), stickiness and a lapse rate.
+    final model = HgfModel(
+      network: IowaGamblingTask.network(),
+      response: const SoftmaxReadout(
+        options: [
+          {0: 1.0},
+          {1: 1.0},
+          {2: 1.0},
+          {3: 1.0},
+          {},
+        ],
+        stickiness: 0.0,
+        lapse: 0.05,
+        bias: [0, 0, 0, 0, 0],
+      ),
+      parameters: [
+        Parameter(
+          'omega',
+          targets: [
+            for (final n in IowaGamblingTask.valueNodes)
+              NodeTarget(n, NodeField.tonicVolatility),
+          ],
+          prior: const Normal(-2, 1.5),
+        ),
+        Parameter.response(
+          'inverseTemperature',
+          prior: const LogNormal(0.5, 1),
+        ),
+        Parameter.response('stickiness', prior: const Normal(0, 1)),
+        Parameter.response('lapse', prior: const Uniform(0, 0.5)),
+        Parameter.response('bias_4', prior: const Normal(0, 1)),
+      ],
+    );
+    final rng = math.Random(9);
+    final sims = model.simulateChoices(
+      [
+        Subject(inputs: IowaGamblingTask.outcomes(120, rng)),
+        Subject(inputs: IowaGamblingTask.outcomes(120, rng)),
+      ],
+      [
+        [-2.0, 1.5, 1.0, 0.1, -0.5],
+        [-3.0, 3.0, -0.5, 0.02, 0.5],
+      ],
+      rng,
+      reveals: const [...IowaGamblingTask.reveals, <int>[]],
+    );
+    sims[1].responses![30] = double.nan;
+    cases.add((
+      name:
+          'choice extras: IGT + pass, stickiness, lapse, bias (missed choice)',
+      model: model,
+      subjects: sims,
+      points: [
+        [-2.0, 1.5, 1.0, 0.1, -0.5],
+        [-1.0, 3.0, -0.8, 0.3, 1.0],
+      ],
+    ));
+  }
+  {
     // pyhgf's two-armed bandit: arm values W − L from four binary branches.
     final net = Network()..addNodes(kind: NodeKind.binaryState, nNodes: 4);
     for (var i = 0; i < 4; i++) {
@@ -468,6 +528,69 @@ List<FitCase> fitCases() {
       points: [
         [-2.5, 4.0, 0.3],
         [-1.5, 1.0, -0.5],
+      ],
+    ));
+  }
+  {
+    // The bandit with an ExprReadout that reads the previous choice:
+    // stickiness written as an expression.
+    final net = Network()..addNodes(kind: NodeKind.binaryState, nNodes: 4);
+    for (var i = 0; i < 4; i++) {
+      net.addNodes(valueChildren: [i], tonicVolatility: -2.5);
+    }
+    final model = HgfModel(
+      network: net,
+      response: ExprReadout.choice(
+        [
+          'beta * (w1 - l1) + where(previous == 0, kappa, 0)',
+          'beta * (w2 - l2) + where(previous == 1, kappa, 0)',
+        ],
+        beliefs: {
+          'w1': (node: 0, field: NodeField.expectedMean),
+          'l1': (node: 1, field: NodeField.expectedMean),
+          'w2': (node: 2, field: NodeField.expectedMean),
+          'l2': (node: 3, field: NodeField.expectedMean),
+        },
+        parameters: {'beta': 1.0, 'kappa': 0.0},
+      ),
+      parameters: [
+        Parameter(
+          'omega',
+          targets: [
+            for (final n in [4, 5, 6, 7])
+              NodeTarget(n, NodeField.tonicVolatility),
+          ],
+          prior: const Normal(-2.5, 2),
+        ),
+        Parameter.response('beta', prior: const LogNormal(1, 1)),
+        Parameter.response('kappa', prior: const Normal(0, 1)),
+      ],
+    );
+    final rng = math.Random(19);
+    final outcomes = Float64List.fromList([
+      for (var t = 0; t < 160; t++)
+        for (final p in [(t ~/ 40).isEven ? 0.8 : 0.2, 0.5, 0.3, 0.5])
+          rng.nextDouble() < p ? 1.0 : 0.0,
+    ]);
+    final sims = model.simulateChoices(
+      [Subject(inputs: outcomes)],
+      [
+        [-2.5, 3.0, 1.0],
+      ],
+      rng,
+      reveals: const [
+        [0, 1],
+        [2, 3],
+      ],
+    );
+    sims[0].responses![40] = double.nan;
+    cases.add((
+      name: 'ExprReadout choice: stickiness through previous',
+      model: model,
+      subjects: sims,
+      points: [
+        [-2.5, 3.0, 1.0],
+        [-1.5, 1.0, -0.7],
       ],
     ));
   }

@@ -518,7 +518,10 @@ void main() {
     });
 
     for (final c in fitCases().where(
-      (c) => c.name.startsWith('Expr') || c.name.startsWith('expression'),
+      (c) =>
+          c.name.startsWith('Expr') ||
+          c.name.startsWith('expression') ||
+          c.name.startsWith('choice extras'),
     )) {
       test('${c.name} (finite differences)', () {
         _checkGradients(c.model, c.subjects, c.points);

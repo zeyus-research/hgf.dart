@@ -13,11 +13,21 @@ import 'trial.dart';
 GpuResponse irResponseOf(ResponseModel response) => switch (response) {
   GaussianReadout(:final node, :final field, :final precision) =>
     GpuGaussianReadout(node: node, field: field, precision: precision),
-  SoftmaxReadout(:final options, :final field, :final inverseTemperature) =>
+  SoftmaxReadout(
+    :final options,
+    :final field,
+    :final inverseTemperature,
+    :final stickiness,
+    :final lapse,
+    :final bias,
+  ) =>
     GpuSoftmax(
       options: options,
       field: field,
       inverseTemperature: inverseTemperature,
+      stickiness: stickiness,
+      lapse: lapse,
+      bias: bias,
     ),
   ExprReadout(
     :final kind,
