@@ -1,7 +1,8 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'csv.dart';
+import 'package:hgf/hgf.dart' show CsvData;
+
 import 'matrix.dart';
 
 /// Inputs and targets, one row per sample.

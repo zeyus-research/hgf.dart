@@ -41,6 +41,7 @@ but did not fix it.
 | [P19](#p19) | pyhgf JAX | `DeepNetwork`: exp overflow and a cancelling reconstruction turn a runaway volatility level into NaN; an improper 0/0 posterior after it | medium: NaN | [ ] |
 | [P20](#p20) | pyhgf JAX | dp-state defines no surprise, so a dp network can't be fitted (suggestion: the CRP predictive) | feature | [ ] |
 | [P21](#p21) | pyhgf JAX + rshgf | the noise prediction error (#477) counts a bias parent's placeholder precision as α² of variance | medium: biased noise learning | [ ] |
+| [P22](#p22) | pyhgf JAX + rshgf | a NaN input on an unobserved trial (`observed = 0`) makes the parents' beliefs NaN from then on | medium: silent NaN on missing data | [ ] |
 | [R1](#r1) | rshgf | ef-state ignores `observed`; univariate fixed rate only | medium | [ ] |
 | [R2](#r2) | rshgf | hot-path costs (string compares, allocations, clones) | perf | [ ] |
 | [R3](#r3) | rshgf | GELU coupling uses a 1.5e-7 `erfc` approximation (called exact) | low | [ ] |
@@ -579,6 +580,34 @@ is 0 anyway).
 `-DHGF_UPSTREAM=true` give pyhgf's behaviour, which the parity tests use
 (the `noise_parent_bias*` fixtures). The Python export warns when it
 applies.
+
+### P22
+
+**A NaN input on an unobserved trial still reaches the parents' beliefs.**
+Repro: [`pyhgf/nan_unobserved_input.py`](pyhgf/nan_unobserved_input.py).
+
+```
+JAX   continuous-state: value parent mean is NaN on 38/40 trials with NaN at the missing trials, 0/40 with 0.0
+rshgf continuous-state: value parent mean is NaN on 38/40 trials with NaN at the missing trials, 0/40 with 0.0
+JAX   binary-state: value parent mean is NaN on 38/40 trials with NaN at the missing trials, 0/40 with 0.0
+rshgf binary-state: value parent mean is NaN on 38/40 trials with NaN at the missing trials, 0/40 with 0.0
+```
+
+The `observed` mask is how pyhgf marks missing data, and NaN is the
+natural value of a missing cell (pandas reads empty cells as NaN). The
+updates cancel an unobserved prediction error by multiplying it with the
+mask (`value_prediction_error *= attributes[node_idx]["observed"]` in
+`prediction_error/binary.py`; `* attributes[value_child_idx]["observed"]`
+in `posterior_update_precision_continuous_node.py`), and `NaN * 0` is NaN,
+so the first missing trial poisons the value parent for good. Any finite
+value in the same cells gives the intended result. hgf.dart does the same
+(it ports these updates), for continuous, binary, categorical and ef-state
+inputs, in every update scheme.
+
+**Fix:** `jnp.where(observed, pe, 0.0)` instead of the product (rshgf: a
+branch), or replace NaN inputs where `observed == 0` in `input_data`.
+**hgf.dart:** not changed in the engine yet (parity). hgf_fit's model
+documents read an empty CSV cell as 0 and unobserved, never NaN.
 
 ## rshgf
 

@@ -160,6 +160,8 @@ void main() {
         ]) {
           for (final bottom in LayerKind.values) {
             if (bottom == LayerKind.binary && ffu) continue;
+            // Continuous layers don't mix with the layers above.
+            if (bottom == LayerKind.continuous) continue;
             final k = DeepKernels(
               _net(
                 update: update,

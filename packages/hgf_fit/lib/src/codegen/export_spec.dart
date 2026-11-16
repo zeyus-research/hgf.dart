@@ -14,6 +14,7 @@ final class ExportSpec {
     this.dataFile,
     this.fit,
     this.title,
+    this.columnNames,
   }) : network =
            network ??
            (model?['network'] as Map<String, Object?>?) ??
@@ -42,6 +43,10 @@ final class ExportSpec {
 
   /// A line for the header comment, e.g. the preset's name.
   final String? title;
+
+  /// The CSV's column names, instead of the defaults (see
+  /// [ExportData.columns]): a model document's named inputs and response.
+  final ExportColumnNames? columnNames;
 
   late final NetworkPlan plan = NetworkPlan.fromJson(network);
 }
@@ -108,12 +113,40 @@ final class ExportData {
   /// network with a single scalar input calls it `observation`, as the
   /// playground's export does; otherwise `input_<node>` (`input_<node>_<j>`
   /// for a vector input) and `observed_<node>`.
+  ///
+  /// [names] replaces these names (the responses' only when there are as
+  /// many as [responsesPerTrial]).
   static ExportColumns columns(
     NetworkPlan plan, {
     int responsesPerTrial = 0,
     bool observed = false,
     bool timeSteps = false,
+    ExportColumnNames? names,
   }) {
+    if (names != null) {
+      if (names.inputs.length != plan.inputs.length ||
+          names.observed.length != plan.inputs.length) {
+        throw ArgumentError('One name list per input node');
+      }
+      for (var k = 0; k < plan.inputs.length; k++) {
+        if (names.inputs[k].length != plan.inputDimensions[k]) {
+          throw ArgumentError(
+            'Input ${plan.inputs[k]} takes ${plan.inputDimensions[k]} '
+            'columns, not ${names.inputs[k].length}',
+          );
+        }
+      }
+      final defaults = columns(plan, responsesPerTrial: responsesPerTrial);
+      return (
+        inputs: names.inputs,
+        observed: names.observed,
+        writeObserved: observed,
+        responses: names.responses.length == responsesPerTrial
+            ? names.responses
+            : defaults.responses,
+        timeStep: timeSteps ? names.timeStep : null,
+      );
+    }
     final single = plan.inputs.length == 1 && plan.inputDimensions.single == 1;
     return (
       inputs: [
@@ -144,7 +177,7 @@ final class ExportData {
       responses == null || nTime == 0 ? 0 : responses!.length ~/ nTime;
 
   /// This data as the CSV the exported scripts read (see [columns]).
-  String toCsv(NetworkPlan plan) {
+  String toCsv(NetworkPlan plan, {ExportColumnNames? names}) {
     final width = plan.nInputColumns, nIn = plan.inputs.length;
     final n = nTime(width), r = responsesPerTrial(n);
     final cols = columns(
@@ -152,6 +185,7 @@ final class ExportData {
       responsesPerTrial: r,
       observed: observed != null,
       timeSteps: timeSteps != null,
+      names: names,
     );
     final b = StringBuffer()..writeln(cols.header.join(','));
     for (var t = 0; t < n; t++) {
@@ -172,6 +206,16 @@ final class ExportData {
     return b.toString();
   }
 }
+
+/// Column names for [ExportData.columns]: per input node (in the network's
+/// input order) its data columns and its observed-flag column, the
+/// response columns, and the time-step column.
+typedef ExportColumnNames = ({
+  List<List<String>> inputs,
+  List<String> observed,
+  List<String> responses,
+  String timeStep,
+});
 
 /// The columns of [ExportData.toCsv]'s CSV.
 typedef ExportColumns = ({

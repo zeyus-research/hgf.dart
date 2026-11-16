@@ -4,6 +4,7 @@
 /// checked numerically against it (see `test/parity_test.dart`).
 library;
 
+export 'src/csv.dart' show CsvData;
 export 'src/coupling.dart' show Coupling, CouplingFn, CustomCoupling;
 export 'src/math.dart'
     show

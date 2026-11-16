@@ -2257,6 +2257,148 @@ browsers now that a round trip is ~0.3 ms.
   agents × 100 trials, MAP of all of them in 0.46 s (JIT, one core);
   recovery r = 0.80 (ω shared across decks), 0.96 (log β).
 
+### Phase 9: model builder (agreed 2026-11-16)
+
+**Goal:** make hgf.dart useful to colleagues on their own data. That
+means full functionality, and a node-based **model builder** in the
+playground: drag and drop nodes, typed and *named* inputs and outputs,
+a live preview (the engine re-filters at 60 fps on every edit, which
+desktop node editors can't offer), simulated data and decisions, and
+export to Dart and pyhgf. Julia comes after the upstream changes settle.
+LSL / real-time sources are shelved until after this (Phase 8 item).
+
+**Order (agreed):** the model *document* first, with no UI, then the
+canvas in slices. The UI edits the document; everything else (engine,
+fitting, export) reads it.
+
+1. [x] **The model document** (`hgf.document/1`, `package:hgf_fit/document.dart`;
+   done 2026-11-16, see "Model document" below).
+   One JSON format for what the builder shows, which today lives in three
+   places (`Network.toJson`, the `FitCodec` model, the playground's
+   `ChoiceTask`):
+   - the network by **ids**, not indices: nodes (a categorical, ef-state
+     or dp block is one node; its implied nodes are addressed as
+     `id.k`), a flat ordered edge list (value / volatility, strength),
+     coupling functions, update scheme and settings, and overrides for
+     what the builder calls don't set. Compiles through `NetworkPlan`'s
+     calls, so a snapshot round-trips bit for bit (edge order included);
+   - **named inputs**: input node, CSV column(s), what an empty cell means;
+   - **named outputs**: a response (readout) with named options (CSV
+     codes like `left`/`right`/`none`), what each option reveals (closed
+     loop), and **trajectory outputs** (a node's field, e.g. a precision-
+     weighted prediction error, written per time stamp: regressors for
+     EEG);
+   - free parameters with priors and transforms (targets by id);
+   - the data layout: a participant column (one `Subject` each), a time
+     column (time steps from differences) or a time-step column;
+   - fit settings, and the canvas layout (ignored by the compiler).
+   Test: every fixture and preset round-trips document ↔ `Network` /
+   `HgfModel` bit for bit; the exports read named columns.
+2. [ ] **Expressions** for transform nodes and option values: a small
+   expression tree (arithmetic, exp/log/tanh/abs/clip, lags, a column
+   of another participant) evaluated in Dart and printed as numpy/JAX
+   and WGSL. Data transforms run once before filtering (not
+   differentiated); model-side expressions lower to the fitting IR
+   (`hgf_fit/ir.dart`), which gives the GPU kernel and exact gradients.
+   Custom couplings and `ResponseModel.fn` closures stop being stubs
+   in the exports.
+3. [ ] **Choice follow-ups:** a stickiness (perseveration) term, a
+   lapse rate and a per-option bias (intercept: "nothing" needs a value
+   of its own; today an option must name a node) on `SoftmaxReadout`,
+   CPU, GPU and export.
+4. [ ] **Builder, slice 1:** a canvas for the HGF graph only. Typed ports
+   (value and volatility edges drawn differently), inline checks (e.g. a
+   binary node needs a continuous value parent; no cycles), automatic
+   layered layout (HGF hierarchies are vertical), undo/redo; every preset
+   opens in it; the preview pane reuses the playground's views. Check
+   the Flutter node-editor packages first, but expect our own
+   `CustomPainter` canvas.
+5. [ ] **Slice 2:** inputs and outputs: data-source nodes (CSV columns),
+   transform nodes, readout nodes, named outputs; generate data and
+   decisions from the preview (`Network.sample`, `simulateChoices`).
+   Probably nested: the HGF network is one node of the data pipeline that
+   opens into its own canvas (parent edges and data flows mean different
+   things; one canvas for both gets confusing).
+6. [ ] **Slice 3:** participants (one network template per participant,
+   bindings per participant, a group level via `HierarchicalModel`),
+   wired to the fit view and the exports.
+7. [ ] Later: hgf_deep layers and a data-loading pipeline as nodes of
+   the same kind; Julia export.
+
+In parallel (not blocking): vector node kinds on the GPU, a faster dp
+candidate search.
+
+#### Model document (2026-11-16): done
+
+- **`NetworkDocument`**: nodes by id (`ScalarNode`, `CategoricalNode`,
+  `EfStateNode` (a group when `nNodes > 1`, as one `addEfState` call
+  makes it), `DpStateNode`), a flat ordered `DocEdge` list, overrides
+  (`InitialOverride`, `CouplingOverride`, `VectorOverride`) for what the
+  declarations don't set, and the settings. Implied nodes are `id.k`
+  (`NodeAddresses`). It compiles to `NetworkPlan`'s `BuildCall`s in node
+  order, each edge declared by its later endpoint (only scalar nodes, and
+  an ef-state node's value edge to a dp-state node, declare edges; anything
+  else is a `FormatException` that says which node to move).
+  `NetworkDocument.fromNetwork` goes through `NetworkPlan` (merged
+  `addNodes` calls split into one node each). All 160 fixture networks
+  (plain and perturbed) round-trip through JSON bit for bit (snapshot and
+  trajectories, every field).
+- **`ModelDocument`**: the network plus named inputs (`DocInput`: node,
+  columns, `categories` for label columns, an observed-flag column), the
+  response (`DocResponse`: `FitCodec` readout JSON with node addresses,
+  option labels, reveals per option), parameters (`FitCodec` JSON with
+  addresses in `node`/`parent`/`child`), trajectory outputs (`DocOutput`:
+  a node's field or `surprise`, e.g. prediction errors for EEG), the data
+  layout (`DocData`: participant column, time or time-step column), fit
+  settings (`DocFit`) and an opaque canvas `layout`. `fromNetwork` /
+  `fromModel` name inputs as the exports' CSV does (`observation`,
+  `input_<i>`), so an exported CSV loads straight back.
+- **`CompiledDocument`**: `network`, `model`, inputs in network order,
+  `reveals` for `simulateChoices`, `subjects(CsvData)` (one `Subject` per
+  participant, labels matched before missing markers: CsvData counts
+  `none` as missing, which would have dropped every "nothing" press),
+  `outputs(traj)` with `recordedFields`, and `exportSpec()`: the Dart and
+  Python exports now take `ExportSpec.columnNames` and read the
+  document's column names (a label input becomes one-hot `<name>_<label>`
+  columns; choices are codes). Tested end to end: a 3-option
+  (left/right/none) document's exported Dart script reads its named CSV and
+  prints the in-process Laplace result.
+- `CsvData` moved from hgf_deep to `package:hgf` (hgf_deep re-exports it).
+- **Found:** a NaN input on an unobserved trial makes the parents' beliefs
+  NaN from then on, in pyhgf (JAX and rshgf) and in hgf.dart: the mask is
+  applied by multiplication ([P22](upstream/README.md#p22)). Documents
+  read empty cells as 0 and unobserved. Open: an engine fix behind
+  `NetworkFixes` (`jnp.where` semantics), as for P21.
+- Left for later steps: label decoding in the exported scripts (they read
+  numbers), relative bindings (team-mates), and transforms (step 2).
+
+**Driving example: the user's 6-person hyperscanning experiment.** A
+ball balancing on a beam (an elevator): a participant lifts the left or
+the right side (never both), so the ball rises without falling off;
+levels with obstacles, and dropping the ball or hitting a fatal obstacle
+restarts the current level. Sessions: a visual baseline (video), a motor
+baseline (bubble popping, onsets synchronised across iPads), 3 × 5 min
+individual trials (learning the game alone), then 3 blocks of 5 × 5 min
+team trials, two teams of three, teams reshuffled between blocks (a
+tournament). Recorded, all time-synchronised: behaviour, surveys, EEG,
+EMG (thumbs) and IMU. What this asks of the builder:
+- **120 Hz** game state, no natural trials: resampling / decimation and
+  event segmentation (level restarts, trial and block boundaries) are
+  pipeline nodes; irregular time steps are already supported.
+- The press is a **3-option choice per step** (left, right, nothing).
+  "Nothing" is a real choice in teams (maximum upward speed is 1, each of
+  three players contributes at most 1/3, so free-riding is possible), less
+  so alone. Expect strong stickiness at 120 Hz (step 3).
+- **Social inputs** are an open question: players see under the beam
+  when their team-mates press, so a participant's model may take
+  team-mates' presses as inputs. Bindings must be relative ("team-mate
+  1's press"), and team membership changes per block.
+- The user's main interest is **EEG**: whether group identity modulates
+  synchrony. So trajectory outputs (prediction errors, precisions) per
+  time stamp, aligned to the recordings, matter as much as fitted
+  parameters. Per participant, per team and group levels are all
+  legitimate analyses.
+
 ## Upstream issues
 
 Found while porting and optimising. Since 2026-11-16 they are being passed
@@ -2403,11 +2545,11 @@ parents of continuous input nodes) is ported, with fixtures at pyhgf
 `1e6e98d7` and the P21 fix (`NetworkFixes`); hgf_deep has continuous
 layers (2026-11-12). pyhgf v0.3.3 (#478, Δt scaling on continuous state
 nodes) is ported (2026-11-13). The playground switches between relaxed
-and mean-field updates and has the eHGF MGF switch (2026-11-16). Next are
-real-time
-sources / LSL, vector node kinds on the GPU, a faster dp candidate
-search, and the choice-task follow-ups (stickiness, lapse rate, a model
-builder).
+and mean-field updates and has the eHGF MGF switch (2026-11-16). Phase 9, the model
+builder, started 2026-11-16 (LSL / real-time sources shelved until
+after it): the model document first, then expressions, the choice
+follow-ups, and the canvas in slices. Vector node kinds on the GPU and a
+faster dp candidate search can run alongside.
 
 ```sh
 cd hgf.dart

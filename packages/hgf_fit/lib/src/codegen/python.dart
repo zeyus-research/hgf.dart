@@ -472,6 +472,7 @@ final class PythonExport {
       responsesPerTrial: r,
       observed: data?.observed != null,
       timeSteps: data?.timeSteps != null,
+      names: spec.columnNames,
     );
     final b = StringBuffer()
       ..writeln(
