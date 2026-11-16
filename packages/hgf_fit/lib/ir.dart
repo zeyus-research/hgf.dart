@@ -5,6 +5,7 @@
 library;
 
 export 'src/ir/eval.dart';
+export 'src/ir/expr.dart';
 export 'src/ir/ir.dart';
 export 'src/ir/response.dart';
 export 'src/ir/trial.dart';

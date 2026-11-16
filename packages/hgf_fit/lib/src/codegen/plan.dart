@@ -39,9 +39,9 @@ final class AddNodes extends BuildCall {
       volatilityParents,
       volatilityChildren;
 
-  /// The value coupling to the new nodes' value children, unless
-  /// [customCoupling] names a custom one.
-  final CouplingFn coupling;
+  /// The value coupling to the new nodes' value children (a [CouplingFn]
+  /// or an [ExprCoupling]), unless [customCoupling] names a custom one.
+  final Coupling coupling;
   final String? customCoupling;
 
   /// Initial values that differ from the kind's defaults.
@@ -543,7 +543,7 @@ NetworkPlan _plan(
           volatilityChildren: earlier('volatility_children'),
           coupling: custom
               ? CouplingFn.linear
-              : CouplingFn.parse(node['coupling_fn'] as String),
+              : parseCoupling(node['coupling_fn'] as String),
           customCoupling: custom ? node['coupling_fn'] as String : null,
           parameters: params,
         );

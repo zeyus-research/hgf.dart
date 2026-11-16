@@ -11,6 +11,7 @@ import 'package:hgf_fit/codegen.dart';
 import 'package:hgf_fit/hgf_fit.dart';
 import 'package:test/test.dart';
 
+import 'src/fit_cases.dart';
 import 'src/fixture_networks.dart';
 import 'src/traj_hash.dart';
 
@@ -450,6 +451,28 @@ List<_Case> _fixtureCases() {
       ),
     ),
   );
+  // Expression couplings and readouts.
+  for (final c in fitCases()) {
+    if (!c.name.startsWith('Expr') && !c.name.startsWith('expression')) {
+      continue;
+    }
+    final s = c.subjects.first;
+    cases.add(
+      _Case(
+        c.name,
+        c.model.network,
+        ExportSpec(
+          model: const FitCodec().encodeModel(c.model),
+          data: ExportData(
+            inputs: s.inputs,
+            observed: s.observed,
+            responses: s.responses,
+          ),
+          fit: const ExportMap(restarts: 0),
+        ),
+      ),
+    );
+  }
   return cases;
 }
 

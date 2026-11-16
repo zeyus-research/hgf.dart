@@ -29,7 +29,8 @@ final class NetworkSpec {
 
   /// Build the network. A `coupling_fn` name is looked up in [couplings]
   /// first (your [CustomCoupling]s, by name), then among the named
-  /// [CouplingFn]s.
+  /// [CouplingFn]s; anything else is an expression in `x`
+  /// ([ExprCoupling], e.g. `"2 * tanh(x)"`).
   Network build({Map<String, Coupling> couplings = const {}}) {
     final net = (json['network'] as Map<String, Object?>?) ?? const {};
     final network = Network(
@@ -247,7 +248,7 @@ final class NetworkSpec {
 
   static Coupling _coupling(String? name, Map<String, Coupling> custom) {
     if (name == null) return CouplingFn.linear;
-    return custom[name] ?? CouplingFn.parse(name);
+    return custom[name] ?? parseCoupling(name);
   }
 
   static (List<int>, List<double>?)? _edge(Object? v) {

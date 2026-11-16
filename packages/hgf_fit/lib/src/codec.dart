@@ -1,6 +1,7 @@
 import 'package:hgf/hgf.dart';
 
 import 'empirical_bayes.dart' show populationPrior;
+import 'expr_readout.dart';
 import 'model.dart';
 import 'parameter.dart';
 import 'prior.dart';
@@ -201,6 +202,7 @@ final class FitCodec {
         field: NodeField.parse(json['field'] as String),
         inverseTemperature: readJsonDouble(json['inverseTemperature']),
       ),
+      'ExprReadout' => ExprReadout.fromJson(json),
       'ObservationSurprise' => ObservationSurprise(switch (json['function']) {
         'FirstLevelGaussianSurprise' => const FirstLevelGaussianSurprise(),
         'TotalGaussianSurprise' => const TotalGaussianSurprise(),

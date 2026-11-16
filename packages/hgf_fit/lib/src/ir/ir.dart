@@ -307,7 +307,10 @@ final Map<String, Partials> _rules = {
   'max': (a, s) => [sel(0, 1, ge(a[0], a[1])), sel(1, 0, ge(a[0], a[1]))],
   'min': (a, s) => [sel(0, 1, le(a[0], a[1])), sel(1, 0, le(a[0], a[1]))],
   'clamp': (a, s) => [sel(0, 1, gt(a[0], a[1]) & lt(a[0], a[2])), null, null],
-  'abs': (a, s) => [Call('sign', a)],
+  // abs'(0) = 1, as in JAX and ExprCoupling.
+  'abs': (a, s) => [sel(-1, 1, ge(a[0], zero))],
+  'sign': (a, s) => [null],
+  'sqrt': (a, s) => [Lit('0.5f', 0.5) / s],
   'lambertW0': (a, s) => [s / (a[0] * (one + s))],
   'logAddExp': (a, s) => [_sigm(a[0] - a[1]), _sigm(a[1] - a[0])],
 };

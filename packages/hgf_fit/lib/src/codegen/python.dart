@@ -1,8 +1,10 @@
 import 'package:hgf/hgf.dart';
 
 import '../codec.dart';
+import '../expr_readout.dart';
 import '../parameter.dart';
 import 'export_spec.dart';
+import 'expr_code.dart';
 import 'plan.dart';
 
 /// Generates a Python script that uses pyhgf (and PyMC to fit), so the
@@ -231,7 +233,13 @@ final class PythonExport {
     }
   }
 
-  static String _coupling(CouplingFn f) => switch (f) {
+  static String _coupling(Coupling c) => switch (c) {
+    final ExprCoupling e => 'lambda x: ${pyExpr(e.g, (v) => v)}',
+    final CouplingFn f => _named(f),
+    _ => throw StateError('$c'),
+  };
+
+  static String _named(CouplingFn f) => switch (f) {
     CouplingFn.linear => 'None',
     CouplingFn.relu => 'jax.nn.relu',
     CouplingFn.sigmoid => 'jax.nn.sigmoid',
@@ -253,6 +261,77 @@ final class PythonExport {
       );
     }
     return id;
+  }
+
+  /// `expr_readout_surprise(net, responses, *parameters)` for an
+  /// [ExprReadout]: its expressions in JAX.
+  static String exprReadoutFunction(ExprReadout r) {
+    final names = <String, String>{};
+    final used = <String>{'net', 'responses', 'values', 's', 'm', 'p', 'd'};
+    String unique(String stem) {
+      var id = pyIdentifier(stem);
+      while (!used.add(id)) {
+        id = '${id}_';
+      }
+      return id;
+    }
+
+    for (final b in r.beliefs.keys) {
+      names[b] = unique(b);
+    }
+    final params = [for (final p in r.parameters.keys) names[p] = unique(p)];
+    names[ExprReadout.responseVariable] = 'responses';
+    String py(Expr e) => pyExpr(e, (v) => names[v]!);
+    final what = switch (r.kind) {
+      ExprReadoutKind.choice => 'option k chosen with probability ∝ exp(vₖ)',
+      ExprReadoutKind.gaussian => 'responses ~ N(mean, 1 / precision)',
+      ExprReadoutKind.surprise => 'the surprise of each response',
+    };
+    final b = StringBuffer()
+      ..writeln(
+        'def expr_readout_surprise(net, responses'
+        '${[for (final p in params) ', $p'].join()}):',
+      )
+      ..writeln('    """hgf_fit\'s ExprReadout (${r.kind.name}): $what."""');
+    for (final MapEntry(:key, :value) in r.beliefs.entries) {
+      b.writeln(
+        '    ${names[key]} = net.node_trajectories[${value.node}]'
+        '["${value.field.pyhgfName}"]',
+      );
+    }
+    switch (r.kind) {
+      case ExprReadoutKind.choice:
+        b
+          ..writeln('    values = jnp.stack(')
+          ..writeln('        jnp.broadcast_arrays(')
+          ..writeln('            responses,');
+        for (final e in r.expressions) {
+          b.writeln('            ${py(e)},');
+        }
+        b
+          ..writeln('        )[1:],')
+          ..writeln('        1,')
+          ..writeln('    )')
+          ..writeln('    logp = jax.nn.log_softmax(values, axis=1)')
+          ..writeln('    k = jnp.nan_to_num(responses).astype(int)')
+          ..writeln(
+            '    s = -jnp.take_along_axis(logp, k[:, None], axis=1)[:, 0]',
+          );
+      case ExprReadoutKind.gaussian:
+        b
+          ..writeln('    m = ${py(r.expressions[0])}')
+          ..writeln('    p = ${py(r.expressions[1])}')
+          ..writeln('    d = responses - m')
+          ..writeln(
+            '    s = 0.5 * (jnp.log(2 * jnp.pi) - jnp.log(p) + p * d * d)',
+          );
+      case ExprReadoutKind.surprise:
+        b.writeln(
+          '    s = jnp.broadcast_to(${py(r.expressions[0])}, responses.shape)',
+        );
+    }
+    b.writeln('    return _total(s, responses)');
+    return b.toString();
   }
 
   /// The fit: `log_likelihood(params, data)` and `fit(data)`.
@@ -368,6 +447,7 @@ final class PythonExport {
         'SoftmaxReadout' => {
           'inverseTemperature': readJsonDouble(j['inverseTemperature']),
         },
+        'ExprReadout' => ExprReadout.fromJson(j).parameters,
         _ => const {},
       };
 
@@ -392,6 +472,10 @@ final class PythonExport {
         return 'softmax_surprise(net, data["responses"], '
             '[${options.join(', ')}], ${field()}, '
             '${values['inverseTemperature']})';
+      case 'ExprReadout':
+        final r = ExprReadout.fromJson(j);
+        return 'expr_readout_surprise(net, data["responses"]'
+            '${[for (final p in r.parameters.keys) ', ${values[p]}'].join()})';
       case 'ObservationSurprise':
         return switch (j['function']) {
           'FirstLevelGaussianSurprise' =>
@@ -503,6 +587,13 @@ final class PythonExport {
         "cell wasn't observed on that trial. An empty response is a missed one.",
       );
     final notes = [..._warnings];
+    if (spec.derivedColumns.isNotEmpty) {
+      notes.add(
+        'hgf.dart computed these columns from the data (the CSV must hold '
+        'them): '
+        '${[for (final MapEntry(:key, :value) in spec.derivedColumns.entries) '$key = $value'].join('; ')}.',
+      );
+    }
     if (plan.customCouplings.isNotEmpty || _stubs.isNotEmpty) {
       notes.add('Before running: fill in the stubs marked TODO.');
     }
@@ -550,6 +641,13 @@ final class PythonExport {
       ..writeln()
       ..writeln()
       ..write(_helpers);
+    if (spec.model?['response']
+        case {'type': 'ExprReadout'} && final Map<String, Object?> r) {
+      b
+        ..writeln()
+        ..writeln()
+        ..write(exprReadoutFunction(ExprReadout.fromJson(r)));
+    }
     if (fitCode != null) {
       b
         ..writeln()

@@ -2294,7 +2294,8 @@ fitting, export) reads it.
    - fit settings, and the canvas layout (ignored by the compiler).
    Test: every fixture and preset round-trips document ↔ `Network` /
    `HgfModel` bit for bit; the exports read named columns.
-2. [ ] **Expressions** for transform nodes and option values: a small
+2. [x] **Expressions** (done 2026-11-16, see "Expressions" below) for
+   transform nodes and option values: a small
    expression tree (arithmetic, exp/log/tanh/abs/clip, lags, a column
    of another participant) evaluated in Dart and printed as numpy/JAX
    and WGSL. Data transforms run once before filtering (not
@@ -2371,6 +2372,47 @@ candidate search.
   `NetworkFixes` (`jnp.where` semantics), as for P21.
 - Left for later steps: label decoding in the exported scripts (they read
   numbers), relative bindings (team-mates), and transforms (step 2).
+
+#### Expressions (2026-11-16): done
+
+- **`Expr`** (`package:hgf`): parse (`2 * tanh(x / 2)`, `a.mean > 0`,
+  `` `press left` ``, `press == 'left'`; `^`/`**`; errors carry the
+  offset for the builder's text fields), a canonical print that parses
+  back, closures for evaluation, and simplified symbolic derivatives.
+  Functions: exp, log, sqrt, abs, sign, tanh, sigmoid, min, max, clip,
+  where; data only: lag, diff, mate, missing, fill. `abs'(0) = 1`, as in
+  JAX, so exports agree at the kink.
+- **`ExprCoupling`**: a coupling written in `x`, with g′, g″, g‴
+  derived. `parseCoupling` reads a name or an expression (they can't be
+  confused: an expression reads `x`), so `Network.toJson`, `NetworkSpec`,
+  `NetworkPlan` and the model document carry it as their `coupling_fn`
+  string. Lowered to the IR (`lowerExpr`, new `sqrt`/`sign` rules and
+  a CPU `sqrt` opcode): GPU kernels (f32 err 4e-7), forward tangents,
+  reverse mode and exact Hessians all agree. Exports: Dart
+  `ExprCoupling('…')`, pyhgf `lambda x: …` in JAX; pyhgf runs them at the
+  parity tolerance (two synthetic networks joined `fixtureNetworks`).
+- **`ExprReadout`** (`hgf_fit`): `choice` (softmax over option values,
+  β written in), `gaussian` (mean and precision expressions) or
+  `surprise` (any surprise reading `response`); beliefs bound by name,
+  parameters fitted by name. Exact gradients from the symbolic
+  derivatives (checked against finite differences), `GpuExprReadout` on
+  the GPU, `FitCodec`, and exports (Dart constructor; pyhgf an
+  `expr_readout_surprise` in JAX, scoring within 1e-8 of hgf_fit). It is
+  what `ResponseModel.fn` was for; `fn` itself stays a stub in exports.
+- **Data transforms** in the model document (`DocTransform`,
+  `"transforms"`, applied by `CompiledDocument.transform` before
+  `subjects`): new columns from expressions over columns and earlier
+  transforms, per participant (`lag`, `diff`), labels compared as written
+  (`none` is a press, not a gap), missing cells stay missing.
+  `mate(x, k)`: the k-th other member of the participant's group
+  (`DocData.groupColumn`, e.g. team per block) at the same time value,
+  so reshuffled teams just work. The exports name derived columns in
+  their header (the CSV must hold them).
+- In a document's `ExprReadout`, `<address>.<field>` variables
+  (`ball_v.expected_mean`, `cat.2.mean`) bind themselves.
+- Left: printing transforms as pandas in the Python export; a previous
+  response in readout expressions (with step 3's stickiness); the
+  builder UI (expression fields with live errors) comes with the canvas.
 
 **Driving example: the user's 6-person hyperscanning experiment.** A
 ball balancing on a beam (an elevator): a participant lifts the left or
@@ -2547,8 +2589,9 @@ layers (2026-11-12). pyhgf v0.3.3 (#478, Δt scaling on continuous state
 nodes) is ported (2026-11-13). The playground switches between relaxed
 and mean-field updates and has the eHGF MGF switch (2026-11-16). Phase 9, the model
 builder, started 2026-11-16 (LSL / real-time sources shelved until
-after it): the model document first, then expressions, the choice
-follow-ups, and the canvas in slices. Vector node kinds on the GPU and a
+after it): the model document and expressions (couplings, readouts and
+data transforms) are done (2026-11-16); next the choice follow-ups, then
+the canvas in slices. Vector node kinds on the GPU and a
 faster dp candidate search can run alongside.
 
 ```sh

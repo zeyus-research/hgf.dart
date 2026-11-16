@@ -7,6 +7,7 @@ import 'trial.dart';
 export 'trial.dart'
     show
         GpuBinarySoftmax,
+        GpuExprReadout,
         GpuGaussianReadout,
         GpuResponse,
         GpuSoftmax,

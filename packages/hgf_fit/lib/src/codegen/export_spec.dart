@@ -15,6 +15,7 @@ final class ExportSpec {
     this.fit,
     this.title,
     this.columnNames,
+    this.derivedColumns = const {},
   }) : network =
            network ??
            (model?['network'] as Map<String, Object?>?) ??
@@ -47,6 +48,11 @@ final class ExportSpec {
   /// The CSV's column names, instead of the defaults (see
   /// [ExportData.columns]): a model document's named inputs and response.
   final ExportColumnNames? columnNames;
+
+  /// Columns a model document computes from the data before filtering
+  /// (name → expression, see `DocTransform`): the scripts read them as
+  /// columns, so the CSV must hold them (`CompiledDocument.transform`).
+  final Map<String, String> derivedColumns;
 
   late final NetworkPlan plan = NetworkPlan.fromJson(network);
 }

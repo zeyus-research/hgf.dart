@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'expr.dart';
 import 'math.dart';
 
 /// A value-coupling function `g` between a parent and its value children,
@@ -110,6 +111,106 @@ final class CustomCoupling implements Coupling {
   String toString() => 'CustomCoupling($name)';
 }
 
+/// A value-coupling function written as an expression in `x`
+/// (see [Expr]), e.g. `2 * tanh(x)` or `x / (1 + abs(x))`. Its derivatives
+/// are symbolic, so it serialises (as its source: `Network.toJson`,
+/// `NetworkSpec`), runs on the GPU kernels and gives exact gradients, which
+/// a [CustomCoupling]'s closures can't.
+///
+/// ```dart
+/// hgf.addNodes(valueChildren: [0], coupling: ExprCoupling('2 * tanh(x)'));
+/// ```
+final class ExprCoupling implements Coupling {
+  /// Parses [source]; it may read only `x` and no data-only function.
+  factory ExprCoupling(String source) => ExprCoupling.of(Expr.parse(source));
+
+  /// The coupling `g(x) = expression`.
+  factory ExprCoupling.of(Expr expression) {
+    final vars = expression.variables;
+    if (vars.any((v) => v != 'x')) {
+      throw FormatException(
+        'A coupling function reads only x, not '
+        '${vars.where((v) => v != 'x').join(', ')}',
+      );
+    }
+    if (expression.isDataOnly) {
+      throw const FormatException(
+        'A coupling function can\'t call data-only functions or use strings',
+      );
+    }
+    final d1 = expression.derivative('x');
+    final d2 = d1.derivative('x');
+    final d3 = d2.derivative('x');
+    return ExprCoupling._(expression, d1, d2, d3);
+  }
+
+  ExprCoupling._(this.g, this.dg, this.d2g, this.d3g)
+    : _f = g.compile1('x'),
+      _df = dg.compile1('x'),
+      _d2f = d2g.compile1('x'),
+      _d3f = d3g.compile1('x');
+
+  /// g and its first three derivatives.
+  final Expr g, dg, d2g, d3g;
+
+  final double Function(double) _f, _df, _d2f, _d3f;
+
+  /// The canonical source of [g] (what `Network.toJson` writes).
+  String get source => g.toString();
+
+  @override
+  double f(double x) => _f(x);
+
+  @override
+  double df(double x) => _df(x);
+
+  @override
+  double d2f(double x) => _d2f(x);
+
+  @override
+  double d3f(double x) => _d3f(x);
+
+  @override
+  bool operator ==(Object other) => other is ExprCoupling && other.g == g;
+
+  @override
+  int get hashCode => g.hashCode;
+
+  @override
+  String toString() => 'ExprCoupling($source)';
+}
+
+/// The coupling named or written [text]: a [CouplingFn]'s pyhgf name
+/// (`linear`, `identity`, `tanh`, ...), else an [ExprCoupling] in `x`.
+/// A name never parses as an expression (an expression reads `x`), so the
+/// two can't be confused. Throws [ArgumentError] when it is neither.
+Coupling parseCoupling(String text) {
+  final t = text.trim();
+  if (t == 'identity') return CouplingFn.linear;
+  for (final fn in CouplingFn.values) {
+    if (fn.pyhgfName == t) return fn;
+  }
+  try {
+    return ExprCoupling(t);
+  } on FormatException catch (e) {
+    throw ArgumentError.value(
+      text,
+      'coupling',
+      'Neither a coupling function (${CouplingFn.values.map((v) => v.pyhgfName).join(', ')}) '
+          'nor an expression in x: ${e.message}',
+    );
+  }
+}
+
+/// The text [parseCoupling] reads back for [c]: a [CouplingFn]'s name, an
+/// [ExprCoupling]'s source, or a [CustomCoupling]'s name.
+String couplingText(Coupling c) => switch (c) {
+  final CouplingFn f => f.pyhgfName,
+  final ExprCoupling e => e.source,
+  final CustomCoupling c => c.name,
+  _ => throw UnsupportedError('Cannot serialise the coupling ${c.runtimeType}'),
+};
+
 /// The named coupling functions, with closed-form derivatives. Names match
 /// pyhgf/rshgf (`linear`/`identity`, `relu`, `sigmoid`, `tanh`,
 /// `leaky_relu`, `gelu`).
@@ -216,23 +317,4 @@ enum CouplingFn implements Coupling {
 
 double _sigmoid(double x) => sigmoid(x);
 
-/// tanh (dart:math has none), Cephes' scheme: a rational approximation
-/// below 0.625, where `1 − 2/(e^{2|x|} + 1)` would cancel, and that
-/// formula above it. Within 1.3 ulp of mpmath; 15 ns on AOT. (The previous
-/// expm1-based form reached 4.5 ulp and cost an exp and a log, 28 ns.)
-double _tanh(double x) {
-  final ax = x.abs();
-  if (ax < 0.625) {
-    final z = x * x;
-    final p =
-        (-9.64399179425052238628e-1 * z - 9.92877231001918586564e1) * z -
-        1.61468768441708447952e3;
-    final q =
-        ((z + 1.12811678491632931402e2) * z + 2.23548839060100448583e3) * z +
-        4.84406305325125486048e3;
-    return x + x * (z * p / q);
-  }
-  if (ax > 22.0) return x.sign;
-  final t = 1.0 - 2.0 / (fastExp(2.0 * ax) + 1.0);
-  return x < 0 ? -t : t;
-}
+double _tanh(double x) => hgfTanh(x);

@@ -10,6 +10,8 @@ import 'package:hgf/hgf.dart';
 import 'package:hgf_fit/hgf_fit.dart';
 import 'package:test/test.dart';
 
+import 'src/fit_cases.dart';
+
 Float64List _binaryInput() => Float64List.fromList([
   for (final l in File('data/binary_input.txt').readAsLinesSync())
     if (l.trim().isNotEmpty) double.parse(l),
@@ -514,6 +516,14 @@ void main() {
         [-1.5, 1.0],
       ]);
     });
+
+    for (final c in fitCases().where(
+      (c) => c.name.startsWith('Expr') || c.name.startsWith('expression'),
+    )) {
+      test('${c.name} (finite differences)', () {
+        _checkGradients(c.model, c.subjects, c.points);
+      });
+    }
 
     test('ResponseModel.fn with a tangent form', () {
       // Decisions with a lapse rate: p = ε / 2 + (1 − ε) μ̂.

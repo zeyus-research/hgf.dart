@@ -2,7 +2,9 @@ import 'package:hgf/hgf.dart';
 
 import '../codec.dart';
 import '../parameter.dart';
+import '../expr_readout.dart';
 import 'export_spec.dart';
+import 'expr_code.dart';
 import 'plan.dart';
 
 /// Generates Dart code that uses `package:hgf` (and `package:hgf_fit`).
@@ -82,8 +84,11 @@ final class DartExport {
             ],
           if (c.customCoupling case final name?)
             'coupling: ${_couplingStub(name)}'
-          else if (c.coupling != CouplingFn.linear)
-            'coupling: CouplingFn.${c.coupling.name}',
+          else if (c.coupling case final ExprCoupling e)
+            'coupling: ExprCoupling(${dartString(e.source)})'
+          else if (c.coupling case final CouplingFn f
+              when f != CouplingFn.linear)
+            'coupling: CouplingFn.${f.name}',
           for (final MapEntry(:key, :value) in c.parameters.entries)
             if (_namedParameters.contains(key))
               '${key.name}: ${dartDouble(value)}',
@@ -358,6 +363,33 @@ final class DartExport {
           'options: [${[for (final o in options) '{${o.map((t) => '${t.node}: ${dartDouble(t.weight)}').join(', ')}}'].join(', ')}]',
           ...rest,
         ], indent);
+      case 'ExprReadout':
+        final r = ExprReadout.fromJson(j);
+        final beliefs = [
+          for (final MapEntry(:key, :value) in r.beliefs.entries)
+            '${dartString(key)}: (node: ${value.node}, field: NodeField.${value.field.name})',
+        ];
+        final named = [
+          if (beliefs.isNotEmpty) 'beliefs: {${beliefs.join(', ')}}',
+          if (r.parameters.isNotEmpty)
+            'parameters: {${[for (final MapEntry(:key, :value) in r.parameters.entries) '${dartString(key)}: ${dartDouble(value)}'].join(', ')}}',
+        ];
+        final src = [for (final e in r.expressions) dartString('$e')];
+        return switch (r.kind) {
+          ExprReadoutKind.choice => _call('ExprReadout.choice', [
+            '[${src.join(', ')}]',
+            ...named,
+          ], indent),
+          ExprReadoutKind.gaussian => _call('ExprReadout.gaussian', [
+            'mean: ${src[0]}',
+            'precision: ${src[1]}',
+            ...named,
+          ], indent),
+          ExprReadoutKind.surprise => _call('ExprReadout.surprise', [
+            src[0],
+            ...named,
+          ], indent),
+        };
       case 'ObservationSurprise':
         final fn = j['function'] as String;
         const builtIn = {
@@ -444,6 +476,15 @@ final class DartExport {
         "// cell wasn't observed on that trial. An empty response is a "
         'missed one.',
       );
+    if (spec.derivedColumns.isNotEmpty) {
+      b.writeln(
+        '//\n// hgf.dart computed these columns from the data (the CSV must '
+        'hold them):',
+      );
+      for (final MapEntry(:key, :value) in spec.derivedColumns.entries) {
+        b.writeln('//   $key = $value');
+      }
+    }
     if (plan.customCouplings.isNotEmpty || _stubs.isNotEmpty) {
       b.writeln('//\n// Before running: fill in the stubs marked TODO.');
     }

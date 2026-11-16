@@ -34,6 +34,7 @@ const _and = 34, _or = 35, _not = 36, _finite = 37;
 const _acc = 38; // d += a
 const _accSel = 39; // d += c ? a : 0, operands (a, c)
 const _zero = 40;
+const _sqrt = 41;
 
 const _calls = <String, int>{
   'exp': _exp,
@@ -55,6 +56,7 @@ const _calls = <String, int>{
   'clamp': _clamp,
   'abs': _abs,
   'sign': _sign,
+  'sqrt': _sqrt,
   'lambertW0': _lambertW,
   'logAddExp': _logAddExp,
 };
@@ -733,12 +735,18 @@ final class IrReverse {
           for (var i = 0; i < w; i++) {
             final x = r[a + i];
             r[d + i] = x.abs();
-            dr[d + i] = x.sign * dr[a + i];
+            dr[d + i] = x >= 0 ? dr[a + i] : -dr[a + i];
           }
         case _sign:
           for (var i = 0; i < w; i++) {
             r[d + i] = r[a + i].sign;
             dr[d + i] = 0.0;
+          }
+        case _sqrt:
+          for (var i = 0; i < w; i++) {
+            final v = math.sqrt(r[a + i]);
+            r[d + i] = v;
+            dr[d + i] = 0.5 * dr[a + i] / v;
           }
         case _lambertW:
           for (var i = 0; i < w; i++) {
@@ -921,6 +929,10 @@ final class IrReverse {
         case _sign:
           for (var i = 0; i < w; i++) {
             r[d + i] = r[a + i].sign;
+          }
+        case _sqrt:
+          for (var i = 0; i < w; i++) {
+            r[d + i] = math.sqrt(r[a + i]);
           }
         case _lambertW:
           for (var i = 0; i < w; i++) {

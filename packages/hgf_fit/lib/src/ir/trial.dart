@@ -1,5 +1,6 @@
 import 'package:hgf/hgf.dart' hide lambertW0, logAddExp;
 
+import 'expr.dart';
 import 'ir.dart';
 
 /// The fields every node has a slot for, in slot order.
@@ -110,6 +111,32 @@ final class GpuSoftmax extends GpuResponse {
 
   @override
   List<double> get defaults => [inverseTemperature];
+
+  @override
+  bool get usesResponses => true;
+}
+
+/// `ExprReadout`: expressions of the beliefs and parameters; [kind] is
+/// `choice` (softmax over the option values), `gaussian` (mean, precision)
+/// or `surprise` (which also reads `response`). Parameters: [parameters],
+/// in order.
+final class GpuExprReadout extends GpuResponse {
+  GpuExprReadout({
+    required this.kind,
+    required List<Expr> expressions,
+    required Map<String, ({int node, NodeField field})> beliefs,
+    required Map<String, double> parameters,
+  }) : expressions = List.unmodifiable(expressions),
+       beliefs = Map.unmodifiable(beliefs),
+       parameters = Map.unmodifiable(parameters);
+
+  final String kind;
+  final List<Expr> expressions;
+  final Map<String, ({int node, NodeField field})> beliefs;
+  final Map<String, double> parameters;
+
+  @override
+  List<double> get defaults => parameters.values.toList();
 
   @override
   bool get usesResponses => true;
@@ -237,6 +264,13 @@ final class TrialCompiler {
             throw ArgumentError.value(options, 'options', 'An option is empty');
           }
           o.keys.forEach(_checkNode);
+        }
+      case GpuExprReadout(:final beliefs):
+        for (final b in beliefs.values) {
+          _checkNode(b.node);
+          if (!gpuNodeFields.contains(b.field)) {
+            throw UnsupportedError('No GPU slot for ${b.field}');
+          }
         }
       case _ObservationResponse(:final which):
         if (which == 'first' &&
@@ -695,11 +729,14 @@ final class _Pass {
       net.volatilityParentsOf(i).isNotEmpty;
   bool get meanField => net.meanFieldUpdates;
 
-  CouplingFn couplingFn(int parent) {
+  /// The value coupling of [parent]: a [CouplingFn] or an [ExprCoupling]
+  /// (a [CustomCoupling]'s closures can't be lowered).
+  Coupling couplingFn(int parent) {
     final cf = net.couplingOf(parent);
-    if (cf is CouplingFn) return cf;
+    if (cf is CouplingFn || cf is ExprCoupling) return cf;
     throw UnsupportedError(
-      'Custom coupling functions have no GPU kernel (node $parent)',
+      'Custom coupling functions have no GPU kernel (node $parent); write '
+      'it as an ExprCoupling',
     );
   }
 
@@ -749,7 +786,25 @@ final class _Pass {
   }
 
   /// `g(x)`, `g'(x)`, `g''(x)` of [fn].
-  Ex g(CouplingFn fn, Ex x) => switch (fn) {
+  Ex g(Coupling c, Ex x) => switch (c) {
+    final ExprCoupling e => lowerExpr(e.g, (_) => x),
+    final CouplingFn fn => _g(fn, x),
+    _ => throw StateError('$c'),
+  };
+
+  Ex dg(Coupling c, Ex x) => switch (c) {
+    final ExprCoupling e => lowerExpr(e.dg, (_) => x),
+    final CouplingFn fn => _dg(fn, x),
+    _ => throw StateError('$c'),
+  };
+
+  Ex d2g(Coupling c, Ex x) => switch (c) {
+    final ExprCoupling e => lowerExpr(e.d2g, (_) => x),
+    final CouplingFn fn => _d2g(fn, x),
+    _ => throw StateError('$c'),
+  };
+
+  Ex _g(CouplingFn fn, Ex x) => switch (fn) {
     CouplingFn.linear => x,
     CouplingFn.relu => max(x, zero),
     CouplingFn.sigmoid => sigm(x),
@@ -758,7 +813,7 @@ final class _Pass {
     CouplingFn.gelu => call('gelu', [x]),
   };
 
-  Ex dg(CouplingFn fn, Ex x) => switch (fn) {
+  Ex _dg(CouplingFn fn, Ex x) => switch (fn) {
     CouplingFn.linear => one,
     CouplingFn.relu => sel(zero, one, gt(x, zero)),
     CouplingFn.sigmoid => call('dsigm', [x]),
@@ -767,7 +822,7 @@ final class _Pass {
     CouplingFn.gelu => call('dgelu', [x]),
   };
 
-  Ex d2g(CouplingFn fn, Ex x) => switch (fn) {
+  Ex _d2g(CouplingFn fn, Ex x) => switch (fn) {
     CouplingFn.linear || CouplingFn.relu || CouplingFn.leakyRelu => zero,
     CouplingFn.sigmoid => call('d2sigm', [x]),
     CouplingFn.tanh => call('d2tanh', [x]),
@@ -1454,6 +1509,47 @@ final class _Pass {
             sel(zero, z[k], eq(resp, lit(k.toDouble()))),
         ]);
         s = sel(zero, lse - chosen, present);
+      case GpuExprReadout(
+        :final kind,
+        :final expressions,
+        :final beliefs,
+        :final parameters,
+      ):
+        final present = letCond('present', Cond(source.responsePresent()));
+        final resp = let('resp', Lit(source.response()));
+        final params = parameters.keys.toList();
+        Ex variable(String name) {
+          if (beliefs[name] case final b?) return r(b.node, b.field);
+          final j = params.indexOf(name);
+          if (j >= 0) return rp(j);
+          if (name == 'response') return resp;
+          throw StateError('Unbound variable $name');
+        }
+
+        final values = [
+          for (var k = 0; k < expressions.length; k++)
+            let('ev$k', lowerExpr(expressions[k], variable)),
+        ];
+        switch (kind) {
+          case 'choice':
+            var lse = values.first;
+            for (var k = 1; k < values.length; k++) {
+              lse = let('lse$k', logAddExp(lse, values[k]));
+            }
+            final chosen = sum([
+              for (var k = 0; k < values.length; k++)
+                sel(zero, values[k], eq(resp, lit(k.toDouble()))),
+            ]);
+            s = sel(zero, lse - chosen, present);
+          case 'gaussian':
+            s = sel(
+              zero,
+              gaussianSurprise(resp, values[0], values[1]),
+              present,
+            );
+          default:
+            s = sel(zero, values[0], present);
+        }
     }
     final sv = let('s', s);
     if (ssa) {

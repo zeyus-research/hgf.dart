@@ -5,7 +5,15 @@
 library;
 
 export 'src/csv.dart' show CsvData;
-export 'src/coupling.dart' show Coupling, CouplingFn, CustomCoupling;
+export 'src/coupling.dart'
+    show
+        Coupling,
+        CouplingFn,
+        CustomCoupling,
+        ExprCoupling,
+        couplingText,
+        parseCoupling;
+export 'src/expr.dart';
 export 'src/math.dart'
     show
         binarySurprise,

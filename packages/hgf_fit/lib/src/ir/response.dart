@@ -4,6 +4,7 @@ import 'package:hgf/hgf.dart'
         FirstLevelGaussianSurprise,
         TotalGaussianSurprise;
 
+import '../expr_readout.dart';
 import '../response_model.dart';
 import 'trial.dart';
 
@@ -17,6 +18,18 @@ GpuResponse irResponseOf(ResponseModel response) => switch (response) {
       options: options,
       field: field,
       inverseTemperature: inverseTemperature,
+    ),
+  ExprReadout(
+    :final kind,
+    :final expressions,
+    :final beliefs,
+    :final parameters,
+  ) =>
+    GpuExprReadout(
+      kind: kind.name,
+      expressions: expressions,
+      beliefs: beliefs,
+      parameters: parameters,
     ),
   BinarySoftmaxReadout(:final node, :final inverseTemperature) =>
     GpuBinarySoftmax(node: node, inverseTemperature: inverseTemperature),

@@ -216,6 +216,45 @@ List<FitCase> fitCases() {
     ));
   }
   {
+    // An expression coupling (ExprCoupling): symbolic g', g'', g''' on the
+    // CPU, lowered to the IR for the GPU and reverse mode.
+    final model = HgfModel(
+      network: Network()
+        ..addNodes()
+        ..addNodes(
+          valueChildren: [0],
+          coupling: ExprCoupling('2 * tanh(x / 2) + 0.1 * sqrt(1 + x^2)'),
+          tonicVolatility: -3,
+        )
+        ..addNodes(volatilityChildren: [1], tonicVolatility: -4),
+      response: const ObservationSurprise(TotalGaussianSurprise()),
+      parameters: [
+        Parameter.node(
+          'omega2',
+          1,
+          NodeField.tonicVolatility,
+          prior: const Normal(-3, 2),
+        ),
+        Parameter.node(
+          'omega3',
+          2,
+          NodeField.tonicVolatility,
+          prior: const Normal(-4, 2),
+        ),
+        Parameter.valueCoupling('alpha', 1, 0, prior: const Normal(1, 0.3)),
+      ],
+    );
+    cases.add((
+      name: 'expression coupling: total surprise, 3 levels',
+      model: model,
+      subjects: [Subject(inputs: noisy)],
+      points: [
+        [-3.0, -4.0, 1.0],
+        [-2.0, -5.0, 0.7],
+      ],
+    ));
+  }
+  {
     final d = walk(200, math.Random(5));
     cases.add((
       name: 'eHGF perceptual: total surprise, value coupling, prior mean',
@@ -369,6 +408,147 @@ List<FitCase> fitCases() {
       points: [
         [-2.5, 4.0],
         [-1.5, 1.0],
+      ],
+    ));
+  }
+  {
+    // The bandit with an ExprReadout: a bias towards arm 2, β, and a
+    // nonlinear value (tanh of the difference).
+    final net = Network()..addNodes(kind: NodeKind.binaryState, nNodes: 4);
+    for (var i = 0; i < 4; i++) {
+      net.addNodes(valueChildren: [i], tonicVolatility: -2.5);
+    }
+    final model = HgfModel(
+      network: net,
+      response: ExprReadout.choice(
+        ['beta * tanh(w1 - l1)', 'beta * (w2 - l2) + bias'],
+        beliefs: {
+          'w1': (node: 0, field: NodeField.expectedMean),
+          'l1': (node: 1, field: NodeField.expectedMean),
+          'w2': (node: 2, field: NodeField.expectedMean),
+          'l2': (node: 3, field: NodeField.expectedMean),
+        },
+        parameters: {'beta': 1.0, 'bias': 0.0},
+      ),
+      parameters: [
+        Parameter(
+          'omega',
+          targets: [
+            for (final n in [4, 5, 6, 7])
+              NodeTarget(n, NodeField.tonicVolatility),
+          ],
+          prior: const Normal(-2.5, 2),
+        ),
+        Parameter.response('beta', prior: const LogNormal(1, 1)),
+        Parameter.response('bias', prior: const Normal(0, 1)),
+      ],
+    );
+    final rng = math.Random(18);
+    final outcomes = Float64List.fromList([
+      for (var t = 0; t < 160; t++)
+        for (final p in [(t ~/ 40).isEven ? 0.8 : 0.2, 0.5, 0.3, 0.5])
+          rng.nextDouble() < p ? 1.0 : 0.0,
+    ]);
+    final sims = model.simulateChoices(
+      [Subject(inputs: outcomes)],
+      [
+        [-2.5, 4.0, 0.3],
+      ],
+      rng,
+      reveals: const [
+        [0, 1],
+        [2, 3],
+      ],
+    );
+    sims[0].responses![30] = double.nan;
+    cases.add((
+      name: 'ExprReadout choice: bandit with bias and tanh value',
+      model: model,
+      subjects: sims,
+      points: [
+        [-2.5, 4.0, 0.3],
+        [-1.5, 1.0, -0.5],
+      ],
+    ));
+  }
+  {
+    // ExprReadout.gaussian: the response reads a mix of two levels, with
+    // a log-precision parameter.
+    final model = HgfModel(
+      network: Network()
+        ..addNodes(precision: 4)
+        ..addNodes(valueChildren: [0], tonicVolatility: -3)
+        ..addNodes(volatilityChildren: [1], tonicVolatility: -4),
+      response: ExprReadout.gaussian(
+        mean: 'mu1 + w * sigmoid(mu2)',
+        precision: 'exp(logPrecision)',
+        beliefs: {
+          'mu1': (node: 1, field: NodeField.expectedMean),
+          'mu2': (node: 2, field: NodeField.mean),
+        },
+        parameters: {'w': 0.5, 'logPrecision': 1.0},
+      ),
+      parameters: [
+        Parameter.node(
+          'omega2',
+          1,
+          NodeField.tonicVolatility,
+          prior: const Normal(-3, 2),
+        ),
+        Parameter.response('w', prior: const Normal(0, 1)),
+        Parameter.response('logPrecision', prior: const Normal(0, 2)),
+      ],
+    );
+    final sim = model.simulate(
+      [Subject(inputs: data)],
+      [
+        [-3.0, 0.5, 1.0],
+      ],
+      math.Random(14),
+    )[0];
+    sim[17] = double.nan;
+    cases.add((
+      name: 'ExprReadout gaussian: mean and precision expressions',
+      model: model,
+      subjects: [Subject(inputs: data, responses: sim)],
+      points: [
+        [-3.0, 0.5, 1.0],
+        [-2.0, -0.3, 0.2],
+      ],
+    ));
+  }
+  {
+    // ExprReadout.surprise: a Laplace (double-exponential) response.
+    final model = HgfModel(
+      network: Network()
+        ..addNodes(precision: 4)
+        ..addNodes(valueChildren: [0], tonicVolatility: -3),
+      response: ExprReadout.surprise(
+        'abs(response - mu) / b + log(2 * b)',
+        beliefs: {'mu': (node: 1, field: NodeField.expectedMean)},
+        parameters: {'b': 0.5},
+      ),
+      parameters: [
+        Parameter.node(
+          'omega2',
+          1,
+          NodeField.tonicVolatility,
+          prior: const Normal(-3, 2),
+        ),
+        Parameter.response('b', prior: const LogNormal(0, 1)),
+      ],
+    );
+    final rng = math.Random(15);
+    final responses = Float64List.fromList([
+      for (final x in data) x + 0.3 * (rng.nextDouble() - 0.5),
+    ]);
+    cases.add((
+      name: 'ExprReadout surprise: Laplace responses',
+      model: model,
+      subjects: [Subject(inputs: data, responses: responses)],
+      points: [
+        [-3.0, 0.5],
+        [-2.0, 0.2],
       ],
     ));
   }

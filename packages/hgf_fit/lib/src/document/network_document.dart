@@ -119,7 +119,8 @@ final class ScalarNode extends DocNode {
   final NodeKind kind;
 
   /// The value coupling to this node's value children: a [CouplingFn]'s
-  /// pyhgf name, or a custom coupling's name when [customCoupling].
+  /// pyhgf name, an expression in `x` ([ExprCoupling], e.g.
+  /// `2 * tanh(x)`), or a custom coupling's name when [customCoupling].
   final String coupling;
   final bool customCoupling;
 
@@ -462,7 +463,7 @@ final class NetworkDocument {
               ScalarNode(
                 me,
                 kind: call.kind,
-                coupling: call.customCoupling ?? call.coupling.pyhgfName,
+                coupling: call.customCoupling ?? couplingText(call.coupling),
                 customCoupling: call.customCoupling != null,
                 params: call.parameters,
               ),
@@ -671,7 +672,7 @@ final class NetworkDocument {
           }
           final named = node.customCoupling
               ? null
-              : CouplingFn.parse(node.coupling);
+              : parseCoupling(node.coupling);
           calls.add(
             AddNodes(
               first: f,

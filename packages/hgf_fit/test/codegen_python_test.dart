@@ -20,6 +20,7 @@ import 'package:hgf_fit/codegen.dart';
 import 'package:hgf_fit/hgf_fit.dart';
 import 'package:test/test.dart';
 
+import 'src/fit_cases.dart';
 import 'src/fixture_networks.dart';
 
 final String _python = File('../../tool/parity/.venv/bin/python').absolute.path;
@@ -186,6 +187,83 @@ void main() {
       contains('pyhgf resets the tonic_volatility of input node 0 to 0'),
     );
   });
+
+  test(
+    'exported expression couplings and readouts score as hgf_fit',
+    () async {
+      _dir.createSync(recursive: true);
+      final cases = [
+        for (final c in fitCases())
+          if (c.name.startsWith('Expr') || c.name.startsWith('expression')) c,
+      ];
+      final want = <List<double>>[];
+      final harness = StringBuffer()
+        ..writeln('import importlib.util, json, sys')
+        ..writeln('out = []');
+      for (var i = 0; i < cases.length; i++) {
+        final c = cases[i];
+        final s = c.subjects.first;
+        File('${_dir.path}/expr_$i.py').writeAsStringSync(
+          PythonExport(
+            ExportSpec(
+              model: const FitCodec().encodeModel(c.model),
+              data: ExportData(
+                inputs: s.inputs,
+                observed: s.observed,
+                responses: s.responses,
+              ),
+              fit: const ExportMap(),
+            ),
+          ).script(),
+        );
+        final nll = Float64List(1);
+        final rows = <double>[];
+        for (final x in c.points) {
+          c.model.negLogPosterior(
+            [s],
+            Int32List(1),
+            c.model.toUnconstrained(x),
+            Float64List(1),
+            negLogLikelihood: nll,
+          );
+          rows.add(nll[0]);
+        }
+        want.add(rows);
+        harness
+          ..writeln(
+            'spec = importlib.util.spec_from_file_location("expr_$i", '
+            '"${_dir.absolute.path}/expr_$i.py")',
+          )
+          ..writeln('m = importlib.util.module_from_spec(spec)')
+          ..writeln('spec.loader.exec_module(m)')
+          ..writeln('d = m.embedded_data()')
+          ..writeln(
+            'out.append([float(m.negative_log_likelihood('
+            'dict(zip(${jsonEncode(c.model.names)}, x)), d)) '
+            'for x in ${jsonEncode(c.points)}])',
+          );
+      }
+      harness.writeln('json.dump(out, sys.stdout)');
+      File('${_dir.path}/expr_harness.py').writeAsStringSync('$harness');
+      final run = await Process.run(_python, [
+        '${_dir.absolute.path}/expr_harness.py',
+      ]);
+      expect(run.exitCode, 0, reason: '${run.stdout}\n${run.stderr}');
+      final got = jsonDecode(run.stdout as String) as List<Object?>;
+      for (var i = 0; i < cases.length; i++) {
+        final g = (got[i] as List<Object?>).cast<num>();
+        for (var j = 0; j < want[i].length; j++) {
+          expect(
+            g[j],
+            closeTo(want[i][j], 1e-8 * (1 + want[i][j].abs())),
+            reason: '${cases[i].name}, point $j',
+          );
+        }
+      }
+    },
+    skip: venv ? false : 'needs tool/parity/.venv (uv sync)',
+    timeout: const Timeout(Duration(minutes: 5)),
+  );
 
   test(
     'the exported PyMC fit finds hgf_fit\'s MAP estimate',

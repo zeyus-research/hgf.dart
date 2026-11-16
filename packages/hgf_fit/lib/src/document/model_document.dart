@@ -5,8 +5,10 @@ import 'package:hgf/hgf.dart';
 import '../codec.dart';
 import '../codegen/export_spec.dart';
 import '../codegen/plan.dart';
+import '../expr_readout.dart';
 import '../model.dart';
 import 'network_document.dart';
+import 'transforms.dart';
 
 /// A named input: the network's input node [node] (an address), read from
 /// the data's [columns].
@@ -141,25 +143,35 @@ final class DocOutput {
 /// (in order of first appearance; rows stay in file order). Time steps
 /// come from [timeStepColumn], or from the differences of
 /// [timeColumn] (the first row gets the second row's step), or are 1.
+/// [groupColumn] says which group (e.g. team, per block) a participant's
+/// row belongs to: the data transforms' `mate(x, k)` reads the k-th other
+/// member of it, at the same time (the same [timeColumn] value, or without
+/// one the same position among the participant's rows in that group).
 final class DocData {
-  const DocData({this.participantColumn, this.timeColumn, this.timeStepColumn})
-    : assert(
-        timeColumn == null || timeStepColumn == null,
-        'Give a time column or a time-step column, not both',
-      );
+  const DocData({
+    this.participantColumn,
+    this.timeColumn,
+    this.timeStepColumn,
+    this.groupColumn,
+  }) : assert(
+         timeColumn == null || timeStepColumn == null,
+         'Give a time column or a time-step column, not both',
+       );
 
-  final String? participantColumn, timeColumn, timeStepColumn;
+  final String? participantColumn, timeColumn, timeStepColumn, groupColumn;
 
   Map<String, Object?> toJson() => {
     'participant_column': ?participantColumn,
     'time_column': ?timeColumn,
     'time_step_column': ?timeStepColumn,
+    'group_column': ?groupColumn,
   };
 
   factory DocData.fromJson(Map<String, Object?> json) => DocData(
     participantColumn: json['participant_column'] as String?,
     timeColumn: json['time_column'] as String?,
     timeStepColumn: json['time_step_column'] as String?,
+    groupColumn: json['group_column'] as String?,
   );
 }
 
@@ -270,12 +282,14 @@ final class ModelDocument {
     this.response,
     List<Map<String, Object?>> parameters = const [],
     List<DocOutput> outputs = const [],
+    List<DocTransform> transforms = const [],
     this.data = const DocData(),
     this.fit = const DocFit(),
     Map<String, Object?> layout = const {},
   }) : inputs = List.unmodifiable(inputs),
        parameters = List.unmodifiable(parameters),
        outputs = List.unmodifiable(outputs),
+       transforms = List.unmodifiable(transforms),
        layout = Map.unmodifiable(layout);
 
   /// The format tag of [toJson].
@@ -290,6 +304,10 @@ final class ModelDocument {
   final DocResponse? response;
   final List<Map<String, Object?>> parameters;
   final List<DocOutput> outputs;
+
+  /// Columns computed from the data before filtering (see [DocTransform]),
+  /// in order; inputs, the response and the data layout may name them.
+  final List<DocTransform> transforms;
   final DocData data;
   final DocFit fit;
   final Map<String, Object?> layout;
@@ -387,6 +405,10 @@ final class ModelDocument {
         for (final o in (json['outputs'] as List<Object?>?) ?? const [])
           DocOutput.fromJson(o as Map<String, Object?>),
       ],
+      transforms: [
+        for (final t in (json['transforms'] as List<Object?>?) ?? const [])
+          DocTransform.fromJson(t as Map<String, Object?>),
+      ],
       data: switch (json['data']) {
         final Map<String, Object?> d => DocData.fromJson(d),
         _ => const DocData(),
@@ -408,6 +430,8 @@ final class ModelDocument {
     if (response case final r?) 'response': r.toJson(),
     if (parameters.isNotEmpty) 'parameters': parameters,
     if (outputs.isNotEmpty) 'outputs': [for (final o in outputs) o.toJson()],
+    if (transforms.isNotEmpty)
+      'transforms': [for (final t in transforms) t.toJson()],
     if (data.toJson() case final d when d.isNotEmpty) 'data': d,
     'fit': fit.toJson(),
     if (layout.isNotEmpty) 'layout': layout,
@@ -464,7 +488,7 @@ final class ModelDocument {
       model = HgfModel(
         network: net,
         response: codec.decodeResponse(
-          _remap(r.readout, toIndex) as Map<String, Object?>,
+          _remap(_bindBeliefs(r.readout, a), toIndex) as Map<String, Object?>,
         ),
         parameters: codec.decodeParameters([
           for (final p in parameters) _remap(p, toIndex),
@@ -539,9 +563,23 @@ final class CompiledDocument {
     };
   }
 
-  /// The subjects in [csv], read by the document's column names (see
-  /// [DocInput], [DocResponse] and [DocData]).
-  List<Subject> subjects(CsvData csv) {
+  /// [csv] with the document's transforms' columns appended (see
+  /// [DocTransform]); [subjects] reads this.
+  CsvData transform(CsvData csv) {
+    final d = document.data;
+    return applyTransforms(
+      csv,
+      document.transforms,
+      participantColumn: d.participantColumn,
+      groupColumn: d.groupColumn,
+      timeColumn: d.timeColumn,
+    );
+  }
+
+  /// The subjects in [data], read by the document's column names (see
+  /// [DocInput], [DocResponse] and [DocData]), after the transforms.
+  List<Subject> subjects(CsvData data) {
+    final csv = transform(data);
     final header = csv.header;
     int col(String name, String what) {
       final c = header.indexOf(name);
@@ -745,6 +783,9 @@ final class CompiledDocument {
     fit: model == null ? null : document.fit.exportFit,
     title: document.name,
     columnNames: columnNames,
+    derivedColumns: {
+      for (final t in document.transforms) t.name: '${t.expression}',
+    },
   );
 
   /// The CSV columns of the exports: the named inputs' columns, their
@@ -787,6 +828,53 @@ final class CompiledDocument {
       timeStep: document.data.timeStepColumn ?? 'time_step',
     );
   }
+}
+
+/// An `ExprReadout`'s JSON with a belief for each variable written
+/// `<address>.<field>` (`ball.expected_mean`, `cat.2.mean`) that isn't
+/// bound already; other readouts as they are.
+Map<String, Object?> _bindBeliefs(
+  Map<String, Object?> readout,
+  NodeAddresses a,
+) {
+  if (readout['type'] != 'ExprReadout') return readout;
+  final beliefs = {
+    ...((readout['beliefs'] as Map<String, Object?>?) ?? const {}),
+  };
+  final parameters =
+      (readout['parameters'] as Map<String, Object?>?) ?? const {};
+  final sources = switch (readout['kind']) {
+    'choice' => (readout['options'] as List<Object?>).cast<String>(),
+    'gaussian' => [
+      for (final v in (readout['gaussian'] as Map<String, Object?>).values)
+        v as String,
+    ],
+    _ => [readout['surprise'] as String],
+  };
+  for (final src in sources) {
+    for (final v in Expr.parse(src).variables) {
+      if (beliefs.containsKey(v) ||
+          parameters.containsKey(v) ||
+          v == ExprReadout.responseVariable) {
+        continue;
+      }
+      final dot = v.lastIndexOf('.');
+      if (dot < 0) continue;
+      final field = v.substring(dot + 1);
+      final address = v.substring(0, dot);
+      try {
+        NodeField.parse(field);
+        a.indexOf(address);
+      } on Object {
+        throw FormatException(
+          'The response reads "$v", which is not a belief (node.field, e.g. '
+          '"x.expected_mean"), a parameter or "response"',
+        );
+      }
+      beliefs[v] = {'node': address, 'field': field};
+    }
+  }
+  return {...readout, 'beliefs': beliefs};
 }
 
 /// How many data columns the input node [i] takes.

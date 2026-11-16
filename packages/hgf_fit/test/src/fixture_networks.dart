@@ -117,5 +117,78 @@ List<FixtureNetwork> fixtureNetworks({bool perturbInputs = true}) {
                   (fx['rshgf_max_rel_diff'] as num?)?.toDouble() ?? 0,
             );
           }(),
+    for (final (name, spec) in expressionCouplingSpecs)
+      for (final perturbed in [false, true])
+        () {
+          final net = NetworkSpec.fromJson(spec).build();
+          if (perturbed) perturb(net, inputs: perturbInputs);
+          final rng = math.Random(name.length);
+          var x = 0.0;
+          return FixtureNetwork(
+            '$name${perturbed ? ' (perturbed)' : ''}',
+            spec,
+            net,
+            ExportData(
+              inputs: Float64List.fromList([
+                for (var t = 0; t < 150; t++)
+                  x += (t ~/ 40).isEven
+                      ? 0.1 * (rng.nextDouble() - 0.5)
+                      : 0.6 * (rng.nextDouble() - 0.5),
+              ]),
+            ),
+            perturbed,
+          );
+        }(),
   ];
 }
+
+/// Networks with expression couplings (`ExprCoupling`), which pyhgf runs
+/// as JAX lambdas: not parity fixtures (pyhgf has no expressions), but
+/// built and exported the same way.
+const expressionCouplingSpecs = [
+  (
+    'expression couplings: smooth, piecewise',
+    <String, Object?>{
+      'nodes': [
+        {
+          'kind': 'continuous-state',
+          'params': {'precision': 4.0},
+        },
+        {
+          'kind': 'continuous-state',
+          'value_children': [0],
+          'coupling_fn': '2 * tanh(x / 2) + 0.1 * sqrt(1 + x^2)',
+          'params': {'tonic_volatility': -3.0},
+        },
+        {
+          'kind': 'continuous-state',
+          'value_children': [1],
+          'coupling_fn': 'where(x > 0, x, 0.1 * x) - 0.05 * x^3',
+          'params': {'tonic_volatility': -4.0},
+        },
+        {
+          'kind': 'continuous-state',
+          'volatility_children': [1],
+          'params': {'tonic_volatility': -4.0},
+        },
+      ],
+    },
+  ),
+  (
+    'expression coupling: softsign',
+    <String, Object?>{
+      'nodes': [
+        {
+          'kind': 'continuous-state',
+          'params': {'precision': 4.0},
+        },
+        {
+          'kind': 'continuous-state',
+          'value_children': [0],
+          'coupling_fn': 'x / (1 + abs(x))',
+          'params': {'tonic_volatility': -2.0},
+        },
+      ],
+    },
+  ),
+];

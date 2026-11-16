@@ -48,14 +48,8 @@ Map<String, Object?> _networkToJson(Network network) {
       for (final d in network._defs)
         {
           'kind': d.kind.pyhgfName,
-          'coupling_fn': switch (d.coupling) {
-            final CouplingFn c => c.pyhgfName,
-            final CustomCoupling c => c.name,
-            final c => throw UnsupportedError(
-              'Cannot serialise the coupling ${c.runtimeType}',
-            ),
-          },
-          'custom_coupling': d.coupling is! CouplingFn,
+          'coupling_fn': couplingText(d.coupling),
+          'custom_coupling': d.coupling is CustomCoupling,
           // As declared (addNodes recompiles from these).
           'params': {
             for (final MapEntry(:key, :value) in d.params.entries)
@@ -131,7 +125,7 @@ Network _networkFromJson(
             '`couplings`',
           ));
     } else {
-      coupling = CouplingFn.parse(name);
+      coupling = parseCoupling(name);
     }
     final d = _NodeDef(NodeKind.parse(node['kind'] as String), coupling, {
       for (final MapEntry(:key, :value)
