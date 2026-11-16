@@ -211,10 +211,12 @@ class Preset {
   Network build({
     VolatilityUpdates volatilityUpdates = VolatilityUpdates.unbounded,
     bool meanField = false,
+    bool ehgfMgfCorrection = false,
   }) {
     final net = Network(
       volatilityUpdates: volatilityUpdates,
       meanFieldUpdates: meanField,
+      ehgfMgfCorrection: ehgfMgfCorrection,
     );
     if (addTo case final add?) {
       add(net);

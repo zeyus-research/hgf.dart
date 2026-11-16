@@ -1801,6 +1801,13 @@ IR (GPU kernels, CPU reverse mode, exact Hessians).
 - [ ] Since the performance is excellent so far, the playground can be
   extended to be a fully-fledged fitting app, where the user can load
   and map data, fit a model and view and save the results.
+- [x] All six update schemes in the playground (2026-11-16): the
+  Network card had standard / eHGF / unbounded but always ran relaxed
+  value updates. It now has a relaxed / mean-field toggle (disabled when
+  no continuous node has a value parent, where the two agree) and, under
+  relaxed eHGF, the `ehgfMgfCorrection` switch. Both reset with the
+  preset, survive a preset switch like the volatility update, drop a fit
+  result, and reach fitting and export through `Network.toJson`.
 - [x] Make sure the app runs with GPU if available, and allow user to
   toggle GPU, precision, other settings/preferences (2026-11-09, quick
   wins; see below).
@@ -2252,7 +2259,11 @@ browsers now that a round trip is ~0.3 ms.
 
 ## Upstream issues
 
-Found while porting and optimising; none reported yet. Details, suggested
+Found while porting and optimising. Since 2026-11-16 they are being passed
+to the pyhgf maintainer, so expect fixes upstream: after each pyhgf
+release, re-run `melos run fixtures`, then tick the fixed ones here and
+check whether hgf.dart's workaround (`NetworkFixes`, `ehgfMgfCorrection`,
+the dp `observed` skip, ...) can become the default or go. Details, suggested
 fixes and runnable repros are in [upstream/README.md](upstream/README.md)
 (pyhgf/rshgf scripts in `upstream/pyhgf/`, dart2wasm ones in
 `upstream/dart2wasm/`). What hgf.dart does about each is noted there too.
@@ -2389,8 +2400,11 @@ pyhgf's learning (weight beliefs, sample weights, `update_input_layer`),
 reverse mode is wired into `GpuFitter` and runs on the CPU too (with exact
 Hessians), and the benchmarks ran on an Apple M3 Pro; pyhgf #477 (noise
 parents of continuous input nodes) is ported, with fixtures at pyhgf
-`1e6e98d7` and the P21 fix (`NetworkFixes`). Next are hgf_deep's
-continuous layers, real-time
+`1e6e98d7` and the P21 fix (`NetworkFixes`); hgf_deep has continuous
+layers (2026-11-12). pyhgf v0.3.3 (#478, Δt scaling on continuous state
+nodes) is ported (2026-11-13). The playground switches between relaxed
+and mean-field updates and has the eHGF MGF switch (2026-11-16). Next are
+real-time
 sources / LSL, vector node kinds on the GPU, a faster dp candidate
 search, and the choice-task follow-ups (stickiness, lapse rate, a model
 builder).

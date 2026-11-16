@@ -136,6 +136,31 @@ void main() {
       expect(pg.network.volatilityUpdates, VolatilityUpdates.eHGF);
       expect(pg.trajectories!.nTime, 50);
     });
+
+    test('mean-field and the MGF correction rebuild the network', () {
+      final pg = Playground(presetId: 'continuous3', nTrials: 200)
+        ..setVolatilityUpdates(VolatilityUpdates.eHGF);
+      final relaxed = pg.totalSurprise;
+      pg.setMeanField(true);
+      expect(pg.network.meanFieldUpdates, isTrue);
+      expect(pg.totalSurprise, isNot(relaxed));
+      // The settings travel with the network's JSON (fitting, export).
+      expect(
+        Network.fromJson(pg.network.toJson()).meanFieldUpdates,
+        isTrue,
+      );
+      pg
+        ..setMeanField(false)
+        ..setEhgfMgfCorrection(true);
+      expect(pg.network.ehgfMgfCorrection, isTrue);
+      expect(pg.network.meanFieldUpdates, isFalse);
+      // Kept across a preset switch, dropped by a reset.
+      pg.setPreset('continuous2');
+      expect(pg.network.ehgfMgfCorrection, isTrue);
+      pg.resetToPreset();
+      expect(pg.meanField, isFalse);
+      expect(pg.ehgfMgfCorrection, isFalse);
+    });
   });
 
   test('parseColumn skips a header and reads NaN as missing', () {

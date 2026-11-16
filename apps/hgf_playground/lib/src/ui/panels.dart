@@ -141,6 +141,11 @@ class NetworkCard extends StatelessWidget {
     final hasVolatility = pg.layout.edges.any(
       (e) => e.kind == EdgeKind.volatility,
     );
+    final hasContinuousValue = pg.layout.edges.any(
+      (e) =>
+          e.kind == EdgeKind.value &&
+          pg.network.kindOf(e.child) == NodeKind.continuousState,
+    );
     return SectionCard(
       title: pg.preset.name,
       children: [
@@ -191,6 +196,41 @@ class NetworkCard extends StatelessWidget {
                 : null,
           ),
         ),
+        const SizedBox(height: 8),
+        Tooltip(
+          message: hasContinuousValue
+              ? 'Relaxed (rHGF): a value parent weighs each continuous '
+                    'child by its precision before and after the volatility '
+                    'update. Mean-field: by its predicted precision only.'
+              : 'This network has no value coupling between continuous '
+                    'nodes, so both schemes give the same result.',
+          child: SegmentedButton<bool>(
+            showSelectedIcon: false,
+            segments: const [
+              ButtonSegment(value: false, label: Text('relaxed')),
+              ButtonSegment(value: true, label: Text('mean-field')),
+            ],
+            selected: {pg.meanField},
+            onSelectionChanged: hasContinuousValue
+                ? (s) => pg.setMeanField(s.single)
+                : null,
+          ),
+        ),
+        if (pg.volatilityUpdates == VolatilityUpdates.eHGF && !pg.meanField)
+          Tooltip(
+            message:
+                'hgf.dart extension, off in pyhgf: adds the relaxed '
+                'prediction\'s κ²/(2π̂) terms to the eHGF volatility '
+                're-prediction. Without them, 3-level continuous HGFs '
+                'can diverge.',
+            child: SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('eHGF MGF correction'),
+              value: pg.ehgfMgfCorrection,
+              onChanged: hasVolatility ? pg.setEhgfMgfCorrection : null,
+            ),
+          ),
       ],
     );
   }

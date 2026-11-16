@@ -61,6 +61,14 @@ class Playground extends ChangeNotifier {
   VolatilityUpdates _volatilityUpdates = VolatilityUpdates.unbounded;
   VolatilityUpdates get volatilityUpdates => _volatilityUpdates;
 
+  /// Mean-field value-coupling updates instead of the relaxed (rHGF) ones.
+  bool _meanField = false;
+  bool get meanField => _meanField;
+
+  /// [Network.ehgfMgfCorrection]: only changes relaxed eHGF updates.
+  bool _ehgfMgfCorrection = false;
+  bool get ehgfMgfCorrection => _ehgfMgfCorrection;
+
   late Network network;
   late NetworkLayout layout;
   Trajectories? trajectories;
@@ -157,6 +165,8 @@ class Playground extends ChangeNotifier {
     _couplingEdits.clear();
     _volatilityUpdates =
         _preset.volatilityUpdates ?? VolatilityUpdates.unbounded;
+    _meanField = false;
+    _ehgfMgfCorrection = false;
     agentBeta = _preset.task?.beta ?? 4;
     final d = DataSettings();
     data
@@ -185,13 +195,37 @@ class Playground extends ChangeNotifier {
     _rerun();
   }
 
+  /// Relaxed (false) or mean-field (true) value-coupling updates.
+  void setMeanField(bool v) {
+    if (v == _meanField) return;
+    player = null;
+    _meanField = v;
+    _choicesStale = task != null;
+    _rebuild();
+    _rerun();
+  }
+
+  /// Turns [Network.ehgfMgfCorrection] on or off.
+  void setEhgfMgfCorrection(bool v) {
+    if (v == _ehgfMgfCorrection) return;
+    player = null;
+    _ehgfMgfCorrection = v;
+    _choicesStale = task != null;
+    _rebuild();
+    _rerun();
+  }
+
   void select(int? node) {
     selected = node == selected ? null : node;
     notifyListeners();
   }
 
   void _rebuild() {
-    network = _preset.build(volatilityUpdates: _volatilityUpdates);
+    network = _preset.build(
+      volatilityUpdates: _volatilityUpdates,
+      meanField: _meanField,
+      ehgfMgfCorrection: _ehgfMgfCorrection,
+    );
     network.build();
     _paramEdits.forEach((node, edits) {
       edits.forEach((f, v) => network.setInitial(node, f, v));
