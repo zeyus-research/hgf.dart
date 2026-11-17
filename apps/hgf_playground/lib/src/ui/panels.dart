@@ -63,6 +63,7 @@ class LabeledSlider extends StatelessWidget {
     required this.max,
     required this.display,
     required this.onChanged,
+    this.onChangeStart,
     this.onChangeEnd,
     this.help,
     this.divisions,
@@ -72,6 +73,7 @@ class LabeledSlider extends StatelessWidget {
   final double value, min, max;
   final String display;
   final ValueChanged<double> onChanged;
+  final ValueChanged<double>? onChangeStart;
   final ValueChanged<double>? onChangeEnd;
   final String? help;
   final int? divisions;
@@ -108,6 +110,7 @@ class LabeledSlider extends StatelessWidget {
                 max: max,
                 divisions: divisions,
                 onChanged: onChanged,
+                onChangeStart: onChangeStart,
                 onChangeEnd: onChangeEnd,
               ),
             ),

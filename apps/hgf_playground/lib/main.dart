@@ -59,15 +59,15 @@ Future<void> main() async {
             ..yieldInterval = const Duration(milliseconds: 12)
         : null,
   );
-  // `?page=deep` (or the dart-define HGF_PAGE=deep) opens the deep network
-  // page.
+  // `?page=deep` or `?page=builder` (or the dart-define HGF_PAGE) opens
+  // the deep network page or the model builder.
   final page = query['page'] ?? const String.fromEnvironment('HGF_PAGE');
   runApp(
     PlaygroundApp(
       settings: settings,
       playground: playground,
       fitting: fitting,
-      initialPage: page == 'deep' ? ShellPage.deep : ShellPage.hgf,
+      initialPage: ShellPage.values.asNameMap()[page] ?? ShellPage.hgf,
     ),
   );
   if (fitBench) {

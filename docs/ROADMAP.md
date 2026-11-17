@@ -2308,7 +2308,8 @@ fitting, export) reads it.
    lapse rate and a per-option bias (intercept: "nothing" needs a value
    of its own; today an option must name a node) on `SoftmaxReadout`,
    CPU, GPU and export.
-4. [ ] **Builder, slice 1:** a canvas for the HGF graph only. Typed ports
+4. [x] **Builder, slice 1** (done 2026-11-17, see "Builder, slice 1"
+   below): a canvas for the HGF graph only. Typed ports
    (value and volatility edges drawn differently), inline checks (e.g. a
    binary node needs a continuous value parent; no cycles), automatic
    layered layout (HGF hierarchies are vertical), undo/redo; every preset
@@ -2449,6 +2450,70 @@ candidate search.
   Collins 2019) instead of one-back stickiness, which needs carried
   state; the playground presets don't expose the new terms yet (the
   builder's readout node will).
+
+#### Builder, slice 1 (2026-11-17): done
+
+- **Our own canvas**, as expected. The pub.dev node editors (node_flow,
+  fl_nodes_v2, vyuh_node_flow, graph_flow, …) are generic flow editors:
+  none knows that parents sit above children, that one node can stand
+  for a block of implied nodes, or re-filters at 60 fps, and each would
+  be a dependency to keep compatible with dart2wasm. `BuilderCanvas` is a
+  `CustomPainter` with its own gestures (no `InteractiveViewer`, whose
+  pan fights node drags).
+- **Document edits and checks in `hgf_fit`** (`document/edit.dart`):
+  `NetworkDocumentEdits` (`withNode`, `withoutNode`, `replaceNode` with
+  renames and shrinking blocks, `withEdge`, `replaceEdge` dropping the
+  override that would win, `withParam`, `freshId`, and `ordered`, which
+  keeps the document's node order when it compiles and otherwise puts
+  dp-state and categorical nodes first, then ef-state, then scalar nodes,
+  so the builder never thinks about order). `checkNetwork` returns
+  `DocIssue`s (error or warning, with the nodes and edges concerned):
+  kind rules (binary nodes take value edges only, a constant node takes
+  no parents and needs a value child, categorical edges go to its
+  implied nodes, dp-state clusters must add up to the batch size, …),
+  cycles, duplicate edges, couplings that don't parse, overrides that
+  address nothing, then whatever building throws. Warnings: a binary
+  node without a continuous value parent, a coupling function without
+  value children, a pair coupled both ways. All 164 fixture networks
+  pass with no issues.
+- **The builder page** (`apps/hgf_playground/lib/src/builder/`): a third
+  destination in the shell, plus "Edit in builder" on the HGF page
+  (opens its network with its edits). `BuilderModel` holds the
+  document, the node positions, the selection, undo/redo (snapshots; a
+  drag or slider is one step: `checkpoint()` then `record: false`), the
+  issues, and the preview: the network built from the document and
+  filtered on simulated data per input (reversals for binary, random
+  walks for continuous, category reversals, mixtures for dp-state, at
+  most 150 trials there) after every edit, coalesced to one per frame.
+  The preview is the playground's `HgfTrajectoryView`, labelled by
+  address.
+- **Canvas:** layered automatic layout over document nodes (inputs at
+  the bottom, barycentre ordering; a categorical or ef-state block is
+  one node); typed ports (on top: parents, below: children; filled:
+  value, hollow: volatility); dragging a wire shows green or red and the
+  reason under the pointer, and when either end is a block a menu lists
+  the allowed implied addresses (e.g. `x0.7`, the categorical node's
+  shared volatility parent); value edges solid, volatility edges dashed
+  and tinted, strengths and implied addresses labelled; nodes and edges
+  with issues outlined in red or amber; live μ beside each node.
+  Double-click adds a node, right-click adds parents/children or
+  deletes, Del, Ctrl+Z / Ctrl+Shift+Z, F to fit, wheel or pinch to zoom.
+- **Inspector:** a node's id (renames references), kind, the
+  playground's parameter sliders, the coupling (named or an expression
+  in `x`, parse errors as you type), block settings (categories, group
+  size, dimension, learning, ν, α, batch size) and its edges; an edge's
+  type, strength and direction; with nothing selected, the palette and
+  the update scheme. The issues list selects what it names.
+- Files: save/open the `hgf.document/1` JSON with the canvas positions
+  in `layout.nodes`; a bare network document or `Network.toJson` opens
+  too. Every preset opens in it and builds the same network
+  (`test/builder_test.dart`, with a widget test that drags a wire from a
+  port and deletes it from the keyboard).
+- Left for later: implied nodes' own parameters (only as overrides
+  through the document today; the categorical node's pyhgf arguments are
+  editable), multi-select and copy/paste, sending a built network back to
+  the HGF page (its data and fitting views assume one input; slice 2's
+  data pipeline will feed them), ef-state xis.
 
 **Driving example: the user's 6-person hyperscanning experiment.** A
 ball balancing on a beam (an elevator): a participant lifts the left or
@@ -2627,7 +2692,9 @@ and mean-field updates and has the eHGF MGF switch (2026-11-16). Phase 9, the mo
 builder, started 2026-11-16 (LSL / real-time sources shelved until
 after it): the model document and expressions (couplings, readouts and
 data transforms) are done (2026-11-16), and the choice follow-ups
-(stickiness, lapse, option bias; 2026-11-17); next the canvas in slices. Vector node kinds on the GPU and a
+(stickiness, lapse, option bias; 2026-11-17) and the builder's first
+slice, the HGF graph canvas (2026-11-17); next slice 2 (inputs, transforms,
+readouts and outputs). Vector node kinds on the GPU and a
 faster dp candidate search can run alongside.
 
 ```sh

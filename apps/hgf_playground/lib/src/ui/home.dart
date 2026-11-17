@@ -23,11 +23,15 @@ class HomePage extends StatefulWidget {
     required this.settings,
     required this.playground,
     required this.fitting,
+    this.onEditInBuilder,
   });
 
   final Settings settings;
   final Playground playground;
   final Fitting fitting;
+
+  /// Opens the network, with its edits, in the model builder.
+  final VoidCallback? onEditInBuilder;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -130,6 +134,12 @@ class _HomePageState extends State<HomePage>
           ),
           actions: [
             _PresetMenu(playground: pg, settings: widget.settings),
+            if (widget.onEditInBuilder case final edit?)
+              IconButton(
+                tooltip: 'Edit this network in the builder',
+                onPressed: edit,
+                icon: const Icon(Icons.schema_outlined),
+              ),
             IconButton(
               tooltip: 'Reset to the preset\'s defaults',
               onPressed: _reset,

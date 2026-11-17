@@ -30,6 +30,24 @@ Future<void> saveText(
   }
 }
 
+/// Lets the user pick a text file with one of [extensions]; its text and
+/// name, or null if cancelled.
+Future<(String, String)?> pickText(
+  String dialogTitle, {
+  List<String> extensions = const ['json'],
+}) async {
+  final file = await FilePicker.pickFile(
+    dialogTitle: dialogTitle,
+    type: FileType.custom,
+    allowedExtensions: extensions,
+  );
+  if (file == null) return null;
+  return (
+    utf8.decode(await file.readAsBytes(), allowMalformed: true),
+    file.name,
+  );
+}
+
 /// Lets the user pick a CSV/TSV/text file and parses it ([parseTable]);
 /// null if cancelled. The file's name comes back with the table.
 Future<(CsvTable, String)?> pickTable(String dialogTitle) async {
