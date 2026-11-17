@@ -7,8 +7,11 @@ import '../codec.dart';
 import '../codegen/export_spec.dart';
 import '../codegen/plan.dart';
 import '../expr_readout.dart';
+import '../hierarchical.dart';
 import '../model.dart';
 import '../parameter.dart';
+import '../prior.dart';
+import '../transform.dart';
 import 'network_document.dart';
 import 'transforms.dart';
 
@@ -97,7 +100,15 @@ final class DocResponse {
   final List<String>? columns, options;
   final Map<String, List<String>>? reveals;
 
-  List<String> get dataColumns => columns ?? [name];
+  /// The columns holding the recorded responses: none for a readout that
+  /// scores the observations themselves (`ObservationSurprise`, a fit to
+  /// the inputs), else [columns] or [name].
+  List<String> get dataColumns =>
+      readsData ? columns ?? [name] : const <String>[];
+
+  /// Whether the readout scores recorded responses (every readout but
+  /// `ObservationSurprise`).
+  bool get readsData => readout['type'] != 'ObservationSurprise';
 
   Map<String, Object?> toJson() => {
     'name': name,
@@ -263,6 +274,125 @@ final class DocFit {
   );
 }
 
+/// A pooled parameter's population: hyperpriors (`FitCodec` prior JSON) on
+/// its mean [mean] and standard deviation [sd], both on the parameter's
+/// unconstrained scale (see `Population`).
+final class DocPopulation {
+  DocPopulation({
+    required Map<String, Object?> mean,
+    required Map<String, Object?> sd,
+  }) : mean = Map.unmodifiable(mean),
+       sd = Map.unmodifiable(sd);
+
+  /// The population a parameter with [prior] (and [transform], default the
+  /// prior's) starts with: the mean `N(y₀, 1.5²)` around the prior's typical
+  /// value on the unconstrained scale, the sd `HalfNormal(1)`. On a log
+  /// scale, participants then mostly differ by up to a factor of e.
+  factory DocPopulation.around(Prior prior, {Transform? transform}) {
+    final t = transform ?? prior.defaultTransform;
+    final y0 = t.toUnconstrained(prior.typical);
+    return DocPopulation(
+      mean: Normal(_round(y0), 1.5).toJson(),
+      sd: const HalfNormal(1).toJson(),
+    );
+  }
+
+  final Map<String, Object?> mean, sd;
+
+  Population decode(FitCodec codec) =>
+      Population(mean: codec.decodePrior(mean), sd: codec.decodePrior(sd));
+
+  Map<String, Object?> toJson() => {'mean': mean, 'sd': sd};
+
+  factory DocPopulation.fromJson(Map<String, Object?> json) => DocPopulation(
+    mean: json['mean']! as Map<String, Object?>,
+    sd: json['sd']! as Map<String, Object?>,
+  );
+}
+
+double _round(double v) => v.isFinite ? (v * 1000).roundToDouble() / 1000 : v;
+
+/// The group level over participants (see `HierarchicalModel`): each
+/// [pooled] parameter (by name) varies by participant around a population
+/// whose mean and sd are estimated too; each [shared] one takes one value
+/// for everyone; the other parameters are fitted per participant alone.
+/// [centered] picks the centred parametrisation for NUTS.
+///
+/// MAP fits a group with pooled parameters by empirical Bayes
+/// (`fitEmpiricalBayes`, which can't share parameters), NUTS samples the
+/// joint posterior (`sampleHierarchical`).
+final class DocGroup {
+  DocGroup({
+    Map<String, DocPopulation> pooled = const {},
+    Iterable<String> shared = const [],
+    this.centered = false,
+  }) : pooled = Map.unmodifiable(pooled),
+       shared = List.unmodifiable(shared);
+
+  static final empty = DocGroup();
+
+  final Map<String, DocPopulation> pooled;
+  final List<String> shared;
+  final bool centered;
+
+  bool get isEmpty => pooled.isEmpty && shared.isEmpty;
+
+  /// How the parameter [name] is fitted.
+  ParameterRole roleOf(String name) => pooled.containsKey(name)
+      ? ParameterRole.pooled
+      : shared.contains(name)
+      ? ParameterRole.shared
+      : ParameterRole.individual;
+
+  /// This group with only the parameters in [names] (renamed by [rename]).
+  DocGroup only(Set<String> names, [Map<String, String> rename = const {}]) {
+    String r(String n) => rename[n] ?? n;
+    return DocGroup(
+      pooled: {
+        for (final MapEntry(:key, :value) in pooled.entries)
+          if (names.contains(r(key))) r(key): value,
+      },
+      shared: [
+        for (final n in shared)
+          if (names.contains(r(n))) r(n),
+      ],
+      centered: centered,
+    );
+  }
+
+  Map<String, Object?> toJson() => {
+    if (pooled.isNotEmpty)
+      'pooled': {
+        for (final MapEntry(:key, :value) in pooled.entries)
+          key: value.toJson(),
+      },
+    if (shared.isNotEmpty) 'shared': shared,
+    if (centered) 'centered': true,
+  };
+
+  factory DocGroup.fromJson(Map<String, Object?> json) => DocGroup(
+    pooled: {
+      for (final MapEntry(:key, :value)
+          in ((json['pooled'] as Map<String, Object?>?) ?? const {}).entries)
+        key: DocPopulation.fromJson(value! as Map<String, Object?>),
+    },
+    shared: ((json['shared'] as List<Object?>?) ?? const []).cast<String>(),
+    centered: (json['centered'] as bool?) ?? false,
+  );
+}
+
+/// How a free parameter is fitted across participants.
+enum ParameterRole {
+  /// One value per participant, with the parameter's own prior.
+  individual,
+
+  /// Per participant, around a population estimated with them.
+  pooled,
+
+  /// One value for all participants.
+  shared,
+}
+
 /// A whole model as the builder edits it (`hgf.document/1`): the
 /// [network], its named [inputs], the [response] model, the free
 /// [parameters], trajectory [outputs], the [data] layout and the [fit]
@@ -287,8 +417,10 @@ final class ModelDocument {
     List<DocTransform> transforms = const [],
     this.data = const DocData(),
     this.fit = const DocFit(),
+    DocGroup? group,
     Map<String, Object?> layout = const {},
-  }) : inputs = List.unmodifiable(inputs),
+  }) : group = group ?? DocGroup.empty,
+       inputs = List.unmodifiable(inputs),
        parameters = List.unmodifiable(parameters),
        outputs = List.unmodifiable(outputs),
        transforms = List.unmodifiable(transforms),
@@ -312,6 +444,10 @@ final class ModelDocument {
   final List<DocTransform> transforms;
   final DocData data;
   final DocFit fit;
+
+  /// The group level over participants: which parameters are pooled or
+  /// shared (empty: each participant is fitted alone).
+  final DocGroup group;
   final Map<String, Object?> layout;
 
   /// A document for [network], with ids `n<index>` (or from [id]) and the
@@ -419,6 +555,10 @@ final class ModelDocument {
         final Map<String, Object?> f => DocFit.fromJson(f),
         _ => const DocFit(),
       },
+      group: switch (json['group']) {
+        final Map<String, Object?> g => DocGroup.fromJson(g),
+        _ => null,
+      },
       layout: (json['layout'] as Map<String, Object?>?) ?? const {},
     );
   }
@@ -436,6 +576,7 @@ final class ModelDocument {
       'transforms': [for (final t in transforms) t.toJson()],
     if (data.toJson() case final d when d.isNotEmpty) 'data': d,
     'fit': fit.toJson(),
+    if (!group.isEmpty) 'group': group.toJson(),
     if (layout.isNotEmpty) 'layout': layout,
   };
 
@@ -523,7 +664,27 @@ final class ModelDocument {
       a.indexOf(o.node);
       if (o.field != 'surprise') NodeField.parse(o.field);
     }
-    return CompiledDocument._(this, net, model, ordered, reveals, couplings);
+    HierarchicalModel? hierarchical;
+    if (model != null && !group.isEmpty) {
+      hierarchical = HierarchicalModel(
+        model,
+        pooled: {
+          for (final MapEntry(:key, :value) in group.pooled.entries)
+            key: value.decode(codec),
+        },
+        shared: group.shared,
+        centered: group.centered,
+      );
+    }
+    return CompiledDocument._(
+      this,
+      net,
+      model,
+      hierarchical,
+      ordered,
+      reveals,
+      couplings,
+    );
   }
 }
 
@@ -535,6 +696,7 @@ final class CompiledDocument {
     this.document,
     this.network,
     this.model,
+    this.hierarchical,
     List<DocInput> inputs,
     this.reveals,
     this._couplings,
@@ -545,6 +707,10 @@ final class CompiledDocument {
   final ModelDocument document;
   final Network network;
   final HgfModel? model;
+
+  /// The group-level model over participants, when the document pools or
+  /// shares parameters ([ModelDocument.group]).
+  final HierarchicalModel? hierarchical;
   final List<DocInput> inputs;
 
   /// Per option, the positions in [inputs] its choice reveals (for
@@ -594,6 +760,40 @@ final class CompiledDocument {
       }
     }
     return net;
+  }
+
+  /// The free parameters' values as the document sets them (in
+  /// `model.parameters` order): each parameter's first target's value in
+  /// the built network (a node's initial value, an edge's strength) or the
+  /// response model. Unlike `model.start()` (the priors' typical values),
+  /// these follow the builder's sliders.
+  List<double> currentValues() {
+    final m = model;
+    if (m == null) return const [];
+    final net = network;
+    double strength(List<int> parents, List<double> strengths, int p) {
+      final at = parents.indexOf(p);
+      return at < 0 ? double.nan : strengths[at];
+    }
+
+    return [
+      for (final p in m.parameters)
+        switch (p.targets.first) {
+          NodeTarget(:final node, :final field) => net.getInitial(node, field),
+          ValueCouplingTarget(:final parent, :final child) => strength(
+            net.valueParentsOf(child),
+            net.valueParentStrengthsOf(child),
+            parent,
+          ),
+          VolatilityCouplingTarget(:final parent, :final child) => strength(
+            net.volatilityParentsOf(child),
+            net.volatilityParentStrengthsOf(child),
+            parent,
+          ),
+          ResponseTarget(:final name) =>
+            m.response.parameters[name] ?? double.nan,
+        },
+    ];
   }
 
   /// [subject] filtered by [networkAt] ([x]), recording [recordedFields].
@@ -966,7 +1166,7 @@ final class CompiledDocument {
             if (nTime > 0) timeSteps[0] = nTime > 1 ? timeSteps[1] : 1.0;
           }
           Float64List? responses;
-          if (r != null) {
+          if (r != null && r.readsData) {
             final nr = responseCols.length;
             responses = Float64List(nTime * nr);
             for (var t = 0; t < nTime; t++) {

@@ -83,6 +83,17 @@ class _BuilderPageState extends State<BuilderPage> {
       return;
     }
     if (!mounted) return;
+    if (m.participants.length > 1 || !m.document.group.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text(
+            'The script holds the previewed participant only, fitted alone: '
+            'exports of every participant and of the group level are not '
+            'there yet.',
+          ),
+        ),
+      );
+    }
     final base = m.name.replaceAll(RegExp(r'[^A-Za-z0-9_]+'), '_');
     await saveText(
       context,

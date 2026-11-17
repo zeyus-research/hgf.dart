@@ -1,5 +1,6 @@
 import 'package:material_ui/material_ui.dart';
 
+import '../builder/builder_fit.dart';
 import '../builder/builder_model.dart';
 import '../builder/ui/builder_page.dart';
 import '../deep/deep_playground.dart';
@@ -66,6 +67,14 @@ class _AppShellState extends State<AppShell> {
           widget.playground.network,
           name: widget.playground.preset.name,
         );
+      if (_builder!.fitting == null) {
+        final fitting = widget.fitting;
+        BuilderFitting(
+          _builder!,
+          engine: fitting.engine,
+          config: () => fitting.config,
+        );
+      }
     }
     return _builder!;
   }

@@ -180,6 +180,16 @@ typedef PipelineWire = ({Offset from, Offset to, String part, bool ok});
     );
   }
 
+  cards.add(
+    PipelineCard(
+      part: DocPart.fit,
+      title: 'Fit',
+      subtitle: fitSubtitle(m),
+      rows: _fitRows(m),
+      at: pos[DocPart.fit]!,
+    ),
+  );
+
   // Where each column comes from.
   final dataCard = cards.first;
   final sources = <String, Offset>{
@@ -258,6 +268,52 @@ typedef PipelineWire = ({Offset from, Offset to, String part, bool ok});
     ));
   }
   return (cards: cards, wires: wires);
+}
+
+/// The fit card's subtitle: the method, and the last result.
+String fitSubtitle(BuilderModel m) {
+  final doc = m.document;
+  final f = m.fitting;
+  final grouped = !doc.group.isEmpty;
+  final method = switch (doc.fit.method) {
+    'nuts' => grouped ? 'hierarchical NUTS' : 'NUTS',
+    'none' => 'none',
+    _ => grouped ? 'empirical Bayes' : 'MAP',
+  };
+  final status = f == null
+      ? ''
+      : f.running
+      ? ' · running'
+      : f.result == null
+      ? ''
+      : f.stale
+      ? ' · fitted (stale)'
+      : ' · fitted';
+  return '$method$status';
+}
+
+/// The fit card's rows: the free parameters and their roles.
+List<CardRow> _fitRows(BuilderModel m) {
+  final doc = m.document;
+  final names = doc.parameterNames;
+  if (names.isEmpty) {
+    return [(label: 'no free parameters', tag: null, port: null)];
+  }
+  const most = 6;
+  return [
+    for (final n in names.take(most))
+      (
+        label: n,
+        tag: switch (doc.group.roleOf(n)) {
+          ParameterRole.pooled => 'pooled',
+          ParameterRole.shared => 'shared',
+          ParameterRole.individual => null,
+        },
+        port: null,
+      ),
+    if (names.length > most)
+      (label: '+${names.length - most} more', tag: null, port: null),
+  ];
 }
 
 /// A short name for a readout's type.
@@ -652,7 +708,7 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
             child: const Text('Add an output'),
           ),
         );
-      } else if (card.part != DocPart.data) {
+      } else if (card.part != DocPart.data && card.part != DocPart.fit) {
         items.add(
           PopupMenuItem(
             value: () => m.removePart(card.part),
@@ -901,6 +957,8 @@ class _PipelinePainter extends CustomPainter {
       ? scheme.tertiary
       : part == DocPart.response
       ? const Color(0xFF1BAF7A)
+      : part == DocPart.fit
+      ? const Color(0xFF8E6AC8)
       : scheme.outline;
 
   @override

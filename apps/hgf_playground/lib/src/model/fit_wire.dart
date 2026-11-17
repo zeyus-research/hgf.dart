@@ -150,6 +150,22 @@ Packed encodeJob(FitJobSpec<Object?> job) => pack({
       'seed': job.seed,
       'reveals': job.reveals,
     },
+    DocumentFitJob() => {
+      'kind': 'document',
+      'method': job.method.name,
+      'model': _codec.encodeModel(job.model),
+      'subjects': [for (final s in job.subjects) _encodeSubject(s)],
+      'pooled': {
+        for (final MapEntry(:key, :value) in job.pooled.entries)
+          key: {
+            'mean': _codec.encodePrior(value.mean),
+            'sd': _codec.encodePrior(value.sd),
+          },
+      },
+      'shared': job.shared.toList(),
+      'centered': job.centered,
+      'seed': job.seed,
+    },
   },
 });
 
@@ -158,7 +174,8 @@ FitJobSpec<Object?> decodeJob(String json, List<Float64List> arrays) {
   final config = decodeConfig(j['config']! as JsonMap);
   final gpu = j['gpu']! as bool;
   final params = [
-    for (final p in j['params']! as List<Object?>) _decodeParam(p! as JsonMap),
+    for (final p in (j['params'] as List<Object?>?) ?? const [])
+      _decodeParam(p! as JsonMap),
   ];
   final model = _codec.decodeModel(j['model']! as JsonMap);
   return switch (j['kind']) {
@@ -186,6 +203,28 @@ FitJobSpec<Object?> decodeJob(String json, List<Float64List> arrays) {
         ],
         _ => null,
       },
+    ),
+    'document' => DocumentFitJob(
+      config: config,
+      gpu: gpu,
+      method: FitMethod.values.byName(j['method']! as String),
+      model: model,
+      subjects: [
+        for (final s in j['subjects']! as List<Object?>)
+          _decodeSubject(s! as JsonMap),
+      ],
+      pooled: {
+        for (final MapEntry(:key, :value) in (j['pooled']! as JsonMap).entries)
+          key: switch (value! as JsonMap) {
+            final v => Population(
+              mean: _codec.decodePrior(v['mean']! as JsonMap),
+              sd: _codec.decodePrior(v['sd']! as JsonMap),
+            ),
+          },
+      },
+      shared: {for (final n in j['shared']! as List<Object?>) n! as String},
+      centered: j['centered']! as bool,
+      seed: _i(j['seed']),
     ),
     final kind => throw FormatException('Bad fit job kind: $kind'),
   };
@@ -266,6 +305,32 @@ Packed encodeResult(Object? result) => pack(switch (result) {
     'where': r.where,
     'deviceNote': r.deviceNote,
   },
+  DocumentFitOutcome r => {
+    'kind': 'document',
+    'method': r.method,
+    'names': r.names,
+    'participants': r.participants,
+    'estimate': r.estimate,
+    'lower': r.lower,
+    'upper': r.upper,
+    'group': [
+      for (final g in r.group)
+        {
+          'name': g.name,
+          'kind': g.kind.name,
+          'value': g.value,
+          'lower': g.lower,
+          'upper': g.upper,
+        },
+    ],
+    'converged': r.converged,
+    'millis': r.millis,
+    'where': r.where,
+    'logEvidence': r.logEvidence,
+    'divergences': r.divergences,
+    'note': r.note,
+    'deviceNote': r.deviceNote,
+  },
   _ => throw ArgumentError('Not a fit job result: ${result.runtimeType}'),
 });
 
@@ -316,6 +381,31 @@ R decodeResult<R>(FitJobSpec<R> job, String json, List<Float64List> arrays) {
       unconverged: _i(j['unconverged']),
       millis: _i(j['millis']),
       where: j['where']! as String,
+      deviceNote: j['deviceNote'] as String?,
+    ),
+    DocumentFitJob() => DocumentFitOutcome(
+      method: j['method']! as String,
+      names: [for (final n in j['names']! as List) n as String],
+      participants: [for (final n in j['participants']! as List) n as String],
+      estimate: [for (final t in j['estimate']! as List) t as Float64List],
+      lower: [for (final t in j['lower']! as List) t as Float64List],
+      upper: [for (final t in j['upper']! as List) t as Float64List],
+      group: [
+        for (final g in j['group']! as List)
+          (
+            name: (g as JsonMap)['name']! as String,
+            kind: GroupRow.values.byName(g['kind']! as String),
+            value: _d(g['value']),
+            lower: _d(g['lower']),
+            upper: _d(g['upper']),
+          ),
+      ],
+      converged: j['converged']! as bool,
+      millis: _i(j['millis']),
+      where: j['where']! as String,
+      logEvidence: _dn(j['logEvidence']),
+      divergences: _in(j['divergences']),
+      note: j['note'] as String?,
       deviceNote: j['deviceNote'] as String?,
     ),
   };

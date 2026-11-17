@@ -9,6 +9,7 @@ import '../../model/presets.dart' show paramsFor, ParamDef;
 import '../../ui/panels.dart' show LabeledSlider, SectionCard, fmt;
 import '../builder_model.dart';
 import '../doc_layout.dart';
+import 'fit_panel.dart' show FreeToggle;
 import 'pipeline_inspector.dart';
 
 /// Ids are identifiers: expressions and addresses read them.
@@ -456,6 +457,21 @@ class _NodePanel extends StatelessWidget {
 
 Widget _paramSlider(BuilderModel model, String address, ParamDef d) {
   final v = model.initial(address, d.field);
+  return Row(
+    crossAxisAlignment: CrossAxisAlignment.end,
+    children: [
+      Expanded(child: _slider(model, address, d, v)),
+      const SizedBox(width: 4),
+      FreeToggle(
+        model: model,
+        target: nodeTarget(address, d.field),
+        current: v,
+      ),
+    ],
+  );
+}
+
+Widget _slider(BuilderModel model, String address, ParamDef d, double v) {
   return LabeledSlider(
     label: '${d.symbol}  ${d.name}',
     help: d.help,
@@ -711,18 +727,31 @@ class _EdgePanel extends StatelessWidget {
                     'to change (its log volatility).',
           style: theme.textTheme.bodySmall,
         ),
-        LabeledSlider(
-          label: 'strength (κ / α)',
-          value: e.strength,
-          min: -2,
-          max: 2,
-          display: fmt(e.strength),
-          onChangeStart: (_) => model.checkpoint(),
-          onChanged: (v) => model.replaceEdge(
-            index,
-            copy(strength: (v * 100).roundToDouble() / 100),
-            record: false,
-          ),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: LabeledSlider(
+                label: 'strength (κ / α)',
+                value: e.strength,
+                min: -2,
+                max: 2,
+                display: fmt(e.strength),
+                onChangeStart: (_) => model.checkpoint(),
+                onChanged: (v) => model.replaceEdge(
+                  index,
+                  copy(strength: (v * 100).roundToDouble() / 100),
+                  record: false,
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            FreeToggle(
+              model: model,
+              target: couplingTarget(e.type, e.parent, e.child),
+              current: e.strength,
+            ),
+          ],
         ),
         NumberField(
           key: ValueKey('strength $index ${e.strength}'),

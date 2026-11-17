@@ -11,6 +11,7 @@ import 'package:hgf_fit/hgf_fit.dart' show HgfModel, Parameter, Subject;
 import '../model/data.dart';
 import '../model/playground.dart';
 import '../model/presets.dart';
+import 'builder_fit.dart';
 import 'doc_layout.dart';
 
 /// What is selected on the builder's canvas.
@@ -133,6 +134,7 @@ class BuilderModel extends ChangeNotifier {
     DocPart.network,
     if (_model.response != null) DocPart.response,
     for (final o in _model.outputs) DocPart.output(o.name),
+    DocPart.fit,
   ];
 
   Offset _autoPipeline(String part, int k) {
@@ -145,6 +147,7 @@ class BuilderModel extends ChangeNotifier {
       return Offset(280, i * 90.0);
     }
     if (part == DocPart.response) return const Offset(840, 0);
+    if (part == DocPart.fit) return const Offset(1120, 0);
     final i = _model.outputs.indexWhere((o) => DocPart.output(o.name) == part);
     return Offset(840, (_model.response == null ? 0 : 130) + i * 80.0);
   }
@@ -621,6 +624,25 @@ class BuilderModel extends ChangeNotifier {
   );
 
   // ---------------------------------------------------------------------------
+  // Free parameters
+  // ---------------------------------------------------------------------------
+
+  /// Whether a free parameter sets [target].
+  bool isFree(DocTarget target) => _model.parameterFor(target) != null;
+
+  /// Free [target] (with a prior around [current]; see
+  /// `ModelDocumentParameters.freeTarget`) or fix it again.
+  void setFree(DocTarget target, bool free, {required double current}) =>
+      _setModel(
+        free ? _model.freeTarget(target, current) : _model.fixTarget(target),
+      );
+
+  /// The response model's parameters and their values (none without a
+  /// compiled response).
+  Map<String, double> get responseParameters =>
+      compiled?.model?.response.parameters ?? const {};
+
+  // ---------------------------------------------------------------------------
   // Pipeline
   // ---------------------------------------------------------------------------
 
@@ -842,8 +864,18 @@ class BuilderModel extends ChangeNotifier {
   /// Why the loaded data could not be read (null when it could).
   String? dataError;
 
-  /// The loaded data's participants (their ids), and which one the preview
-  /// shows.
+  /// Fitting from the builder, when the app wires it up.
+  BuilderFitting? fitting;
+
+  /// The fitting's state changed.
+  void fitChanged() => notifyListeners();
+
+  /// Filter the preview again (e.g. at new estimates).
+  void refreshPreview() => _refreshNow();
+
+  /// The participants (their ids: the loaded data's, or `1`…`n` for
+  /// simulated ones; empty for a single simulated participant), and which
+  /// one the preview shows.
   List<String> participants = const [];
   int _participant = 0;
   int get participant => _participant;
@@ -863,22 +895,156 @@ class BuilderModel extends ChangeNotifier {
     _refreshNow();
   }
 
+  /// How many participants are simulated without loaded data. Each sees
+  /// inputs of its own and, when the model has free parameters, has its
+  /// own values of them ([simulatedTruth]).
+  int simParticipants = 1;
+
+  /// Simulate [n] participants; several need a participant column, which
+  /// is named `participant` if the document has none (an undo step).
+  void setSimParticipants(int n) {
+    n = n.clamp(1, 200);
+    if (n == simParticipants) return;
+    simParticipants = n;
+    _participant = 0;
+    if (n > 1 && _model.data.participantColumn == null) {
+      final d = _model.data;
+      _setModel(
+        _model.copyWith(
+          data: DocData(
+            participantColumn: _model.freshName('participant', dataColumns),
+            timeColumn: d.timeColumn,
+            timeStepColumn: d.timeStepColumn,
+            groupColumn: d.groupColumn,
+          ),
+        ),
+      );
+      return;
+    }
+    _refreshNow();
+  }
+
+  /// Identifies the data the fit sees: the loaded file, or the simulation's
+  /// settings.
+  String get dataKey => csv != null
+      ? 'csv ${identityHashCode(csv)}'
+      : 'sim ${data.seed} $trials $simParticipants $_inputKey';
+
+  /// Each simulated participant's values of the free parameters (by id):
+  /// the document's own values (the inspectors' sliders) for a single
+  /// participant; for several, each drawn around them (±0.3 sd on the
+  /// parameter's unconstrained scale). Empty for loaded data or a model
+  /// without free parameters.
+  Map<String, Float64List> get simulatedTruth {
+    final c = compiled, m = c?.model;
+    if (csv != null || c == null || m == null || m.dimension == 0) {
+      return const {};
+    }
+    final base = c.currentValues();
+    return {
+      for (var k = 0; k < math.max(1, simParticipants); k++)
+        _simId(k): k == 0 && simParticipants == 1
+            ? Float64List.fromList(base)
+            : _jitter(m, base, k),
+    };
+  }
+
+  String _simId(int k) => '${k + 1}';
+
+  /// How the builder and its fit name the [k]-th participant [s]: its id,
+  /// or its position from 1.
+  static String participantKey(Subject s, int k) => '${s.id ?? k + 1}';
+
+  Float64List _jitter(HgfModel m, List<double> base, int k) {
+    final rng = math.Random(data.seed * 31 + 17 * k + 5);
+    double normal() {
+      final u = 1 - rng.nextDouble(), v = rng.nextDouble();
+      return math.sqrt(-2 * math.log(u)) * math.cos(2 * math.pi * v);
+    }
+
+    return Float64List.fromList([
+      for (final (i, p) in m.parameters.indexed)
+        () {
+          final y = p.transform.toUnconstrained(base[i]);
+          if (!y.isFinite) return base[i];
+          return p.transform.toConstrained(y + 0.3 * normal());
+        }(),
+    ]);
+  }
+
+  /// Every participant, as the fit sees them: the loaded data's, or the
+  /// simulated participants with their simulated responses.
+  List<Subject> allSubjects() {
+    final c =
+        compiled ?? (throw StateError('The document has errors: no subjects'));
+    if (csv case final d?) return c.subjects(d);
+    final net = network!;
+    _ensureInput(net);
+    final truth = simulatedTruth;
+    return [
+      for (var k = 0; k < math.max(1, simParticipants); k++)
+        _simSubject(c, k, truth),
+    ];
+  }
+
+  /// Simulated participant [k]: its inputs and, with a response, its
+  /// responses at its [truth] values (the document's starting values
+  /// without free parameters).
+  Subject _simSubject(
+    CompiledDocument c,
+    int k,
+    Map<String, Float64List> truth,
+  ) {
+    final id = simParticipants > 1 ? _simId(k) : null;
+    var s = Subject(inputs: _inputs[k], id: id);
+    if (c.model != null && c.document.response!.readsData) {
+      final x = truth[_simId(k)];
+      s = c
+          .simulate(
+            [s],
+            math.Random(data.seed + 1 + 7919 * k),
+            x: x == null ? null : [x],
+          )
+          .single;
+    }
+    return s;
+  }
+
+  /// The preview's parameter values for [participant]: its estimates (when
+  /// the fit says so), a simulated participant's own values, else the
+  /// document's.
+  List<double>? _previewX(CompiledDocument c, String participant) {
+    final m = c.model;
+    if (m == null || m.dimension == 0) return null;
+    return fitting?.estimateFor(participant, m.names) ??
+        simulatedTruth[participant] ??
+        c.currentValues();
+  }
+
   /// The previewed data as CSV, in the document's columns (simulated data,
   /// or the loaded participant read back).
   String? dataCsv() {
-    final c = compiled, s = subject;
-    if (c == null || s == null) return null;
-    return csvText(c.toCsv([s]));
+    final c = compiled;
+    if (c == null || subject == null) return null;
+    return csvText(c.toCsv(csv == null ? allSubjects() : [subject!]));
   }
 
   /// The loaded data (or the simulated subject) with the named outputs
   /// appended per row, as CSV; null while the document has errors.
+  ///
+  /// Each participant's outputs are filtered at its estimates when there is
+  /// a fit (and the preview uses it), else as the preview filters it.
   String? outputsCsv() {
     final c = compiled;
-    if (c == null) return null;
-    final data = csv ?? (subject == null ? null : c.toCsv([subject!]));
-    if (data == null) return null;
-    return csvText(c.withOutputs(data));
+    if (c == null || subject == null) return null;
+    final subs = csv == null ? allSubjects() : c.subjects(csv!);
+    final data = csv ?? c.toCsv(subs);
+    // withOutputs names participants by their column ('' without one).
+    final x = {
+      for (final (k, s) in subs.indexed)
+        '${s.id ?? ''}': ?_previewX(c, participantKey(s, k)),
+    };
+    return csvText(c.withOutputs(data, x: x));
   }
 
   /// The simulated data's settings: one series per input, kind by kind
@@ -886,10 +1052,10 @@ class BuilderModel extends ChangeNotifier {
   /// each with its own seed.
   final DataSettings data = DataSettings(nTrials: 300);
 
-  /// The input table (`nTrials × nInputColumns`) and what generated it,
-  /// per input node index.
-  Float64List _input = Float64List(0);
-  Map<int, List<Float64List>> _hidden = const {};
+  /// Per simulated participant, the input table (`nTrials ×
+  /// nInputColumns`) and what generated it, per input node index.
+  List<Float64List> _inputs = const [];
+  List<Map<int, List<Float64List>>> _hiddens = const [];
 
   /// What generated the simulated inputs, per input node index (empty for
   /// loaded data).
@@ -1014,28 +1180,31 @@ class BuilderModel extends ChangeNotifier {
         previewError = 'The data has no rows.';
         return;
       }
-      final s = subs[_participant.clamp(0, subs.length - 1)];
+      final k = _participant.clamp(0, subs.length - 1);
+      final s = subs[k];
       subject = s;
-      trajectories = c.filter(s);
+      trajectories = c.filter(s, _previewX(c, participantKey(s, k)));
       outputs = c.outputs(trajectories!);
       previewError = _divergence(net, trajectories!);
       return;
     }
-    participants = const [];
+    final n = math.max(1, simParticipants);
+    participants = n == 1 ? const [] : [for (var k = 0; k < n; k++) _simId(k)];
     _ensureInput(net);
+    final k = _participant.clamp(0, n - 1);
     if (c == null) {
-      trajectories = net.inputData(_input, fields: Playground.recordedFields);
-      hidden = _hidden;
+      trajectories = net.inputData(
+        _inputs[k],
+        fields: Playground.recordedFields,
+      );
+      hidden = _hiddens[k];
       previewError = _divergence(net, trajectories!);
       return;
     }
-    var s = Subject(inputs: _input);
-    if (c.model != null) {
-      s = c.simulate([s], math.Random(data.seed + 1)).single;
-    }
+    final s = _simSubject(c, k, simulatedTruth);
     subject = s;
-    hidden = _hidden;
-    trajectories = c.filter(s);
+    hidden = _hiddens[k];
+    trajectories = c.filter(s, _previewX(c, _simId(k)));
     outputs = c.outputs(trajectories!);
     previewError = _divergence(net, trajectories!);
   }
@@ -1051,15 +1220,35 @@ class BuilderModel extends ChangeNotifier {
     final shape = [
       for (final i in inputs) (net.kindOf(i), _width(a.nodeAt(i), i, a)),
     ];
-    final key = Object.hashAll([...shape, trials, data.seed]);
+    final count = math.max(1, simParticipants);
+    final key = Object.hashAll([...shape, trials, data.seed, count]);
     if (key == _inputKey) return;
+    final tables = <Float64List>[];
+    final hiddens = <Map<int, List<Float64List>>>[];
+    for (var p = 0; p < count; p++) {
+      final (t, h) = _simulateInputs(net, shape, data.seed + 104729 * p);
+      tables.add(t);
+      hiddens.add(h);
+    }
+    _inputs = tables;
+    _hiddens = hiddens;
+    _inputKey = key;
+  }
+
+  /// One participant's simulated inputs (see [_ensureInput]), from [seed].
+  (Float64List, Map<int, List<Float64List>>) _simulateInputs(
+    Network net,
+    List<(NodeKind, int)> shape,
+    int seed,
+  ) {
+    final inputs = net.inputIdxs;
     final n = trials, width = net.nInputColumns;
     final table = Float64List(n * width);
     final hid = <int, List<Float64List>>{};
     var col = 0;
     for (final (k, i) in inputs.indexed) {
       final (kind, w) = shape[k];
-      final s = DataSettings(nTrials: n, seed: data.seed + 7919 * k);
+      final s = DataSettings(nTrials: n, seed: seed + 7919 * k);
       List<Float64List> columns;
       switch (kind) {
         case NodeKind.binaryState:
@@ -1105,9 +1294,7 @@ class BuilderModel extends ChangeNotifier {
     if (col != width) {
       throw StateError('Input columns: expected $width, made $col');
     }
-    _input = table;
-    _hidden = hid;
-    _inputKey = key;
+    return (table, hid);
   }
 
   static int _width(DocNode node, int index, NodeAddresses a) => switch (node) {

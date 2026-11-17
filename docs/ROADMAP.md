@@ -2325,7 +2325,12 @@ fitting, export) reads it.
    things; one canvas for both gets confusing).
 6. [ ] **Slice 3:** participants (one network template per participant,
    bindings per participant, a group level via `HierarchicalModel`),
-   wired to the fit view and the exports.
+   wired to the fit view and the exports. First part done 2026-11-17
+   (see "Builder, slice 3" below): free parameters, the group level in
+   the document, fitting every participant from the builder. Left: the
+   exports of every participant and of the group level (Dart, then
+   pyhgf/PyMC), and relative bindings (team-mates' presses as inputs
+   beyond `mate()` transforms).
 7. [ ] Later: hgf_deep layers and a data-loading pipeline as nodes of
    the same kind; Julia export.
 
@@ -2575,7 +2580,68 @@ candidate search.
   Python, a decaying choice trace, multi-term softmax options in the
   inspector (JSON only), fitting from the builder (slice 3).
 
-**Driving example: the user's 6-person hyperscanning experiment.** A
+#### Builder, slice 3 (2026-11-17): first part done
+
+- **Free parameters in the document**, edited by name
+  (`document/parameters.dart`, `ModelDocumentParameters`): `freeTarget`
+  names a parameter after what it sets (`omega_x2`, `kappa_x2_x1`,
+  `w_x1_x0`, `beta`, …) with a prior around the current value
+  (`suggestPrior`: ω `N(ω, 2²)` on [−16, 4], log-normal with the value as
+  median for precisions, α, κ and β, normal for means, value couplings,
+  stickiness and biases, truncated to [0, 1] for a lapse);
+  `fixTarget`, `withPrior` (the transform follows the prior),
+  `replaceParameter` (renames followed by the group level),
+  `withoutParameter`. `checkParameters` (part `DocPart.fit`, run by
+  `checkModel`): names, priors, targets that address no node or edge,
+  response parameters the response model doesn't have.
+- **The group level** (`DocGroup` in `ModelDocument.group`, JSON
+  `"group"`): pooled parameters with their populations (`DocPopulation`:
+  hyperpriors on μ and σ on the parameter's unconstrained scale;
+  `around(prior)` gives `N(y₀, 1.5²)` and `HalfNormal(1)`), shared
+  parameters and the parametrisation. `CompiledDocument.hierarchical` is
+  the `HierarchicalModel`. MAP fits a group by empirical Bayes, NUTS
+  samples the joint posterior; sharing under MAP is an error (empirical
+  Bayes can't share). Removing a node, the response or a parameter drops
+  it from the group.
+- `CompiledDocument.currentValues()`: the free parameters' values as the
+  document sets them, so the builder's preview and simulations follow the
+  sliders, not the priors' typical values. A response of type
+  `ObservationSurprise` reads no response column (`DocResponse.readsData`):
+  "fit to the observations" is a response model in the builder.
+- **Playground:** `DocumentFitJob` (MAP + Laplace or NUTS per
+  participant, empirical Bayes, hierarchical NUTS; every method starts
+  from the participants' MAP estimates) on the HGF page's `FitEngine`
+  (the same pool, GPU and host isolate / Web Worker; encoded for the web
+  host). It returns a full parameter vector per participant (shared
+  values repeated) with 95 % intervals, and the group's typical values
+  and spreads.
+- **Builder:** a Fit card on the pipeline (method, the free parameters and
+  their roles, fitted / stale); its inspector lists the parameters (name,
+  prior type and numbers, individual / pooled / shared, the population's
+  hyperpriors), the method and its settings, the Fit button with progress,
+  and the results: per parameter a forest plot over participants (with
+  the group's typical value, and simulated participants' true values as
+  rings; a tap previews that participant), "preview at the estimates",
+  and the estimates as CSV. "free" chips beside the network inspector's
+  sliders, the edge strength and the response's parameters. Without
+  loaded data the builder simulates 1–200 participants, each with its own
+  inputs and, for several, its own parameter values drawn about the set
+  ones (±0.3 sd on the unconstrained scale), which makes the fit a
+  recovery check; several participants name a participant column.
+  "Save with outputs" uses each participant's estimates.
+- Tests: hgf_fit `document_parameters_test.dart` (suggestions, checks,
+  group JSON round trip and compile, renames and removals, empirical Bayes
+  on simulated participants, fit to the observations); playground
+  `builder_fit_test.dart` (simulated participants, the four methods
+  through the web host's wire format, preview at the estimates, stale
+  results, the estimates CSV, the Fit panel's widgets at two widths).
+- Left: the exports (the builder's export still writes the previewed
+  participant alone, and says so), relative bindings, a hierarchical
+  parameter recovery (simulate from the populations), per-participant
+  convergence diagnostics in the panel, and editing hyperpriors other
+  than normal / half-normal.
+
+ A
 ball balancing on a beam (an elevator): a participant lifts the left or
 the right side (never both), so the ball rises without falling off;
 levels with obstacles, and dropping the ball or hitting a fatal obstacle
@@ -2754,8 +2820,10 @@ after it): the model document and expressions (couplings, readouts and
 data transforms) are done (2026-11-16), and the choice follow-ups
 (stickiness, lapse, option bias; 2026-11-17) and the builder's first
 two slices, the HGF graph canvas and the pipeline around it (data,
-transforms, response, outputs; 2026-11-17); next slice 3 (participants,
-fitting). Vector node kinds on the GPU and a
+transforms, response, outputs; 2026-11-17), and the first part of slice 3
+(free parameters, the group level, fitting every participant from the
+builder; 2026-11-17); next the exports of participants and the group
+level. Vector node kinds on the GPU and a
 faster dp candidate search can run alongside.
 
 ```sh

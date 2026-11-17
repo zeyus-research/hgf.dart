@@ -4,12 +4,16 @@ import '../codec.dart';
 import 'edit.dart';
 import 'model_document.dart';
 import 'network_document.dart';
+import 'parameters.dart';
 import 'transforms.dart';
 
 /// The parts of a [ModelDocument] an issue can name ([DocIssue.parts]): the
 /// builder's pipeline nodes.
 abstract final class DocPart {
   static const network = 'network', data = 'data', response = 'response';
+
+  /// The free parameters, the group level and the fit.
+  static const fit = 'fit';
   static String input(String name) => 'input:$name';
   static String transform(String name) => 'transform:$name';
   static String output(String name) => 'output:$name';
@@ -40,6 +44,7 @@ extension ModelDocumentEdits on ModelDocument {
     List<DocTransform>? transforms,
     DocData? data,
     DocFit? fit,
+    DocGroup? group,
     Map<String, Object?>? layout,
   }) => ModelDocument(
     name: name ?? this.name,
@@ -52,6 +57,7 @@ extension ModelDocumentEdits on ModelDocument {
     transforms: transforms ?? this.transforms,
     data: data ?? this.data,
     fit: fit ?? this.fit,
+    group: group ?? this.group,
     layout: layout ?? this.layout,
   );
 
@@ -136,6 +142,7 @@ extension ModelDocumentEdits on ModelDocument {
         _ => null,
       },
       parameters: params,
+      group: group.only({for (final p in params) p['name']! as String}),
     );
   }
 
@@ -311,13 +318,10 @@ extension ModelDocumentEdits on ModelDocument {
   /// old response's readout with it).
   ModelDocument withResponse(DocResponse? r) {
     if (r != null) return copyWith(response: r);
-    return copyWith(
-      clearResponse: true,
-      parameters: [
-        for (final p in parameters)
-          if (!_targetsResponse(p)) p,
-      ],
-    );
+    return withParameters([
+      for (final p in parameters)
+        if (!_targetsResponse(p)) p,
+    ]).copyWith(clearResponse: true);
   }
 }
 
@@ -521,6 +525,7 @@ List<DocIssue> checkModel(
   }
 
   // Response.
+  Set<String>? responseParameters;
   if (doc.response case final r?) {
     const part = DocPart.response;
     try {
@@ -531,10 +536,14 @@ List<DocIssue> checkModel(
         return s;
       });
       if (net != null) {
-        codec.decodeResponse(
-          remapNodeKeys(readout, (v) => v is String ? indexOf(v) : v)!
-              as Map<String, Object?>,
-        );
+        responseParameters = codec
+            .decodeResponse(
+              remapNodeKeys(readout, (v) => v is String ? indexOf(v) : v)!
+                  as Map<String, Object?>,
+            )
+            .parameters
+            .keys
+            .toSet();
       }
     } on Object catch (e) {
       error('The response: ${buildErrorMessage(e)}', [part]);
@@ -558,11 +567,10 @@ List<DocIssue> checkModel(
         }
       }
     }
-  } else if (doc.parameters.any(_targetsResponse)) {
-    warn('A parameter targets the response, but there is none.', [
-      DocPart.response,
-    ]);
   }
+  issues.addAll(
+    checkParameters(doc, responseParameters: responseParameters, codec: codec),
+  );
 
   // Outputs.
   for (final o in doc.outputs) {

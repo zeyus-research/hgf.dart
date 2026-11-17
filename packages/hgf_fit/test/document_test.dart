@@ -442,9 +442,10 @@ p2,0.25,2,0,
         // vol lost its child: an input now, without data; and the readout
         // reads a node that is gone.
         expect(
-          checkModel(stale, columns: cols)
-              .where((i) => i.isError)
-              .map((i) => i.parts.single),
+          checkModel(
+            stale,
+            columns: cols,
+          ).where((i) => i.isError).map((i) => i.parts.single),
           [DocPart.network, DocPart.response],
         );
       });

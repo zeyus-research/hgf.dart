@@ -5,6 +5,8 @@ import 'package:material_ui/material_ui.dart';
 import '../../ui/files.dart';
 import '../../ui/panels.dart' show SectionCard;
 import '../builder_model.dart';
+import '../doc_layout.dart' show ownerIdOf;
+import 'fit_panel.dart' show FitPanel, FreeToggle;
 import 'inspector.dart' show NumberField;
 import 'pipeline_canvas.dart' show readoutName;
 
@@ -22,6 +24,7 @@ class PipelinePanel extends StatelessWidget {
     if (part == null) return _Overview(model: model);
     if (part == DocPart.data) return _DataPanel(model: model);
     if (part == DocPart.network) return _NetworkSummary(model: model);
+    if (part == DocPart.fit) return FitPanel(model: model);
     if (part == DocPart.response && doc.response != null) {
       return _ResponsePanel(model: model);
     }
@@ -584,6 +587,16 @@ const _readoutTypes = {
   'CategoricalSoftmaxReadout': 'Categorical softmax',
   'SoftmaxReadout': 'Softmax over named options',
   'ExprReadout': 'Expression per option',
+  'ObservationSurprise': 'None: fit to the observations',
+};
+
+/// The observation surprises a fit to the observations can score.
+const _surpriseFunctions = {
+  'TotalGaussianSurprise': 'Gaussian (every continuous node)',
+  'FirstLevelGaussianSurprise': 'Gaussian (input nodes only)',
+  'FirstLevelBinarySurprise': 'binary',
+  'CategoricalSurprise': 'categorical',
+  'DpSurprise': 'Dirichlet process',
 };
 
 class _ResponsePanel extends StatelessWidget {
@@ -623,6 +636,15 @@ class _ResponsePanel extends StatelessWidget {
     final beta = (ro['inverseTemperature'] as num?)?.toDouble() ?? 1.0;
     final k = r.options?.length ?? 2;
     return switch (type) {
+      'ObservationSurprise' => {
+        'type': type,
+        'function': switch (model.doc.node(ownerIdOf(node))) {
+          ScalarNode(kind: NodeKind.binaryState) => 'FirstLevelBinarySurprise',
+          CategoricalNode() => 'CategoricalSurprise',
+          DpStateNode() => 'DpSurprise',
+          _ => 'TotalGaussianSurprise',
+        },
+      },
       'GaussianReadout' => {
         'type': type,
         'node': node,
@@ -690,14 +712,33 @@ class _ResponsePanel extends StatelessWidget {
             if (t != null && t != type) _set(readout: _fresh(t));
           },
         ),
-        ColumnPick(
-          model: model,
-          label: 'Recorded responses',
-          value: r.dataColumns.first,
-          allowNone: false,
-          onChanged: (c) => _set(columns: () => c == null ? null : [c]),
-        ),
+        if (r.readsData)
+          ColumnPick(
+            model: model,
+            label: 'Recorded responses',
+            value: r.dataColumns.first,
+            allowNone: false,
+            onChanged: (c) => _set(columns: () => c == null ? null : [c]),
+          ),
         ..._readoutFields(context, type, ro, addresses),
+        if (model.responseParameters.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Text('Estimate in the fit', style: theme.textTheme.labelMedium),
+          Wrap(
+            spacing: 4,
+            runSpacing: 4,
+            children: [
+              for (final MapEntry(:key, :value)
+                  in model.responseParameters.entries)
+                FreeToggle(
+                  model: model,
+                  target: responseTarget(key),
+                  current: value,
+                  label: key,
+                ),
+            ],
+          ),
+        ],
         if (choice || type == 'CategoricalSoftmaxReadout') ...[
           const SizedBox(height: 12),
           Text('Options', style: theme.textTheme.labelMedium),
@@ -771,6 +812,23 @@ class _ResponsePanel extends StatelessWidget {
           },
         );
     switch (type) {
+      case 'ObservationSurprise':
+        return [
+          Pick<String>(
+            label: 'Surprise of',
+            value: ro['function'] as String?,
+            hint: '${ro['function']}',
+            items: _surpriseFunctions,
+            onChanged: (f) => _set(readout: {...ro, 'function': f}),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'No responses: the fit finds the parameters under which the '
+            'observations are least surprising (the perceptual model on its '
+            'own).',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ];
       case 'GaussianReadout':
         return [
           nodePick('node'),

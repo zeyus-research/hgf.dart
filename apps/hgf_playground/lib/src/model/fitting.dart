@@ -42,6 +42,9 @@ class Fitting extends ChangeNotifier {
   final Playground pg;
   final FitEngine _engine;
 
+  /// Where the fits run (the model builder's fits share it).
+  FitEngine get engine => _engine;
+
   /// The device, pool and sampler settings the next fit uses.
   FitConfig get config => _config;
   FitConfig _config;
