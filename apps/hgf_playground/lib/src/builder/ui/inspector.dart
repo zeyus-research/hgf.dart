@@ -9,6 +9,7 @@ import '../../model/presets.dart' show paramsFor, ParamDef;
 import '../../ui/panels.dart' show LabeledSlider, SectionCard, fmt;
 import '../builder_model.dart';
 import '../doc_layout.dart';
+import 'pipeline_inspector.dart';
 
 /// Ids are identifiers: expressions and addresses read them.
 final _idPattern = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$');
@@ -64,27 +65,36 @@ class BuilderInspector extends StatelessWidget {
     listenable: model,
     builder: (context, _) {
       final children = [
-        switch (model.selection) {
-          NodeSelection(:final id) when model.doc.node(id) != null =>
-            _NodePanel(
-              key: ValueKey('node $id'),
-              model: model,
-              node: model.doc.node(id)!,
-            ),
-          EdgeSelection(:final index) when index < model.doc.edges.length =>
-            _EdgePanel(
-              key: ValueKey('edge $index'),
-              model: model,
-              index: index,
-            ),
-          _ => _NetworkPanel(model: model),
-        },
+        if (model.view == BuilderView.pipeline)
+          PipelinePanel(
+            key: ValueKey('part ${model.selectedPart}'),
+            model: model,
+          )
+        else
+          switch (model.selection) {
+            NodeSelection(:final id) when model.doc.node(id) != null =>
+              _NodePanel(
+                key: ValueKey('node $id'),
+                model: model,
+                node: model.doc.node(id)!,
+              ),
+            EdgeSelection(:final index) when index < model.doc.edges.length =>
+              _EdgePanel(
+                key: ValueKey('edge $index'),
+                model: model,
+                index: index,
+              ),
+            _ => _NetworkPanel(model: model),
+          },
         if (model.issues.isNotEmpty) ...[
           const SizedBox(height: 12),
           _IssuesCard(model: model),
         ],
         const SizedBox(height: 12),
-        const _HelpCard(),
+        if (model.view == BuilderView.pipeline)
+          const PipelineHelpCard()
+        else
+          const _HelpCard(),
       ];
       if (shrinkWrap ?? false) {
         return Column(
@@ -281,7 +291,7 @@ class _NodePanel extends StatelessWidget {
     ),
     for (final MapEntry(key: dart, value: key)
         in AddCategoricalState.pyhgfKeys.entries)
-      _NumberField(
+      NumberField(
         key: ValueKey('${n.id} $key'),
         label: '$key  ($dart)',
         value: n.params[key],
@@ -714,7 +724,7 @@ class _EdgePanel extends StatelessWidget {
             record: false,
           ),
         ),
-        _NumberField(
+        NumberField(
           key: ValueKey('strength $index ${e.strength}'),
           label: 'exact strength',
           value: e.strength,
@@ -767,13 +777,28 @@ class _IssuesCard extends StatelessWidget {
               color: i.isError ? scheme.error : const Color(0xFFD08A00),
             ),
             title: Text(i.message),
-            onTap: i.edges.isEmpty && i.nodes.isEmpty
-                ? null
-                : () => model.select(
+            onTap: () {
+              final onNetwork = i.edges.isNotEmpty || i.nodes.isNotEmpty;
+              final parts = [
+                for (final p in i.parts)
+                  if (p != DocPart.network) p,
+              ];
+              if (parts.isNotEmpty && !onNetwork) {
+                model
+                  ..showView(BuilderView.pipeline)
+                  ..select(PartSelection(parts.first));
+              } else if (onNetwork) {
+                model
+                  ..showView(BuilderView.network)
+                  ..select(
                     i.edges.isNotEmpty
                         ? EdgeSelection(i.edges.last)
                         : NodeSelection(i.nodes.first),
-                  ),
+                  );
+              } else if (i.parts.contains(DocPart.network)) {
+                model.showView(BuilderView.network);
+              }
+            },
           ),
       ],
     );
@@ -847,8 +872,8 @@ class _Stepper extends StatelessWidget {
 
 /// A number typed in, committed on Enter or when the field loses focus;
 /// empty commits null.
-class _NumberField extends StatefulWidget {
-  const _NumberField({
+class NumberField extends StatefulWidget {
+  const NumberField({
     super.key,
     required this.label,
     required this.value,
@@ -860,10 +885,10 @@ class _NumberField extends StatefulWidget {
   final ValueChanged<double?> onSubmitted;
 
   @override
-  State<_NumberField> createState() => _NumberFieldState();
+  State<NumberField> createState() => _NumberFieldState();
 }
 
-class _NumberFieldState extends State<_NumberField> {
+class _NumberFieldState extends State<NumberField> {
   late final _text = TextEditingController(
     text: widget.value == null ? '' : '${widget.value}',
   );

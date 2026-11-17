@@ -1,4 +1,8 @@
+import 'dart:math' as math;
+import 'dart:typed_data';
+
 import 'package:hgf/hgf.dart';
+import 'package:hgf_fit/codegen.dart';
 import 'package:hgf_fit/document.dart';
 import 'package:hgf_widgets/hgf_widgets.dart';
 import 'package:material_ui/material_ui.dart';
@@ -8,6 +12,7 @@ import '../../ui/files.dart';
 import '../builder_model.dart';
 import 'builder_canvas.dart';
 import 'inspector.dart';
+import 'pipeline_canvas.dart';
 
 /// The model builder: the HGF graph on a canvas, an inspector for what is
 /// selected, and a live preview (the network built from the document and
@@ -43,6 +48,50 @@ class _BuilderPageState extends State<BuilderPage> {
     mimeType: 'application/json',
   );
 
+  /// The document as a runnable script: its network, the previewed data
+  /// and, with a response and free parameters, the fit.
+  Future<void> _exportCode({required bool python}) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final c = m.compiled, s = m.subject;
+    if (c == null || s == null) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Fix the errors to export the model')),
+      );
+      return;
+    }
+    final String script;
+    try {
+      final data = ExportData(
+        inputs: s.inputs,
+        observed: s.observed,
+        timeSteps: s.timeSteps,
+        responses: s.responses,
+      );
+      var spec = c.exportSpec(data: data);
+      if (c.model == null || c.model!.dimension == 0) {
+        spec = ExportSpec(
+          network: c.network.toJson(),
+          data: data,
+          title: spec.title,
+          columnNames: spec.columnNames,
+          derivedColumns: spec.derivedColumns,
+        );
+      }
+      script = python ? PythonExport(spec).script() : DartExport(spec).script();
+    } on Object catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Could not export: $e')));
+      return;
+    }
+    if (!mounted) return;
+    final base = m.name.replaceAll(RegExp(r'[^A-Za-z0-9_]+'), '_');
+    await saveText(
+      context,
+      python ? '$base.py' : '$base.dart',
+      script,
+      mimeType: python ? 'text/x-python' : 'text/x-dart',
+    );
+  }
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: m,
@@ -66,9 +115,13 @@ class _BuilderPageState extends State<BuilderPage> {
             icon: const Icon(Icons.redo),
           ),
           IconButton(
-            tooltip: 'Lay out again (parents above children)',
-            onPressed: m.autoLayout,
-            icon: const Icon(Icons.account_tree_outlined),
+            tooltip: m.view == BuilderView.network
+                ? 'Lay out again (parents above children)'
+                : 'Lay out again',
+            onPressed: m.view == BuilderView.network
+                ? m.autoLayout
+                : m.autoLayoutPipeline,
+            icon: const Icon(Icons.auto_fix_high_outlined),
           ),
           PopupMenuButton<String>(
             tooltip: 'Open a preset',
@@ -85,7 +138,8 @@ class _BuilderPageState extends State<BuilderPage> {
             onSelected: (f) => f(),
             itemBuilder: (context) => [
               PopupMenuItem(
-                value: () => m.open(_emptyDocument(), name: 'Untitled'),
+                value: () =>
+                    m.openNetworkDocument(_emptyDocument(), name: 'Untitled'),
                 child: const ListTile(
                   leading: Icon(Icons.note_add_outlined),
                   title: Text('New (empty)'),
@@ -105,6 +159,21 @@ class _BuilderPageState extends State<BuilderPage> {
                   title: Text('Save as JSON'),
                 ),
               ),
+              const PopupMenuDivider(),
+              PopupMenuItem(
+                value: () => _exportCode(python: false),
+                child: const ListTile(
+                  leading: Icon(Icons.code),
+                  title: Text('Export: Dart script'),
+                ),
+              ),
+              PopupMenuItem(
+                value: () => _exportCode(python: true),
+                child: const ListTile(
+                  leading: Icon(Icons.code),
+                  title: Text('Export: Python script (pyhgf)'),
+                ),
+              ),
             ],
           ),
           const SizedBox(width: 8),
@@ -119,7 +188,18 @@ class _BuilderPageState extends State<BuilderPage> {
 
   Widget _canvas() => Card(
     clipBehavior: Clip.antiAlias,
-    child: BuilderCanvas(model: m),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _Breadcrumbs(model: m),
+        const Divider(height: 1),
+        Expanded(
+          child: m.view == BuilderView.pipeline
+              ? PipelineCanvas(model: m)
+              : BuilderCanvas(model: m),
+        ),
+      ],
+    ),
   );
 
   Widget _wide(BuildContext context) => Row(
@@ -147,9 +227,11 @@ class _BuilderPageState extends State<BuilderPage> {
   Widget _narrow(BuildContext context) {
     const h = 130.0;
     final net = m.network;
-    final panels = net == null || m.trajectories == null
-        ? 1
-        : HgfTrajectoryView.panelCount(net);
+    final panels =
+        (net == null || m.trajectories == null
+            ? 1
+            : HgfTrajectoryView.panelCount(net)) +
+        BuilderPreview.extraPanels(m);
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
@@ -167,6 +249,61 @@ class _BuilderPageState extends State<BuilderPage> {
   }
 
   static NetworkDocument _emptyDocument() => NetworkDocument(nodes: const []);
+}
+
+/// Where the canvas is: the pipeline, or the network inside it.
+class _Breadcrumbs extends StatelessWidget {
+  const _Breadcrumbs({required this.model});
+
+  final BuilderModel model;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final inNetwork = model.view == BuilderView.network;
+    final hasNetworkIssue = model.partIssues.containsKey(DocPart.network);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      child: Row(
+        children: [
+          TextButton.icon(
+            onPressed: inNetwork
+                ? () => model.showView(BuilderView.pipeline)
+                : null,
+            icon: const Icon(Icons.linear_scale, size: 18),
+            label: const Text('Pipeline'),
+          ),
+          const Icon(Icons.chevron_right, size: 18),
+          TextButton.icon(
+            onPressed: inNetwork
+                ? null
+                : () => model.showView(BuilderView.network),
+            icon: Icon(
+              hasNetworkIssue
+                  ? Icons.error_outline
+                  : Icons.account_tree_outlined,
+              size: 18,
+              color: hasNetworkIssue ? theme.colorScheme.error : null,
+            ),
+            label: const Text('HGF network'),
+          ),
+          const Spacer(),
+          Flexible(
+            child: Text(
+              inNetwork
+                  ? 'Parents above children; drag from a port to connect'
+                  : 'Data → transforms → network → response and outputs',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
+    );
+  }
 }
 
 /// The preview's header: what was simulated, how long building and
@@ -190,33 +327,54 @@ class _PreviewBar extends StatelessWidget {
           child: Text(
             model.network == null
                 ? ''
+                : model.csv != null
+                ? '${model.csvName ?? 'Loaded data'}'
+                      '${model.participants.isEmpty ? '' : ', participant ${model.participants[model.participant.clamp(0, model.participants.length - 1)]}'}'
+                      '; checked, built and filtered in $ms ms'
                 : 'Simulated data per input (reversals for binary, random '
-                      'walks for continuous); checked, built and filtered in '
+                      'walks for continuous)'
+                      '${model.subject?.responses != null ? ' and responses' : ''}'
+                      '; checked, built and filtered in '
                       '$ms ms${model.trials < model.data.nTrials ? '; ${model.trials} trials (dp-state nodes are slow)' : ''}',
             style: theme.textTheme.bodySmall,
             overflow: TextOverflow.ellipsis,
           ),
         ),
-        DropdownButton<int>(
-          value: _trials.contains(model.data.nTrials)
-              ? model.data.nTrials
-              : null,
-          hint: Text('${model.data.nTrials}'),
-          isDense: true,
-          underline: const SizedBox.shrink(),
-          items: [
-            for (final n in _trials)
-              DropdownMenuItem(value: n, child: Text('$n trials')),
-          ],
-          onChanged: (n) {
-            if (n != null) model.setTrials(n);
-          },
-        ),
-        IconButton(
-          tooltip: 'New random data',
-          icon: const Icon(Icons.casino_outlined, size: 20),
-          onPressed: model.reseed,
-        ),
+        if (model.participants.length > 1)
+          DropdownButton<int>(
+            value: model.participant.clamp(0, model.participants.length - 1),
+            isDense: true,
+            underline: const SizedBox.shrink(),
+            items: [
+              for (final (k, p) in model.participants.indexed)
+                DropdownMenuItem(value: k, child: Text(p)),
+            ],
+            onChanged: (k) {
+              if (k != null) model.showParticipant(k);
+            },
+          ),
+        if (model.csv == null)
+          DropdownButton<int>(
+            value: _trials.contains(model.data.nTrials)
+                ? model.data.nTrials
+                : null,
+            hint: Text('${model.data.nTrials}'),
+            isDense: true,
+            underline: const SizedBox.shrink(),
+            items: [
+              for (final n in _trials)
+                DropdownMenuItem(value: n, child: Text('$n trials')),
+            ],
+            onChanged: (n) {
+              if (n != null) model.setTrials(n);
+            },
+          ),
+        if (model.csv == null)
+          IconButton(
+            tooltip: 'New random data',
+            icon: const Icon(Icons.casino_outlined, size: 20),
+            onPressed: model.reseed,
+          ),
       ],
     );
   }
@@ -230,12 +388,60 @@ class BuilderPreview extends StatefulWidget {
   final BuilderModel model;
   final double? panelHeight;
 
+  /// At most this many outputs are plotted.
+  static const maxOutputs = 4;
+
+  /// The panels drawn above the network's: the responses and the named
+  /// outputs (on the pipeline only).
+  static int extraPanels(BuilderModel m) => m.view != BuilderView.pipeline
+      ? 0
+      : (m.subject?.responses != null ? 1 : 0) +
+            math.min(m.outputs.length, maxOutputs);
+
   @override
   State<BuilderPreview> createState() => _BuilderPreviewState();
 }
 
 class _BuilderPreviewState extends State<BuilderPreview> {
   final _hover = ValueNotifier<int?>(null);
+
+  /// The responses and the named outputs, one plot each.
+  List<Widget> _extras(BuildContext context, BuilderModel m) {
+    if (m.view != BuilderView.pipeline) return const [];
+    final colors = HgfColors.of(context);
+    final scheme = Theme.of(context).colorScheme;
+    final r = m.subject?.responses;
+    final n = m.trajectories?.nTime ?? 0;
+    return [
+      if (r != null && r.length >= n)
+        TrajectoryPlot(
+          title:
+              '${m.document.response?.name ?? 'response'} '
+              '(${m.csv == null ? 'simulated' : 'recorded'})',
+          layers: [
+            PointLayer(
+              Float64List.sublistView(r, 0, n),
+              color: scheme.tertiary,
+              radius: 1.6,
+            ),
+          ],
+          hover: _hover,
+          revision: m.revision,
+          showXAxis: false,
+        ),
+      for (final MapEntry(:key, :value) in m.outputs.entries.take(
+        BuilderPreview.maxOutputs,
+      ))
+        TrajectoryPlot(
+          title: '$key (output)',
+          layers: [LineLayer(value, color: colors.category(1))],
+          hover: _hover,
+          revision: m.revision,
+          showXAxis: false,
+        ),
+    ];
+  }
+
   Network? _laidOut;
   NetworkLayout? _layout;
 
@@ -284,6 +490,8 @@ class _BuilderPreviewState extends State<BuilderPreview> {
               ),
             ),
           ),
+        for (final w in _extras(context, m))
+          SizedBox(height: widget.panelHeight ?? 64, child: w),
         Expanded(
           child: HgfTrajectoryView(
             network: net,

@@ -265,6 +265,7 @@ final class DocIssue {
     this.message, {
     this.nodes = const [],
     this.edges = const [],
+    this.parts = const [],
   });
 
   final IssueSeverity severity;
@@ -276,7 +277,20 @@ final class DocIssue {
   /// The indices (in [NetworkDocument.edges]) of the edges concerned.
   final List<int> edges;
 
+  /// The parts of a model document concerned (see [DocPart]): its data,
+  /// an input, a transform, the response, an output, or the network.
+  final List<String> parts;
+
   bool get isError => severity == IssueSeverity.error;
+
+  /// This issue, also naming [more] parts.
+  DocIssue inParts(List<String> more) => DocIssue(
+    severity,
+    message,
+    nodes: nodes,
+    edges: edges,
+    parts: [...parts, ...more],
+  );
 
   @override
   String toString() => '${severity.name}: $message';

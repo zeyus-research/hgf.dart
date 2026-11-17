@@ -2316,10 +2316,11 @@ fitting, export) reads it.
    opens in it; the preview pane reuses the playground's views. Check
    the Flutter node-editor packages first, but expect our own
    `CustomPainter` canvas.
-5. [ ] **Slice 2:** inputs and outputs: data-source nodes (CSV columns),
+5. [x] **Slice 2** (done 2026-11-17, see "Builder, slice 2" below):
+   inputs and outputs: data-source nodes (CSV columns),
    transform nodes, readout nodes, named outputs; generate data and
    decisions from the preview (`Network.sample`, `simulateChoices`).
-   Probably nested: the HGF network is one node of the data pipeline that
+   Nested: the HGF network is one node of the data pipeline that
    opens into its own canvas (parent edges and data flows mean different
    things; one canvas for both gets confusing).
 6. [ ] **Slice 3:** participants (one network template per participant,
@@ -2515,6 +2516,65 @@ candidate search.
   the HGF page (its data and fitting views assume one input; slice 2's
   data pipeline will feed them), ef-state xis.
 
+#### Builder, slice 2 (2026-11-17): done
+
+- **Nested canvases.** The builder opens on the model's *pipeline*, left
+  to right: a data card (its columns, each with a port; roles tagged:
+  participant, time, group), transform cards, the HGF network as one card
+  (a row per named input; double-click or Enter opens the slice-1 canvas,
+  a breadcrumb leads back), the response and the output cards. Wires are
+  not stored: they are drawn from the document's references (an
+  expression's variables, an input's columns, the response's column, the
+  beliefs the response and outputs read). Drag a column's port onto a
+  network input to read it, onto the response to record it, onto the
+  background to make a transform of it; drag the network's beliefs port
+  onto the background for an output. Undo covers both canvases (one
+  history of `ModelDocument`s plus both layouts).
+- **`BuilderModel` holds a `ModelDocument`** (`doc` is still its network,
+  so slice 1 is unchanged). Every refresh matches the inputs to the built
+  network's input nodes (`withInputsFor`: a new childless node gets an
+  input named after it), runs `checkModel` against the loaded data's
+  columns and compiles. Presets with a choice task open with their
+  response (softmax over the decks/arms, option labels, reveals).
+- **Data:** a loaded CSV (pick the participant in the preview) or
+  simulated inputs as before, now with simulated responses
+  (`CompiledDocument.simulate`: `simulateChoices` when options reveal
+  inputs, else the response model's draws at the parameters' typical
+  values). "Save simulated data" writes the document's own columns
+  (`toCsv`; `subjects` reads it back); "Save with outputs" appends each
+  named output to the data's rows (`withOutputs`), so the data's own time
+  stamps stay next to the regressors (EEG). File → Export writes the Dart
+  or pyhgf script from `CompiledDocument.exportSpec` with the previewed
+  data (the fit when there are free parameters).
+- **Inspector per part:** the data layout (participant, time or time-step,
+  group column), transforms (name, expression with live parse errors,
+  who reads it), inputs (name, column(s), category labels, observed-flag
+  column), the response (Gaussian, binary or categorical softmax, softmax
+  over named options with weight, bias, stickiness and lapse, or one
+  expression per option with its parameters; recorded column, option
+  labels, what each option reveals) and outputs (node, field or
+  surprise). The preview adds the responses (recorded or simulated) and up
+  to four outputs above the network's trajectories.
+- **`hgf_fit`** (`document/model_edit.dart`): `ModelDocumentEdits`
+  (`copyWith`, `withNetwork` with node renames followed into inputs,
+  outputs, readout addresses, `ExprReadout` beliefs and parameters;
+  outputs and parameters on removed nodes dropped; `withInputsFor`;
+  `replaceInput` renaming reveals; transforms and `renameColumn`;
+  outputs; `withResponse`), `checkModel` (network issues plus inputs,
+  names, unknown columns, readouts that don't decode, outputs, data
+  layout; `DocIssue.parts` names the pipeline part), and on
+  `CompiledDocument`: `networkAt(x)`, `filter`, `simulate`, `toCsv`,
+  `withOutputs`. `Expr.renamed` in `package:hgf`. Tests: CSV round trip,
+  simulated choices, outputs per row, checks, renames (hgf_fit); presets
+  with responses, adding parts with undo, two participants through a
+  transform, renames, save/open, and a widget test dragging a column onto
+  the network's input then double-clicking into the network.
+- Left for later: generated data for inputs that read transforms (the
+  simulation feeds the network directly; a saved CSV then holds the
+  derived column), label decoding and pandas transforms in the exported
+  Python, a decaying choice trace, multi-term softmax options in the
+  inspector (JSON only), fitting from the builder (slice 3).
+
 **Driving example: the user's 6-person hyperscanning experiment.** A
 ball balancing on a beam (an elevator): a participant lifts the left or
 the right side (never both), so the ball rises without falling off;
@@ -2693,8 +2753,9 @@ builder, started 2026-11-16 (LSL / real-time sources shelved until
 after it): the model document and expressions (couplings, readouts and
 data transforms) are done (2026-11-16), and the choice follow-ups
 (stickiness, lapse, option bias; 2026-11-17) and the builder's first
-slice, the HGF graph canvas (2026-11-17); next slice 2 (inputs, transforms,
-readouts and outputs). Vector node kinds on the GPU and a
+two slices, the HGF graph canvas and the pipeline around it (data,
+transforms, response, outputs; 2026-11-17); next slice 3 (participants,
+fitting). Vector node kinds on the GPU and a
 faster dp candidate search can run alongside.
 
 ```sh

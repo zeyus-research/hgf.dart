@@ -8,7 +8,9 @@ import 'package:hgf_playground/src/app.dart';
 import 'package:hgf_playground/src/builder/builder_model.dart';
 import 'package:hgf_playground/src/builder/doc_layout.dart';
 import 'package:hgf_playground/src/builder/ui/builder_canvas.dart';
+import 'package:hgf_playground/src/builder/ui/inspector.dart' show withId;
 import 'package:hgf_playground/src/builder/ui/builder_page.dart';
+import 'package:hgf_playground/src/builder/ui/pipeline_canvas.dart';
 import 'package:hgf_playground/src/model/presets.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -174,6 +176,108 @@ void main() {
     });
   });
 
+  group('Pipeline', () {
+    test('a choice task opens with its response, simulated', () {
+      final m = BuilderModel()..openPreset(presetById('igt'));
+      final r = m.document.response!;
+      expect(r.options, hasLength(4));
+      expect(r.reveals, hasLength(4));
+      expect(m.issues.where((i) => i.isError), isEmpty);
+      expect(m.compiled, isNotNull);
+      final choices = m.subject!.responses!;
+      expect(choices.every((c) => c >= 0 && c < 4), isTrue);
+      // A choice reveals only its deck's outcome.
+      expect(m.subject!.observed, isNotNull);
+    });
+
+    test('adds a response and outputs; undo takes them back', () {
+      final m = BuilderModel()..openPreset(presetById('binary3'));
+      expect(m.document.inputs.single.name, 'observation');
+      m.addResponse();
+      expect(m.document.response!.readout['type'], 'BinarySoftmaxReadout');
+      expect(m.selectedPart, DocPart.response);
+      final r = m.subject!.responses!;
+      expect(r.every((v) => v == 0 || v == 1), isTrue);
+      final name = m.addOutput(node: 'x1', field: 'value_prediction_error');
+      expect(m.outputs[name], hasLength(m.trials));
+      expect(m.pipelineParts, contains(DocPart.output(name)));
+      m.deleteSelection();
+      expect(m.document.outputs, isEmpty);
+      m.undo();
+      expect(m.document.outputs, hasLength(1));
+      m
+        ..undo()
+        ..undo();
+      expect(m.document.response, isNull);
+    });
+
+    test('previews loaded data per participant, through transforms', () {
+      final m = BuilderModel()..openPreset(presetById('continuous2'));
+      final rows = [
+        for (final p in ['a', 'b'])
+          for (var t = 0; t < 40; t++) '$p,$t,${p == 'a' ? t * 0.1 : -t * 0.1}',
+      ];
+      m.loadData(
+        CsvData.parse('who,time,raw\n${rows.join('\n')}\n'),
+        name: 'two.csv',
+      );
+      // The input reads "observation", which the data lacks.
+      expect(m.partIssues[DocPart.input('observation')], IssueSeverity.error);
+      expect(m.dataColumns, ['who', 'time', 'raw']);
+
+      final t = m.addTransform(column: 'raw');
+      expect(m.document.transform(t)!.expression.toString(), 'raw');
+      m.bindColumn(t, 'observation');
+      m.update(
+        m.document.copyWith(
+          data: const DocData(participantColumn: 'who', timeColumn: 'time'),
+        ),
+      );
+      expect(m.issues.where((i) => i.isError), isEmpty);
+      expect(m.participants, ['a', 'b']);
+      final a = m.lastMean('x0')!;
+      m.showParticipant(1);
+      expect(m.lastMean('x0'), lessThan(a));
+
+      // Outputs line up with the data's rows.
+      m.addOutput(node: 'x0', field: 'mean');
+      final out = CsvData.parse(m.outputsCsv()!);
+      expect(out.rows, hasLength(80));
+      expect(out.header.last, 'x0_mean');
+
+      // Renaming the transform renames what reads it.
+      m.update(m.document.replaceTransform(t, DocTransform('scaled', 'raw')));
+      expect(m.document.inputs.single.columns, ['scaled']);
+      expect(m.issues.where((i) => i.isError), isEmpty);
+    });
+
+    test('renaming a node keeps the outputs and the response on it', () {
+      final m = BuilderModel()..openPreset(presetById('binary3'));
+      m
+        ..addResponse()
+        ..addOutput(node: 'x1', field: 'mean');
+      m.replaceNode('x1', withId(m.doc.node('x1')!, 'belief'));
+      expect(m.document.outputs.single.node, 'belief');
+      expect(m.issues.where((i) => i.isError), isEmpty);
+      // The binary input: still read by the response.
+      expect(m.document.response!.readout['node'], 'x0');
+    });
+
+    test('saves and opens the whole model, with both layouts', () {
+      final m = BuilderModel()..openPreset(presetById('continuous2'));
+      m
+        ..addTransform(column: 'observation')
+        ..addOutput(node: 'x1', field: 'mean')
+        ..movePart(DocPart.network, const Offset(600, 40));
+      final back = BuilderModel(doc: NetworkDocument(nodes: const []))
+        ..openJson(m.toJsonText());
+      expect(back.document.transforms, hasLength(1));
+      expect(back.document.outputs, hasLength(1));
+      expect(back.pipelinePositions[DocPart.network], const Offset(600, 40));
+      expect(back.positions, m.positions);
+    });
+  });
+
   group('BuilderPage', () {
     for (final width in [1300.0, 480.0]) {
       testWidgets('renders every preset ${width.toInt()} wide', (tester) async {
@@ -196,6 +300,66 @@ void main() {
       });
     }
 
+    testWidgets('drag a column onto the network\'s input to read it', (
+      tester,
+    ) async {
+      tester.view
+        ..physicalSize = const Size(1300, 900)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final m = BuilderModel()..openPreset(presetById('continuous2'));
+      m.loadData(CsvData.parse('t,y\n0,0.1\n1,0.4\n2,0.2\n'), name: 'y.csv');
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildTheme(Brightness.light),
+          home: BuilderPage(model: m),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(m.view, BuilderView.pipeline);
+
+      final box = tester.getRect(find.byType(PipelineCanvas));
+      final cards = pipelineGeometry(m).cards;
+      var r = cards.first.rect;
+      for (final c in cards.skip(1)) {
+        r = r.expandToInclude(c.rect);
+      }
+      final bounds = r.inflate(40);
+      final scale = [
+        box.width / bounds.width,
+        box.height / bounds.height,
+      ].reduce((a, b) => a < b ? a : b).clamp(0.3, 1.2);
+      final pan = box.size.center(Offset.zero) - bounds.center * scale;
+      Offset screen(Offset p) => box.topLeft + pan + p * scale;
+
+      final data = cards.first;
+      final yRow = data.rows.indexWhere((row) => row.label == 'y');
+      final net = cards.firstWhere((c) => c.part == DocPart.network);
+      final from = screen(data.rowPort(yRow));
+      final to = screen(net.rowCentre(0) + const Offset(60, 0));
+      final g = await tester.startGesture(from);
+      await tester.pump(const Duration(milliseconds: 20));
+      for (var k = 1; k <= 10; k++) {
+        await g.moveTo(Offset.lerp(from, to, k / 10)!);
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await g.up();
+      await tester.pumpAndSettle();
+      expect(m.document.inputs.single.columns, ['y']);
+      expect(m.selectedPart, DocPart.input('observation'));
+      expect(m.issues.where((i) => i.isError), isEmpty);
+      expect(m.trajectories!.nTime, 3);
+
+      // Double-clicking the network opens it.
+      final centre = screen(net.at + const Offset(cardWidth / 2, 12));
+      await tester.tapAt(centre);
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tapAt(centre);
+      await tester.pumpAndSettle();
+      expect(m.view, BuilderView.network);
+      expect(find.byType(BuilderCanvas), findsOneWidget);
+    });
+
     testWidgets('drag from a port to a node connects them; Del deletes', (
       tester,
     ) async {
@@ -206,7 +370,9 @@ void main() {
       final m = BuilderModel(doc: NetworkDocument(nodes: const []));
       m.addNode(NodeKind.continuousState, at: Offset.zero); // x0
       m.addNode(NodeKind.continuousState, at: const Offset(0, -120)); // x1
-      m.opened++; // fit the view to both
+      m
+        ..showView(BuilderView.network)
+        ..opened += 1; // fit the view to both
       await tester.pumpWidget(
         MaterialApp(
           theme: buildTheme(Brightness.light),

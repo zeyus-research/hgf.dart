@@ -120,6 +120,25 @@ sealed class Expr {
 
   void _visit(void Function(Expr) f);
 
+  /// This expression with each variable `v` read as `rename(v)` (e.g. a
+  /// column or node that was renamed). Returns this when nothing changes.
+  Expr renamed(String Function(String name) rename) {
+    final out = switch (this) {
+      ExprVar(:final name) => ExprVar(rename(name)),
+      ExprNeg(:final a) => ExprNeg(a.renamed(rename)),
+      ExprBinary(:final op, :final a, :final b) => ExprBinary(
+        op,
+        a.renamed(rename),
+        b.renamed(rename),
+      ),
+      ExprCall(:final fn, :final args) => ExprCall(fn, [
+        for (final a in args) a.renamed(rename),
+      ]),
+      ExprNum() || ExprStr() => this,
+    };
+    return out == this ? this : out;
+  }
+
   /// The derivative with respect to [variable], simplified. Comparisons
   /// and `sign` have derivative 0; `min`, `max`, `clip` and `where` pass the
   /// branch taken; `abs` gives 1 at 0, as JAX does.

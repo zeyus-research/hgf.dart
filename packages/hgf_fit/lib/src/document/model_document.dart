@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:hgf/hgf.dart';
@@ -7,6 +8,7 @@ import '../codegen/export_spec.dart';
 import '../codegen/plan.dart';
 import '../expr_readout.dart';
 import '../model.dart';
+import '../parameter.dart';
 import 'network_document.dart';
 import 'transforms.dart';
 
@@ -348,12 +350,12 @@ final class ModelDocument {
       response: DocResponse(
         'response',
         readout:
-            _remap(codec.encodeResponse(model.response), toAddress)
+            remapNodeKeys(codec.encodeResponse(model.response), toAddress)
                 as Map<String, Object?>,
       ),
       parameters: [
         for (final p in codec.encodeParameters(model.parameters))
-          _remap(p, toAddress) as Map<String, Object?>,
+          remapNodeKeys(p, toAddress) as Map<String, Object?>,
       ],
       fit:
           fit ??
@@ -370,7 +372,7 @@ final class ModelDocument {
     final a = doc.addresses;
     final idxs = network.inputIdxs;
     final single =
-        idxs.length == 1 && _inputWidth(network, doc, idxs.single) == 1;
+        idxs.length == 1 && inputWidth(network, doc, idxs.single) == 1;
     return [
       for (final i in idxs)
         DocInput(single ? 'observation' : 'input_$i', node: a.addressOf(i)),
@@ -488,10 +490,11 @@ final class ModelDocument {
       model = HgfModel(
         network: net,
         response: codec.decodeResponse(
-          _remap(_bindBeliefs(r.readout, a), toIndex) as Map<String, Object?>,
+          remapNodeKeys(_bindBeliefs(r.readout, a), toIndex)
+              as Map<String, Object?>,
         ),
         parameters: codec.decodeParameters([
-          for (final p in parameters) _remap(p, toIndex),
+          for (final p in parameters) remapNodeKeys(p, toIndex),
         ]),
         blockSize: fit.blockSize,
         gradientMode: fit.gradientMode,
@@ -520,7 +523,7 @@ final class ModelDocument {
       a.indexOf(o.node);
       if (o.field != 'surprise') NodeField.parse(o.field);
     }
-    return CompiledDocument._(this, net, model, ordered, reveals);
+    return CompiledDocument._(this, net, model, ordered, reveals, couplings);
   }
 }
 
@@ -534,7 +537,10 @@ final class CompiledDocument {
     this.model,
     List<DocInput> inputs,
     this.reveals,
+    this._couplings,
   ) : inputs = List.unmodifiable(inputs);
+
+  final Map<String, Coupling> _couplings;
 
   final ModelDocument document;
   final Network network;
@@ -561,6 +567,231 @@ final class CompiledDocument {
             ? traj.nodeSurprise(a.indexOf(o.node))
             : traj.series(a.indexOf(o.node), NodeField.parse(o.field)),
     };
+  }
+
+  /// [network] built anew, with the free parameters set to the constrained
+  /// values [x] (in `model.parameters` order; default `model.start()`, the
+  /// priors' typical values). Without a model, just the network.
+  Network networkAt([List<double>? x]) {
+    final net = document.network.build(couplings: _couplings);
+    final m = model;
+    if (m == null) return net;
+    final values = x ?? m.start();
+    if (values.length != m.dimension) {
+      throw ArgumentError('x must have ${m.dimension} values');
+    }
+    for (final (i, p) in m.parameters.indexed) {
+      for (final t in p.targets) {
+        switch (t) {
+          case NodeTarget(:final node, :final field):
+            net.setInitial(node, field, values[i]);
+          case ValueCouplingTarget(:final parent, :final child):
+            net.setValueCoupling(parent, child, values[i]);
+          case VolatilityCouplingTarget(:final parent, :final child):
+            net.setVolatilityCoupling(parent, child, values[i]);
+          case ResponseTarget():
+        }
+      }
+    }
+    return net;
+  }
+
+  /// [subject] filtered by [networkAt] ([x]), recording [recordedFields].
+  Trajectories filter(Subject subject, [List<double>? x]) =>
+      networkAt(x).inputData(
+        subject.inputs,
+        observed: subject.observed,
+        timeSteps: subject.timeSteps,
+        fields: recordedFields,
+      )!;
+
+  /// [subjects] with responses simulated by the model at [x] (one vector
+  /// per subject; default `model.start()` for each): with [reveals], choices
+  /// that decide what is observed (`HgfModel.simulateChoices`, which also
+  /// sets the observed flags), else draws of the response model
+  /// (`HgfModel.simulate`).
+  List<Subject> simulate(
+    List<Subject> subjects,
+    math.Random rng, {
+    List<List<double>>? x,
+  }) {
+    final m =
+        model ?? (throw StateError('The document has no response to simulate'));
+    final xs = x ?? [for (final _ in subjects) m.start()];
+    if (reveals case final rv?) {
+      return m.simulateChoices(subjects, xs, rng, reveals: rv);
+    }
+    final r = m.simulate(subjects, xs, rng);
+    return [
+      for (final (k, s) in subjects.indexed)
+        Subject(
+          inputs: s.inputs,
+          observed: s.observed,
+          timeSteps: s.timeSteps,
+          responses: r[k],
+          id: s.id,
+        ),
+    ];
+  }
+
+  /// [subjects] as a CSV this document reads back ([subjects] gives them
+  /// again): the participant column (ids from [Subject.id], else 1, 2, …),
+  /// the time column (cumulative time steps from 0) or the time-step
+  /// column, each input's columns (labels for an input with categories, an
+  /// empty cell where unobserved, or the flag in its observed column), and
+  /// the response's columns (option labels with options; empty for a
+  /// missed response). Columns the document does not read are not written.
+  ///
+  /// An input that reads a transform's column gets that column here; the
+  /// transform must then go before the CSV is read back.
+  CsvData toCsv(List<Subject> subjects) {
+    final d = document.data;
+    if (subjects.length > 1 && d.participantColumn == null) {
+      throw ArgumentError(
+        'Several subjects need a participant column (DocData.participantColumn)',
+      );
+    }
+    final widths = [
+      for (final i in network.inputIdxs)
+        inputWidth(network, document.network, i),
+    ];
+    final width = widths.fold(0, (a, b) => a + b);
+    final nIn = inputs.length;
+    final header = <String>[];
+    int add(String name) {
+      final at = header.indexOf(name);
+      if (at >= 0) return at;
+      header.add(name);
+      return header.length - 1;
+    }
+
+    final pCol = d.participantColumn == null ? null : add(d.participantColumn!);
+    final tCol = d.timeColumn == null ? null : add(d.timeColumn!);
+    final dtCol = d.timeStepColumn == null ? null : add(d.timeStepColumn!);
+    final inputCols = [
+      for (var k = 0; k < nIn; k++)
+        [for (final c in inputs[k].columnsFor(widths[k])) add(c)],
+    ];
+    final flagCols = [
+      for (final i in inputs)
+        i.observedColumn == null ? null : add(i.observedColumn!),
+    ];
+    final r = document.response;
+    final responseCols = r == null
+        ? const <int>[]
+        : [for (final c in r.dataColumns) add(c)];
+
+    final rows = <List<String>>[];
+    for (final (si, s) in subjects.indexed) {
+      final nTime = s.inputs.length ~/ math.max(1, width);
+      var time = 0.0;
+      for (var t = 0; t < nTime; t++) {
+        final row = List.filled(header.length, '');
+        if (pCol != null) row[pCol] = '${s.id ?? si + 1}';
+        final dt = s.timeSteps?[t] ?? 1.0;
+        if (t > 0) time += dt;
+        if (tCol != null) row[tCol] = _cell(time);
+        if (dtCol != null) row[dtCol] = _cell(dt);
+        var off = 0;
+        for (var k = 0; k < nIn; k++) {
+          final w = widths[k];
+          final input = inputs[k];
+          final seen = s.observed == null || s.observed![t * nIn + k] != 0;
+          final base = t * width + off;
+          final flag = flagCols[k];
+          if (flag != null) row[flag] = seen ? '1' : '0';
+          if (seen || flag != null) {
+            if (input.categories case final cats?) {
+              var code = 0;
+              if (w == 1) {
+                code = s.inputs[base].round();
+              } else {
+                for (var j = 1; j < w; j++) {
+                  if (s.inputs[base + j] > s.inputs[base + code]) code = j;
+                }
+              }
+              row[inputCols[k].single] = code >= 0 && code < cats.length
+                  ? cats[code]
+                  : '$code';
+            } else {
+              for (var j = 0; j < w; j++) {
+                row[inputCols[k][j]] = _cell(s.inputs[base + j]);
+              }
+            }
+          }
+          off += w;
+        }
+        if (r != null && s.responses != null) {
+          final nr = responseCols.length;
+          for (var j = 0; j < nr; j++) {
+            final v = s.responses![t * nr + j];
+            if (v.isNaN) continue;
+            final opts = r.options;
+            row[responseCols[j]] =
+                opts != null &&
+                    v == v.roundToDouble() &&
+                    v >= 0 &&
+                    v < opts.length
+                ? opts[v.toInt()]
+                : _cell(v);
+          }
+        }
+        rows.add(row);
+      }
+    }
+    return CsvData(header, rows);
+  }
+
+  /// [data] (after the transforms) with a column per named output
+  /// appended, row by row: each participant filtered at [x] (by
+  /// participant id, in the order of first appearance; default the
+  /// parameters' starting values). The data's own columns (e.g. its time
+  /// stamps) stay, so the outputs line up with other recordings.
+  CsvData withOutputs(CsvData data, {Map<String, List<double>>? x}) {
+    final csv = transform(data);
+    final subs = subjects(data);
+    final groups = _groups(csv);
+    final names = [for (final o in document.outputs) o.name];
+    for (final n in names) {
+      if (csv.header.contains(n)) {
+        throw FormatException(
+          'The data already has a column "$n"; rename the output',
+        );
+      }
+    }
+    final rows = [
+      for (final r in csv.rows) [...r, for (final _ in names) ''],
+    ];
+    final base = csv.header.length;
+    for (final (k, MapEntry(key: id, value: rowIdx))
+        in groups.entries.indexed) {
+      final traj = filter(subs[k], x?[id]);
+      final outs = outputs(traj);
+      for (final (j, n) in names.indexed) {
+        final series = outs[n]!;
+        for (final (t, r) in rowIdx.indexed) {
+          rows[r][base + j] = _cell(series[t]);
+        }
+      }
+    }
+    return CsvData([...csv.header, ...names], rows);
+  }
+
+  /// The rows of each participant of [csv], in order of first appearance.
+  Map<String, List<int>> _groups(CsvData csv) {
+    final groups = <String, List<int>>{};
+    if (document.data.participantColumn case final p?) {
+      final c = csv.header.indexOf(p);
+      if (c < 0) {
+        throw FormatException('No column "$p" (participants) in the data');
+      }
+      for (var r = 0; r < csv.rows.length; r++) {
+        (groups[csv.rows[r][c].trim()] ??= []).add(r);
+      }
+    } else {
+      groups[''] = [for (var r = 0; r < csv.rows.length; r++) r];
+    }
+    return groups;
   }
 
   /// [csv] with the document's transforms' columns appended (see
@@ -593,20 +824,12 @@ final class CompiledDocument {
     }
 
     final d = document.data;
-    final groups = <String, List<int>>{};
-    if (d.participantColumn case final p?) {
-      final c = col(p, 'participants');
-      for (var r = 0; r < csv.rows.length; r++) {
-        (groups[csv.rows[r][c].trim()] ??= []).add(r);
-      }
-    } else {
-      groups[''] = [for (var r = 0; r < csv.rows.length; r++) r];
-    }
+    final groups = _groups(csv);
 
     // Per input: its columns, offset and width.
     final widths = [
       for (final i in network.inputIdxs)
-        _inputWidth(network, document.network, i),
+        inputWidth(network, document.network, i),
     ];
     final width = widths.fold(0, (a, b) => a + b);
     final nIn = inputs.length;
@@ -797,13 +1020,13 @@ final class CompiledDocument {
   ExportColumnNames get columnNames {
     final single =
         inputs.length == 1 &&
-        _inputWidth(network, document.network, network.inputIdxs.single) == 1;
+        inputWidth(network, document.network, network.inputIdxs.single) == 1;
     return (
       inputs: [
         for (var k = 0; k < inputs.length; k++)
           () {
             final input = inputs[k];
-            final w = _inputWidth(
+            final w = inputWidth(
               network,
               document.network,
               network.inputIdxs[k],
@@ -877,8 +1100,15 @@ Map<String, Object?> _bindBeliefs(
   return {...readout, 'beliefs': beliefs};
 }
 
+/// [v] for a CSV cell: integers without a decimal point, NaN as empty.
+String _cell(double v) => v.isNaN
+    ? ''
+    : v == v.roundToDouble() && v.abs() < 1e15
+    ? '${v.toInt()}'
+    : '$v';
+
 /// How many data columns the input node [i] takes.
-int _inputWidth(Network network, NetworkDocument doc, int i) =>
+int inputWidth(Network network, NetworkDocument doc, int i) =>
     switch (network.kindOf(i)) {
       NodeKind.categoricalState =>
         (doc.addresses.nodeAt(i) as CategoricalNode).nCategories,
@@ -888,13 +1118,14 @@ int _inputWidth(Network network, NetworkDocument doc, int i) =>
 
 /// [json] with [f] applied to the values of its `node`, `parent` and
 /// `child` keys (node indices ↔ addresses), at any depth.
-Object? _remap(Object? json, Object? Function(Object?) f) => switch (json) {
-  final Map<String, Object?> m => {
-    for (final MapEntry(:key, :value) in m.entries)
-      key: key == 'node' || key == 'parent' || key == 'child'
-          ? f(value)
-          : _remap(value, f),
-  },
-  final List<Object?> l => [for (final x in l) _remap(x, f)],
-  _ => json,
-};
+Object? remapNodeKeys(Object? json, Object? Function(Object?) f) =>
+    switch (json) {
+      final Map<String, Object?> m => {
+        for (final MapEntry(:key, :value) in m.entries)
+          key: key == 'node' || key == 'parent' || key == 'child'
+              ? f(value)
+              : remapNodeKeys(value, f),
+      },
+      final List<Object?> l => [for (final x in l) remapNodeKeys(x, f)],
+      _ => json,
+    };

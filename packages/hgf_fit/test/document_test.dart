@@ -353,6 +353,151 @@ p2,0.25,2,0,
         );
       });
 
+      test('writes subjects back as CSV', () {
+        final c = doc().compile();
+        final s = c.subjects(CsvData.parse(csv));
+        final out = c.toCsv(s);
+        expect(out.header, ['participant', 't', 'ball', 'mate', 'press']);
+        expect(out.rows.first, ['p1', '0', '0.1', 'left', 'left']);
+        expect(out.rows[1], ['p1', '0.5', '', 'right', 'none']);
+        final back = c.subjects(out);
+        for (var k = 0; k < s.length; k++) {
+          expect(back[k].id, s[k].id);
+          expect(back[k].inputs, s[k].inputs);
+          expect(back[k].observed, s[k].observed);
+          expect(back[k].timeSteps, s[k].timeSteps);
+          expect(
+            back[k].responses!.map((v) => v.isNaN ? -1 : v),
+            s[k].responses!.map((v) => v.isNaN ? -1 : v),
+          );
+        }
+      });
+
+      test('simulates choices and filters at parameter values', () {
+        final c = doc().compile();
+        final s = c.subjects(CsvData.parse(csv));
+        final sim = c.simulate(s, math.Random(3));
+        for (final x in sim) {
+          expect(x.responses!.every((v) => v == 0 || v == 1 || v == 2), true);
+        }
+        // The choices decide what was seen: "none" reveals nothing.
+        for (var t = 0; t < 3; t++) {
+          if (sim[0].responses![t] == 2) {
+            expect(sim[0].observed!.sublist(2 * t, 2 * t + 2), [0, 0]);
+          }
+        }
+        final back = c.subjects(c.toCsv(sim));
+        expect(back[0].responses, sim[0].responses);
+
+        final i = c.document.network.addresses.indexOf('ball_v');
+        expect(
+          c.networkAt([-2, 1]).getInitial(i, NodeField.tonicVolatility),
+          -2,
+        );
+        expect(
+          c.networkAt().getInitial(i, NodeField.tonicVolatility),
+          c.model!.start()[0],
+        );
+      });
+
+      test('appends the outputs to the data, row by row', () {
+        final c = doc().compile();
+        final data = CsvData.parse(csv);
+        final out = c.withOutputs(
+          data,
+          x: {
+            'p2': [-1, 1],
+          },
+        );
+        expect(out.header, [...data.header, 'pe', 'surprise']);
+        expect(out.rows, hasLength(data.rows.length));
+        final s = c.subjects(data);
+        final p1 = c.outputs(c.filter(s[0]));
+        final p2 = c.outputs(c.filter(s[1], [-1, 1]));
+        expect(double.parse(out.rows[2][5]), p1['pe']![2]);
+        expect(double.parse(out.rows[4][6]), p2['surprise']![1]);
+      });
+
+      test('checks the pipeline against the data', () {
+        final cols = CsvData.parse(csv).header;
+        expect(checkModel(doc(), columns: cols), isEmpty);
+        final missing = checkModel(doc(), columns: [...cols]..remove('ball'));
+        expect(missing.single.parts, [DocPart.input('ball')]);
+        expect(missing.single.message, contains('No column "ball"'));
+
+        final bad = doc().copyWith(
+          transforms: [DocTransform('fast', 'speed * 2')],
+          outputs: const [DocOutput('pe', node: 'nope', field: 'mean')],
+        );
+        final issues = checkModel(bad, columns: cols);
+        expect(issues.map((i) => i.parts.single), [
+          DocPart.transform('fast'),
+          DocPart.output('pe'),
+        ]);
+
+        final stale = doc().withNetwork(doc().network.withoutNode('ball_v'));
+        // The parameter and output on ball_v go; the readout is flagged.
+        expect(stale.parameters.map((p) => p['name']), ['beta']);
+        expect(stale.outputs.map((o) => o.name), ['surprise']);
+        // vol lost its child: an input now, without data; and the readout
+        // reads a node that is gone.
+        expect(
+          checkModel(stale, columns: cols)
+              .where((i) => i.isError)
+              .map((i) => i.parts.single),
+          [DocPart.network, DocPart.response],
+        );
+      });
+
+      test('keeps references when nodes and columns are renamed', () {
+        final d = doc();
+        final net = d.network.replaceNode(
+          'ball_v',
+          ScalarNode(
+            'speed',
+            kind: NodeKind.continuousState,
+            params: const {NodeField.tonicVolatility: -3},
+          ),
+        );
+        final r = d.withNetwork(net, renamedIds: {'ball_v': 'speed'});
+        expect(jsonEncode(r.response!.readout), contains('"speed"'));
+        expect(jsonEncode(r.response!.readout), isNot(contains('ball_v')));
+        expect(jsonEncode(r.parameters), contains('"speed"'));
+        expect(r.outputs.first.node, 'speed');
+        expect(checkModel(r), isEmpty);
+
+        // A new childless node is an input, and gets one.
+        final more = r.network.withNode(
+          ScalarNode('extra', kind: NodeKind.continuousState),
+        );
+        final withExtra = r.withNetwork(more).withInputsFor(more.build());
+        expect(withExtra.inputs.map((i) => i.name), ['ball', 'mate', 'extra']);
+        expect(withExtra.withInputsFor(more.build()), same(withExtra));
+
+        // Renaming a transform renames what reads it.
+        final t = d
+            .copyWith(
+              transforms: [DocTransform('ball_x', 'ball * 2')],
+              inputs: [
+                DocInput('ball', node: 'ball', columns: ['ball_x']),
+                d.inputs[1],
+              ],
+            )
+            .withTransform(DocTransform('ball_y', 'ball_x + 1'))
+            .replaceTransform('ball_x', DocTransform('scaled', 'ball * 2'));
+        expect(t.inputs.first.columns, ['scaled']);
+        expect('${t.transforms.last.expression}', 'scaled + 1');
+
+        // An ExprReadout's beliefs follow a rename.
+        final readout = renameReadout({
+          'type': 'ExprReadout',
+          'kind': 'choice',
+          'options': ['beta * ball_v.expected_mean', '0'],
+          'parameters': {'beta': 1.0},
+        }, (a) => a == 'ball_v' ? 'speed' : a);
+        expect(readout['options'], ['beta * speed.expected_mean', '0']);
+      });
+
       test('round-trips through JSON', () {
         final d = doc();
         final json = jsonEncode(d.toJson());

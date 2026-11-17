@@ -8,4 +8,5 @@ library;
 export 'src/document/network_document.dart';
 export 'src/document/model_document.dart';
 export 'src/document/edit.dart';
+export 'src/document/model_edit.dart';
 export 'src/document/transforms.dart';
