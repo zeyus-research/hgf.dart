@@ -824,6 +824,140 @@ final class HgfModel {
     ];
   }
 
+  /// Simulated responses of agents who see each other's: the subjects are
+  /// stepped together, one time step at a time, and on each step every
+  /// agent predicts, [response] draws its response from those predictions
+  /// (under `x[s]`; a readout of a belief's `mean` reads the previous
+  /// step's), and then [inputsAt] fills in that step's inputs, which may
+  /// depend on the responses just drawn (a team-mate's press, …). With
+  /// [reveals], each choice then decides which inputs are observed, as in
+  /// [simulateChoices].
+  ///
+  /// [inputsAt] gets the step `t`, the responses per subject (NaN: none),
+  /// and the step's inputs (`s * nInputColumns + c`) and observed flags
+  /// (`s * nInputs + i`), filled from the subjects' own; it overwrites what
+  /// depends on the responses. All subjects need the same number of steps
+  /// and the same time steps (one clock).
+  ///
+  /// Returns, per subject, a [Subject] with the inputs and observed flags
+  /// as filtered and the responses drawn.
+  List<Subject> simulateCoupled(
+    List<Subject> subjects,
+    List<List<double>> x,
+    math.Random rng, {
+    required void Function(
+      int t,
+      Float64List responses,
+      Float64List inputs,
+      Float64List observed,
+    )
+    inputsAt,
+    List<List<int>>? reveals,
+  }) {
+    final n = subjects.length;
+    if (x.length != n) throw ArgumentError('One parameter vector per subject');
+    if (n == 0) return const [];
+    final nIn = _nInputs, nCols = _nColumns, k = dimension;
+    for (final r in reveals ?? const <List<int>>[]) {
+      for (final i in r) {
+        if (i < 0 || i >= nIn) {
+          throw RangeError.range(i, 0, nIn - 1, 'reveals', 'Not an input');
+        }
+      }
+    }
+    final nTime = subjects.first.inputs.length ~/ math.max(1, nCols);
+    final steps = subjects.first.timeSteps;
+    for (final s in subjects) {
+      if (s.inputs.length != nTime * nCols) {
+        throw ArgumentError('Coupled subjects need the same number of steps');
+      }
+      final ts = s.timeSteps;
+      for (var t = 0; t < nTime; t++) {
+        if ((ts?[t] ?? 1.0) != (steps?[t] ?? 1.0)) {
+          throw ArgumentError('Coupled subjects need the same time steps');
+        }
+      }
+    }
+    final flat = Float64List(n * k);
+    for (var s = 0; s < n; s++) {
+      if (x[s].length != k) throw ArgumentError('x[$s] must have $k values');
+      flat.setRange(s * k, (s + 1) * k, x[s]);
+    }
+    final batch = _batch(n);
+    final (params, _) = _applyParameters(batch, [
+      for (var s = 0; s < n; s++) s,
+    ], flat);
+    final p = _responseNames.length;
+    final choices = [for (var s = 0; s < n; s++) Float64List(nTime)];
+    final inputs = [for (var s = 0; s < n; s++) Float64List(nTime * nCols)];
+    final seen = [for (var s = 0; s < n; s++) Float64List(nTime * nIn)];
+    final now = Float64List(n), u = Float64List(n * nCols);
+    final obs = Float64List(n * nIn);
+    final row = Float64List(nCols * n), rowObs = Float64List(nIn * n);
+    batch.reset();
+    for (var t = 0; t < nTime; t++) {
+      final dt = steps?[t] ?? 1.0;
+      batch.predict(timeStep: dt);
+      for (var s = 0; s < n; s++) {
+        now[s] = choices[s][t] = response.sampleAfter(
+          batch,
+          s,
+          t,
+          t > 0 ? choices[s][t - 1] : double.nan,
+          params,
+          s * p,
+          rng,
+        );
+        u.setRange(s * nCols, (s + 1) * nCols, subjects[s].inputs, t * nCols);
+        final o = subjects[s].observed;
+        for (var i = 0; i < nIn; i++) {
+          obs[s * nIn + i] = o == null ? 1.0 : o[t * nIn + i];
+        }
+      }
+      inputsAt(t, now, u, obs);
+      for (var s = 0; s < n; s++) {
+        if (reveals != null) {
+          final c = now[s];
+          final shown = List.filled(nIn, false);
+          if (!c.isNaN) {
+            final ci = c.toInt();
+            if (ci < 0 || ci >= reveals.length || ci != c) {
+              throw StateError(
+                '${response.runtimeType} chose $c; reveals has '
+                '${reveals.length} options',
+              );
+            }
+            for (final i in reveals[ci]) {
+              shown[i] = true;
+            }
+          }
+          for (var i = 0; i < nIn; i++) {
+            if (!shown[i]) obs[s * nIn + i] = 0;
+          }
+        }
+        for (var c = 0; c < nCols; c++) {
+          row[c * n + s] = u[s * nCols + c];
+        }
+        for (var i = 0; i < nIn; i++) {
+          rowObs[i * n + s] = obs[s * nIn + i];
+        }
+        inputs[s].setRange(t * nCols, (t + 1) * nCols, u, s * nCols);
+        seen[s].setRange(t * nIn, (t + 1) * nIn, obs, s * nIn);
+      }
+      batch.step(row, observed: rowObs, timeStep: dt, perElement: true);
+    }
+    return [
+      for (var s = 0; s < n; s++)
+        Subject(
+          inputs: inputs[s],
+          observed: seen[s],
+          timeSteps: subjects[s].timeSteps,
+          responses: choices[s],
+          id: subjects[s].id,
+        ),
+    ];
+  }
+
   /// Input nodes (observed flags per trial).
   int get _nInputs => network.inputIdxs.length;
 

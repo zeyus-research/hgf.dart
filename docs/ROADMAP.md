@@ -2323,16 +2323,21 @@ fitting, export) reads it.
    Nested: the HGF network is one node of the data pipeline that
    opens into its own canvas (parent edges and data flows mean different
    things; one canvas for both gets confusing).
-6. [ ] **Slice 3:** participants (one network template per participant,
+6. [x] **Slice 3:** participants (one network template per participant,
    bindings per participant, a group level via `HierarchicalModel`),
    wired to the fit view and the exports. First part done 2026-11-17
    (see "Builder, slice 3" below): free parameters, the group level in
    the document, fitting every participant from the builder; the exports
    of every participant and of the group level, Dart and pyhgf/PyMC
-   (2026-11-17, see "Exports of every participant" below). Left:
-   relative bindings (team-mates' presses as inputs beyond `mate()`
-   transforms).
-7. [ ] Later: hgf_deep layers and a data-loading pipeline as nodes of
+   (2026-11-17, see "Exports of every participant" below); relative
+   bindings, team-mates' presses as inputs, simulated together
+   (2026-11-17, see "Relative bindings" below).
+7. [x] **Events onto a shared clock** (done 2026-11-17, see "Events onto
+   a shared clock" below): event tables (a row per event on the session's
+   shared clock) become one row per step on a grid shared by everyone in
+   a session, each state held until its next event (zero-order hold), so
+   `mate`/`mates_*` line up team-mates by the grid's time.
+8. [ ] Later: hgf_deep layers and a data-loading pipeline as nodes of
    the same kind; Julia export.
 
 In parallel (not blocking): vector node kinds on the GPU, a faster dp
@@ -2702,6 +2707,112 @@ candidate search.
   in Python (it samples instead), MAP restarts in the Python export (PyMC
   starts from the initial values only).
 
+#### Relative bindings (2026-11-17): done
+
+- **Team-mates without an order:** `mates_sum(x)`, `mates_mean(x)` and
+  `mates_count(x)` (data transforms, `package:hgf` `Expr` registry) over
+  the other members of the participant's group at the same time whose x
+  is not missing (sum and mean empty when none is; `mates_count` of a
+  text column counts non-empty cells, so `mates_count(press)` counts
+  presses). `mate(x, k)`'s "k-th other member" is the order of first
+  appearance, arbitrary once teams are reshuffled; these are not.
+  pyhgf export: `Transforms.mates` (the parity test's reshuffled-teams
+  table uses all three).
+- **Transforms step by step:** `TransformTable` evaluates the transforms
+  at a block of rows at a time (each expression node keeps its column
+  across passes, so `lag` finds what it shifts), and `applyTransforms`
+  is one pass over every row; evaluating time step after time step gives
+  the whole table bit for bit (tested with `lag`/`mate`/`mates_*` nested).
+  `DataLayout.reader` reads a row at a time (`LayoutReader`), which
+  `subjects` now uses.
+- **Simulated together:** `HgfModel.simulateCoupled` steps every subject
+  in one batch: predict, draw every response, then a callback fills that
+  step's inputs (which may read the responses just drawn), then update.
+  `CompiledDocument.simulateTogether(data, rng, x:)` writes each step's
+  responses into the response column of the raw data, computes the
+  transforms at that step's rows and reads the inputs from them;
+  `inputsReadResponses` says when a document needs it (an input reads a
+  transform that depends on the response's column, `lag(press)`
+  included). It returns the raw data, which `subjects` reads back as the
+  simulated subjects bit for bit. One clock: every participant needs as
+  many rows. Not with options that reveal inputs (yet). Imitating teams
+  agree on ~99 % of steps vs ~14 % for independent players in the test.
+- **Builder:** simulated participants play in teams (size; reshuffled
+  every N steps or never; a `team` group column is named when needed);
+  a model whose inputs read responses is simulated together, and "Save
+  simulated data", "Save with outputs" and File → Export use the raw data
+  (no derived columns, so the scripts' transforms recompute them). The
+  transform inspector has "From team-mates…" (how many / the share
+  pressing each option, how many responded).
+- **The real data** (`VideoGameParadigm-EEG-bids`, 36 participants so
+  far, 6 sessions of 6): presses are events in `beh/*_events.tsv`
+  (`trial_type` `press`, `value` left/right/none, onset, duration,
+  `round`, `trial`, `team_id`, `phase_id`, `in_valid_window`, LSL time);
+  each state holds until the next event. Rounds and team ranks per
+  session in `derivatives/rt-data/blocks.csv`; there are
+  `CONTROL_REVERSAL_*` events (zones where left/right swap?), input
+  lock/unlock and power-ups. Each player has their own event times, so
+  `mate()` needs the shared-clock node first (item 7).
+- Left: reveals together with coupled simulation, a decaying choice
+  trace, hierarchical recovery from the populations.
+
+#### Events onto a shared clock (2026-11-17): done
+
+What the user said about the data: everything is on one shared clock (LSL
+on each iPad and the coordinator, a Bela board logging the timing chain
+and forwarding it to the EEG amplifiers), so `t_lsl_coord` is the onset.
+A press is a state that holds until the next event. Response times are
+over 100 ms, so a coarser grid than the 120 Hz frames is fine. Input-lock
+periods (after a ball falls) are observed: the game goes on, that team
+can't affect it, and they may watch the other team play. Control
+reversals swap left and right. `team_id` is the three players who share a
+paddle; each sees indicators under the paddle for every team member (one
+block per session is blinded: they don't know who is on their team; the
+others have coloured physical indicators). Individual rounds are a
+condition of their own (solo): no team-mates, nobody else seen.
+
+- **`DocClock`** (`DocData.clock`, JSON `"clock"`, `hgf_fit/document/clock.dart`):
+  `onsetColumn`, `step`, an optional `sessionColumn` (a grid per session,
+  everyone in it sharing it), `streams` (`ClockStream`: which events,
+  `when`, an expression over the event row; what they hold, name →
+  expression, text copied as written) and `keep` (drops grid rows, e.g.
+  `missing(press) == 0`). The grid's times are whole multiples of the step
+  (printed exactly, so `mate` keys match and outputs sit on the LSL
+  timeline), from each session's first event to its last; before a
+  participant's first event of a stream its columns are empty; events at
+  the same time keep file order. The grid's columns: participant, session,
+  the document's time column, then the held columns
+  (`DocData.columnsOf(header)`, what `checkModel` and the builder see).
+  `DataLayout.clocked` puts data on the clock before the transforms; data
+  that has the time column and no onset column is on it already
+  (simulated data, a saved grid), so `simulateTogether`, "Save simulated
+  data" and the exports' embedded data all read back.
+- **An empty group cell means no team-mates** (`mate`, `mates_*`; Dart
+  and Python), so solo rounds hold an empty team:
+  `team = where(condition == 'joint', round * 10 + team_id, 0 / 0)`.
+- **Exports:** Dart writes the `DocClock(...)` into its `DataLayout`;
+  Python has `CLOCK` and `on_clock(table)` before the transforms. Both
+  reproduce hgf.dart's grid, subjects and outputs on a two-session event
+  table with presses, a reversal and a lock (`test/clocked_fixture.dart`
+  in `document_export_test` and `document_export_python_test`).
+- **Builder:** "Events onto a shared clock" in the Data inspector (event
+  time column, step, session column, streams with "Events" and "Holds
+  (name = expression; …)", keep rows). Turning it on guesses
+  `t_lsl_coord`/`onset` and a press stream for a BIDS events table. The
+  grid is cached per data and clock; the pipeline's data card shows the
+  grid's columns.
+- **Real data** (session 1, sub-001…006, presses, reversals, locks of the
+  individual and joint phases: 101 644 events): on a 0.1 s grid 353 935
+  rows in 1.3 s, team-mate columns in 1.1 s (VM). Solo rows have no
+  team-mates (73 415); joint rows have two (280 470, 50 with fewer at round
+  edges). Presses are balanced (left 117k, right 116k, none 121k).
+- Left: the transforms are computed again on every builder edit (1.1 s
+  on a full session: cache them per data and transforms, or evaluate only
+  the participant previewed); a loader for a BIDS folder (one events.tsv
+  per participant, the participant id from the file name, the session from
+  participants.tsv); a "press seen at any time in the step" rule for
+  presses shorter than a step (none now: the state at the step's time).
+
 **Driving example: the user's 6-person hyperscanning experiment.** A
 ball balancing on a beam (an elevator): a participant lifts the left or
 the right side (never both), so the ball rises without falling off;
@@ -2884,8 +2995,10 @@ two slices, the HGF graph canvas and the pipeline around it (data,
 transforms, response, outputs; 2026-11-17), and the first part of slice 3
 (free parameters, the group level, fitting every participant from the
 builder; 2026-11-17), and the exports of every participant and the group
-level, Dart and pyhgf/PyMC (2026-11-17); next relative bindings, then
-hgf_deep pipeline nodes. Vector node kinds on the GPU and a
+level, Dart and pyhgf/PyMC, and relative bindings with team-mates
+simulated together, and events onto a shared clock (2026-11-17); next a
+BIDS loader and transform caching for whole sessions, then hgf_deep
+pipeline nodes. Vector node kinds on the GPU and a
 faster dp candidate search can run alongside.
 
 ```sh

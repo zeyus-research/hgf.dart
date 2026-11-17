@@ -66,7 +66,7 @@ class _BuilderPageState extends State<BuilderPage> {
       final loaded = m.csv != null;
       final spec = c.exportSpec(
         dataFile: loaded ? (m.csvName ?? 'data.csv') : null,
-        csv: loaded ? null : c.toCsv(m.allSubjects()).toText(),
+        csv: loaded ? null : m.simulatedCsv().toText(),
       );
       script = python ? PythonExport(spec).script() : DartExport(spec).script();
     } on Object catch (e) {

@@ -12,6 +12,7 @@ import '../model.dart';
 import '../parameter.dart';
 import '../prior.dart';
 import '../transform.dart';
+import 'clock.dart';
 import 'data_layout.dart';
 import 'network_document.dart';
 import 'transforms.dart';
@@ -160,25 +161,61 @@ final class DocOutput {
 /// [groupColumn] says which group (e.g. team, per block) a participant's
 /// row belongs to: the data transforms' `mate(x, k)` reads the k-th other
 /// member of it, at the same time (the same [timeColumn] value, or without
-/// one the same position among the participant's rows in that group).
+/// one the same position among the participant's rows in that group). An
+/// empty group cell means no team-mates (e.g. a round played alone).
+///
+/// With a [clock], the data is an event table put onto a shared clock
+/// first (see [DocClock]); its grid's times are the [timeColumn].
 final class DocData {
   const DocData({
     this.participantColumn,
     this.timeColumn,
     this.timeStepColumn,
     this.groupColumn,
+    this.clock,
   }) : assert(
          timeColumn == null || timeStepColumn == null,
          'Give a time column or a time-step column, not both',
        );
 
   final String? participantColumn, timeColumn, timeStepColumn, groupColumn;
+  final DocClock? clock;
+
+  /// The columns the pipeline sees in data with [header]: the clock's
+  /// grid when there is a clock and the data is not on it yet, else
+  /// [header].
+  List<String> columnsOf(List<String> header) {
+    final c = clock;
+    final t = timeColumn;
+    if (c == null || t == null) return header;
+    if (header.contains(t) && !header.contains(c.onsetColumn)) return header;
+    return c.columns(participantColumn: participantColumn, timeColumn: t);
+  }
+
+  DocData copyWith({
+    String? Function()? participantColumn,
+    String? Function()? timeColumn,
+    String? Function()? timeStepColumn,
+    String? Function()? groupColumn,
+    DocClock? Function()? clock,
+  }) => DocData(
+    participantColumn: participantColumn == null
+        ? this.participantColumn
+        : participantColumn(),
+    timeColumn: timeColumn == null ? this.timeColumn : timeColumn(),
+    timeStepColumn: timeStepColumn == null
+        ? this.timeStepColumn
+        : timeStepColumn(),
+    groupColumn: groupColumn == null ? this.groupColumn : groupColumn(),
+    clock: clock == null ? this.clock : clock(),
+  );
 
   Map<String, Object?> toJson() => {
     'participant_column': ?participantColumn,
     'time_column': ?timeColumn,
     'time_step_column': ?timeStepColumn,
     'group_column': ?groupColumn,
+    if (clock case final c?) 'clock': c.toJson(),
   };
 
   factory DocData.fromJson(Map<String, Object?> json) => DocData(
@@ -186,6 +223,9 @@ final class DocData {
     timeColumn: json['time_column'] as String?,
     timeStepColumn: json['time_step_column'] as String?,
     groupColumn: json['group_column'] as String?,
+    clock: json['clock'] == null
+        ? null
+        : DocClock.fromJson((json['clock'] as Map).cast<String, Object?>()),
   );
 }
 
@@ -835,6 +875,121 @@ final class CompiledDocument {
     ];
   }
 
+  /// Whether a transform the inputs read depends on the response's
+  /// columns (directly or through other transforms): a team-mate's press
+  /// (`mates_sum(press == 'left')`), one's own previous press
+  /// (`lag(press)`), …. Such a model is simulated with [simulateTogether].
+  bool get inputsReadResponses {
+    final r = document.response;
+    if (r == null || !r.readsData) return false;
+    final reads = <String>{...r.dataColumns};
+    for (final t in document.transforms) {
+      if (t.expression.variables.any(reads.contains)) reads.add(t.name);
+    }
+    final derived = {for (final t in document.transforms) t.name};
+    return layout.inputs.any(
+      (i) => [
+        ...i.columns,
+        ?i.observedColumn,
+      ].any((c) => derived.contains(c) && reads.contains(c)),
+    );
+  }
+
+  /// Simulates every participant of [data] together, one time step at a
+  /// time, so that a participant's inputs can read what the others (and
+  /// they themselves) just pressed: on each step every participant's model
+  /// predicts and draws a response (see `HgfModel.simulateCoupled`), the
+  /// responses are written into the response's column, the transforms are
+  /// computed at that step's rows (`mates_sum`, `mate`, `lag`, …), and the
+  /// inputs read from them.
+  ///
+  /// [data] is the raw data: the participant, group and time columns and
+  /// the inputs' own columns; the response's column is added if missing
+  /// and overwritten. Every participant needs as many rows (one clock): the
+  /// t-th rows of all participants are one time step. [x] gives a
+  /// participant's parameter values by id (default `model.start()`).
+  ///
+  /// Returns the data with the responses filled in, which [subjects] reads
+  /// back as the simulated subjects, and those subjects.
+  ({CsvData data, List<Subject> subjects}) simulateTogether(
+    CsvData data,
+    math.Random rng, {
+    Map<String, List<double>>? x,
+  }) {
+    final m =
+        model ?? (throw StateError('The document has no response to simulate'));
+    final r = document.response!;
+    if (!r.readsData) {
+      throw StateError('The response reads no column: nothing to simulate');
+    }
+    if (r.dataColumns.length != 1) {
+      throw UnsupportedError('Simulating together needs a one-column response');
+    }
+    if (reveals != null) {
+      throw UnsupportedError(
+        'Simulating together does not support options that reveal inputs',
+      );
+    }
+    final rc = r.dataColumns.single;
+    data = layout.clocked(data);
+    final header = [...data.header];
+    if (!header.contains(rc)) header.add(rc);
+    final rcol = header.indexOf(rc);
+    final raw = CsvData(header, [
+      for (final row in data.rows)
+        [...row, for (var c = row.length; c < header.length; c++) '']
+          ..[rcol] = '',
+    ], decimalComma: data.decimalComma);
+    final l = layout;
+    final table = TransformTable(
+      raw,
+      l.transforms,
+      participantColumn: l.participantColumn,
+      groupColumn: l.groupColumn,
+      timeColumn: l.timeColumn,
+    );
+    final read = l.reader(table.table);
+    final byParticipant = l.participantRows(raw);
+    final ids = byParticipant.keys.toList();
+    final rows = byParticipant.values.toList();
+    final nTime = rows.first.length;
+    if (rows.any((p) => p.length != nTime)) {
+      throw FormatException(
+        'Simulating together needs as many rows per participant (one clock); '
+        'they have ${{for (final p in rows) p.length}.join(', ')}',
+      );
+    }
+    // Time steps (and ids) as subjects reads them; inputs come per step.
+    final start = l.subjects(raw);
+    final opts = r.options;
+    final width = l.width, nIn = l.inputs.length;
+    final sims = m.simulateCoupled(
+      start,
+      [for (final id in ids) x?[id] ?? m.start()],
+      rng,
+      inputsAt: (t, responses, u, observed) {
+        final step = [for (final p in rows) p[t]];
+        for (final (s, row) in step.indexed) {
+          final v = responses[s];
+          raw.rows[row][rcol] = v.isNaN
+              ? ''
+              : opts != null &&
+                    v == v.roundToDouble() &&
+                    v >= 0 &&
+                    v < opts.length
+              ? opts[v.toInt()]
+              : _cell(v);
+          table.setCell(row, rc, raw.rows[row][rcol]);
+        }
+        table.evaluate(step);
+        for (final (s, row) in step.indexed) {
+          read.inputs(row, u, s * width, observed, s * nIn);
+        }
+      },
+    );
+    return (data: raw, subjects: sims);
+  }
+
   /// [subjects] as a CSV this document reads back ([subjects] gives them
   /// again): the participant column (ids from [Subject.id], else 1, 2, …),
   /// the time column (cumulative time steps from 0) or the time-step
@@ -995,6 +1150,7 @@ final class CompiledDocument {
       timeColumn: d.timeColumn,
       timeStepColumn: d.timeStepColumn,
       groupColumn: d.groupColumn,
+      clock: d.clock,
       transforms: document.transforms,
     );
   }();

@@ -83,7 +83,7 @@ extension _DocumentScript on DartExport {
       ..writeln("import 'package:hgf/hgf.dart';")
       ..writeln(
         "import 'package:hgf_fit/document.dart'\n"
-        "    show DataLayout${layout.transforms.isEmpty ? '' : ', DocTransform'}, LayoutInput;",
+        "    show ${layout.clock == null ? '' : 'ClockStream, DocClock, '}DataLayout${layout.transforms.isEmpty ? '' : ', DocTransform'}, LayoutInput;",
       );
     if (model != null) b.writeln("import 'package:hgf_fit/hgf_fit.dart';");
     b
@@ -188,6 +188,31 @@ extension _DocumentScript on DartExport {
       ('groupColumn', layout.groupColumn),
     ]) {
       if (v != null) b.writeln('  $key: ${DartExport._str(v)},');
+    }
+    if (layout.clock case final k?) {
+      String str(String v) => DartExport._str(v);
+      b
+        ..writeln('  clock: DocClock(')
+        ..writeln('    onsetColumn: ${str(k.onsetColumn)},')
+        ..writeln('    step: ${dartDouble(k.step)},');
+      if (k.sessionColumn case final c?) {
+        b.writeln('    sessionColumn: ${str(c)},');
+      }
+      b.writeln('    streams: [');
+      for (final st in k.streams) {
+        final hold = [
+          for (final MapEntry(:key, :value) in st.hold.entries)
+            '${str(key)}: ${str('$value')}',
+        ].join(', ');
+        b.writeln(
+          '      ClockStream.parse(${st.when == null ? '' : 'when: ${str('${st.when}')}, '}hold: {$hold}),',
+        );
+      }
+      b.writeln('    ],');
+      if (k.keep case final e?) {
+        b.writeln("    keep: Expr.parse(${str('$e')}),");
+      }
+      b.writeln('  ),');
     }
     if (layout.transforms.isNotEmpty) {
       b.writeln('  transforms: [');

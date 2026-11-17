@@ -5,6 +5,7 @@ import 'edit.dart';
 import 'model_document.dart';
 import 'network_document.dart';
 import 'parameters.dart';
+import 'clock.dart';
 import 'transforms.dart';
 
 /// The parts of a [ModelDocument] an issue can name ([DocIssue.parts]): the
@@ -291,6 +292,25 @@ extension ModelDocumentEdits on ModelDocument {
         timeColumn: co(d.timeColumn),
         timeStepColumn: co(d.timeStepColumn),
         groupColumn: co(d.groupColumn),
+        clock: switch (d.clock) {
+          null => null,
+          final k => DocClock(
+            onsetColumn: k.onsetColumn,
+            step: k.step,
+            sessionColumn: k.sessionColumn,
+            streams: [
+              for (final st in k.streams)
+                ClockStream(
+                  when: st.when,
+                  hold: {
+                    for (final MapEntry(:key, :value) in st.hold.entries)
+                      c(key): value,
+                  },
+                ),
+            ],
+            keep: k.keep?.renamed(c),
+          ),
+        },
       ),
     );
   }
@@ -387,6 +407,9 @@ List<DocIssue> checkModel(
   Network? built,
   FitCodec codec = const FitCodec(),
 }) {
+  final raw = columns;
+  // With a clock, the pipeline reads its grid.
+  columns = columns == null ? null : doc.data.columnsOf(columns);
   final issues = <DocIssue>[
     for (final i in checkNetwork(doc.network, build: built == null))
       i.inParts(const [DocPart.network]),
@@ -606,6 +629,37 @@ List<DocIssue> checkModel(
   }
   if (d.groupColumn != null && d.participantColumn == null) {
     warn('A group column needs a participant column.', [DocPart.data]);
+  }
+  if (d.clock case final k?) {
+    if (d.timeColumn == null) {
+      error('The clock needs a time column (its grid\'s times).', [
+        DocPart.data,
+      ]);
+    } else {
+      final names = k.columns(
+        participantColumn: d.participantColumn,
+        timeColumn: d.timeColumn!,
+      );
+      final seen = <String>{};
+      for (final n in names) {
+        if (!seen.add(n)) {
+          error('The clock has two columns named "$n".', [DocPart.data]);
+        }
+      }
+      if (k.streams.isEmpty) {
+        warn('The clock holds no columns: add a stream.', [DocPart.data]);
+      }
+      // The event table's columns, when the data is not on the clock yet.
+      if (raw != null && !identical(columns, raw) && columns != raw) {
+        for (final v in k.reads) {
+          if (!raw.contains(v)) {
+            error('The clock reads "$v", which the data does not have.', [
+              DocPart.data,
+            ]);
+          }
+        }
+      }
+    }
   }
 
   if (!issues.any((i) => i.isError)) {

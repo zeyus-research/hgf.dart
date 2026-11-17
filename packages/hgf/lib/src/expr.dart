@@ -83,6 +83,30 @@ sealed class Expr {
           'participant\'s group, at the same time',
       dataOnly: true,
     ),
+    'mates_sum': ExprFn(
+      'mates_sum',
+      1,
+      1,
+      'mates_sum(x): the sum of x over the participant\'s team-mates at '
+          'the same time (those with x; empty when none has)',
+      dataOnly: true,
+    ),
+    'mates_mean': ExprFn(
+      'mates_mean',
+      1,
+      1,
+      'mates_mean(x): the mean of x over the participant\'s team-mates at '
+          'the same time (those with x; empty when none has)',
+      dataOnly: true,
+    ),
+    'mates_count': ExprFn(
+      'mates_count',
+      1,
+      1,
+      'mates_count(x): how many of the participant\'s team-mates have x at '
+          'the same time (for text, a cell that is not empty)',
+      dataOnly: true,
+    ),
     'missing': ExprFn(
       'missing',
       1,

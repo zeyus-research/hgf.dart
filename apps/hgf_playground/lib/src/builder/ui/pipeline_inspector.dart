@@ -321,6 +321,45 @@ class _DataPanel extends StatelessWidget {
             },
             onChanged: (n) => model.setTrials(n!),
           ),
+          if (model.simParticipants > 1) ...[
+            Pick<int>(
+              label: 'Team size',
+              value: model.simTeamSize,
+              items: {
+                for (final n in {1, 2, 3, 4, 6, model.simTeamSize})
+                  n: n == 1 ? 'alone' : '$n',
+              },
+              onChanged: (n) => model.setSimTeams(size: n),
+            ),
+            if (model.simTeamSize > 1)
+              Pick<int>(
+                label: 'Reshuffle teams every',
+                value: model.simRegroupEvery,
+                items: {
+                  for (final n in {
+                    0,
+                    50,
+                    100,
+                    300,
+                    1000,
+                    model.simRegroupEvery,
+                  })
+                    n: n == 0 ? 'never' : '$n steps',
+                },
+                onChanged: (n) => model.setSimTeams(regroupEvery: n),
+              ),
+          ],
+          if (model.simulatesTogether)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                'Simulated together: the inputs read responses, so on every '
+                'step each participant responds, then the transforms see '
+                'everyone\'s responses (team-mates\' presses) before the '
+                'inputs are read.',
+                style: theme.textTheme.bodySmall,
+              ),
+            ),
         ],
         const SizedBox(height: 12),
         Text('Layout', style: theme.textTheme.labelMedium),
@@ -344,18 +383,291 @@ class _DataPanel extends StatelessWidget {
         ),
         ColumnPick(
           model: model,
-          label: 'Group column (for mate(x, k))',
+          label: 'Group column (team-mates: mate, mates_sum, …)',
           value: d.groupColumn,
           onChanged: (c) => set(group: () => c),
         ),
+        if (model.csv != null || d.clock != null) _ClockSection(model: model),
       ],
     );
   }
 }
 
+/// Events onto a shared clock ([DocClock]): the event time column, the
+/// step, the session column, the streams (which events, what they hold)
+/// and which grid rows to keep.
+class _ClockSection extends StatelessWidget {
+  const _ClockSection({required this.model});
+
+  final BuilderModel model;
+
+  @override
+  Widget build(BuildContext context) {
+    final doc = model.document;
+    final d = doc.data;
+    final k = d.clock;
+    final theme = Theme.of(context);
+    final raw = model.csv?.header ?? const <String>[];
+    void setClock(DocClock? c, {String? time}) => model.update(
+      doc.copyWith(
+        data: d.copyWith(
+          clock: () => c,
+          timeColumn: time == null ? null : () => time,
+          timeStepColumn: time == null ? null : () => null,
+        ),
+      ),
+    );
+    DocClock edit({
+      String? onset,
+      double? step,
+      String? Function()? session,
+      List<ClockStream>? streams,
+      Expr? Function()? keep,
+    }) => DocClock(
+      onsetColumn: onset ?? k!.onsetColumn,
+      step: step ?? k!.step,
+      sessionColumn: session == null ? k!.sessionColumn : session(),
+      streams: streams ?? k!.streams,
+      keep: keep == null ? k!.keep : keep(),
+    );
+    String? exprError(String v) {
+      if (v.trim().isEmpty) return null;
+      try {
+        Expr.parse(v);
+        return null;
+      } on FormatException catch (e) {
+        return e.message;
+      }
+    }
+
+    final children = <Widget>[
+      const SizedBox(height: 12),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        dense: true,
+        title: const Text('Events onto a shared clock'),
+        subtitle: const Text(
+          'A row per event (presses, …) becomes a row per time step, each '
+          'state held until its next event.',
+        ),
+        value: k != null,
+        onChanged: (on) {
+          if (!on) {
+            setClock(null);
+            return;
+          }
+          final onset =
+              const [
+                't_lsl_coord',
+                'onset',
+                'time',
+                't',
+              ].where(raw.contains).firstOrNull ??
+              (raw.isEmpty ? 'onset' : raw.first);
+          setClock(
+            DocClock(
+              onsetColumn: onset,
+              step: 0.1,
+              streams: [
+                if (raw.contains('trial_type') && raw.contains('value'))
+                  ClockStream.parse(
+                    when: "trial_type == 'press'",
+                    hold: {'press': 'value'},
+                  )
+                else
+                  ClockStream(hold: const {}),
+              ],
+            ),
+            time: d.timeColumn ?? doc.freshName('t', raw),
+          );
+        },
+      ),
+    ];
+    if (k != null) {
+      children.addAll([
+        if (raw.isEmpty)
+          CommitField(
+            key: ValueKey('onset ${k.onsetColumn}'),
+            label: 'Event time column',
+            value: k.onsetColumn,
+            onCommit: (v) => setClock(edit(onset: v.trim())),
+          )
+        else
+          Pick<String>(
+            label: 'Event time column (a clock everyone shares)',
+            value: k.onsetColumn,
+            items: {
+              for (final c in {...raw, k.onsetColumn}) c: c,
+            },
+            onChanged: (c) => setClock(edit(onset: c)),
+          ),
+        CommitField(
+          key: ValueKey('step ${k.step}'),
+          label: 'Step (in the event time\'s units)',
+          value: '${k.step}',
+          validate: (v) {
+            final x = double.tryParse(v.trim());
+            return x == null || !(x > 0) ? 'A positive number' : null;
+          },
+          onCommit: (v) => setClock(edit(step: double.parse(v.trim()))),
+        ),
+        Pick<String?>(
+          label: 'Session column (each session its own grid)',
+          value: k.sessionColumn,
+          items: {
+            null: '—',
+            for (final c in {...raw, ?k.sessionColumn}) c: c,
+          },
+          onChanged: (c) => setClock(edit(session: () => c)),
+        ),
+        for (final (i, st) in k.streams.indexed) ...[
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Text('Stream ${i + 1}', style: theme.textTheme.labelMedium),
+              const Spacer(),
+              IconButton(
+                tooltip: 'Remove the stream',
+                icon: const Icon(Icons.close, size: 18),
+                onPressed: () =>
+                    setClock(edit(streams: [...k.streams]..removeAt(i))),
+              ),
+            ],
+          ),
+          CommitField(
+            key: ValueKey('when $i ${st.when}'),
+            label: 'Events (empty: every row)',
+            value: st.when == null ? '' : '${st.when}',
+            hint: "trial_type == 'press'",
+            monospace: true,
+            validate: exprError,
+            onCommit: (v) => setClock(
+              edit(
+                streams: [...k.streams]
+                  ..[i] = ClockStream(
+                    when: v.trim().isEmpty ? null : Expr.parse(v),
+                    hold: st.hold,
+                  ),
+              ),
+            ),
+          ),
+          CommitField(
+            key: ValueKey('hold $i ${st.toJson()}'),
+            label: 'Holds (name = expression; …)',
+            value: [
+              for (final MapEntry(:key, :value) in st.hold.entries)
+                '$key = $value',
+            ].join('; '),
+            hint: 'press = value; team = team_id',
+            monospace: true,
+            validate: (v) {
+              try {
+                _parseHolds(v);
+                return null;
+              } on FormatException catch (e) {
+                return e.message;
+              }
+            },
+            onCommit: (v) => setClock(
+              edit(
+                streams: [...k.streams]
+                  ..[i] = ClockStream(when: st.when, hold: _parseHolds(v)),
+              ),
+            ),
+          ),
+        ],
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: () => setClock(
+              edit(
+                streams: [
+                  ...k.streams,
+                  ClockStream(hold: const {}),
+                ],
+              ),
+            ),
+            icon: const Icon(Icons.add, size: 18),
+            label: const Text('Add a stream'),
+          ),
+        ),
+        CommitField(
+          key: ValueKey('keep ${k.keep}'),
+          label: 'Keep rows where (empty: all)',
+          value: k.keep == null ? '' : '${k.keep}',
+          hint: 'missing(press) == 0',
+          monospace: true,
+          validate: exprError,
+          onCommit: (v) => setClock(
+            edit(keep: () => v.trim().isEmpty ? null : Expr.parse(v)),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'The grid\'s times are whole multiples of the step on the event '
+          'clock (e.g. LSL time), so outputs line up with other recordings. '
+          'Group (team) cells come from a stream too; an empty one means '
+          'no team-mates (e.g. rounds played alone). Saved or simulated data '
+          'with the time column and no event time column is on the clock '
+          'already.',
+          style: theme.textTheme.bodySmall,
+        ),
+      ]);
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: children,
+    );
+  }
+}
+
+/// `name = expression; …` as a stream's held columns.
+Map<String, Expr> _parseHolds(String text) {
+  final out = <String, Expr>{};
+  for (final part in text.split(';')) {
+    if (part.trim().isEmpty) continue;
+    final eq = part.indexOf('=');
+    if (eq <= 0 || part.length > eq + 1 && part[eq + 1] == '=') {
+      throw FormatException('Write name = expression, not "${part.trim()}"');
+    }
+    final name = part.substring(0, eq).trim();
+    if (out.containsKey(name)) {
+      throw FormatException('"$name" twice');
+    }
+    out[name] = Expr.parse(part.substring(eq + 1));
+  }
+  return out;
+}
+
 // -----------------------------------------------------------------------------
 // Transform
 // -----------------------------------------------------------------------------
+
+/// Expressions binding a transform to team-mates' responses, by label:
+/// how many pressed each option, the share, the first one's press.
+Map<String, String> _mateTemplates(ModelDocument doc) {
+  final r = doc.response;
+  if (r == null || !r.readsData || r.dataColumns.length != 1) return const {};
+  final col = Expr.parse(_quoted(r.dataColumns.single)).toString();
+  final opts = r.options;
+  if (opts == null) {
+    return {
+      'Team-mates\' mean $col': 'mates_mean($col)',
+      'Team-mates\' sum of $col': 'mates_sum($col)',
+      'Team-mate 1\'s $col': 'mate($col, 1)',
+    };
+  }
+  return {
+    for (final o in opts) ...{
+      'How many team-mates pressed $o': "mates_sum($col == '$o')",
+      'Share of team-mates pressing $o': "mates_mean($col == '$o')",
+    },
+    'How many team-mates responded': 'mates_count($col)',
+  };
+}
+
+String _quoted(String name) =>
+    RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(name) ? name : '`$name`';
 
 class _TransformPanel extends StatelessWidget {
   const _TransformPanel({required this.model, required this.name});
@@ -390,7 +702,7 @@ class _TransformPanel extends StatelessWidget {
             if (v.trim().isEmpty) return 'Give it a name';
             if (v != name &&
                 (doc.transform(v) != null ||
-                    (model.csv?.header.contains(v) ?? false))) {
+                    (model.csv != null && model.dataColumns.contains(v)))) {
               return 'That name is taken';
             }
             return null;
@@ -423,10 +735,46 @@ class _TransformPanel extends StatelessWidget {
           'Computed once per row before filtering, per participant. '
           'Columns by name (`with spaces` in backticks), arithmetic, '
           'comparisons (press == \'left\'), exp, log, sqrt, abs, tanh, '
-          'sigmoid, min, max, clip, where; lag(x, k), diff(x), mate(x, k), '
-          'missing(x), fill(x, v).',
+          'sigmoid, min, max, clip, where; lag(x, k), diff(x), '
+          'missing(x), fill(x, v); team-mates (the group column): mate(x, k) '
+          '(the k-th other member), mates_sum(x), mates_mean(x), '
+          'mates_count(x).',
           style: theme.textTheme.bodySmall,
         ),
+        if (_mateTemplates(doc) case final templates when templates.isNotEmpty)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: PopupMenuButton<String>(
+              tooltip: 'Bind to team-mates',
+              itemBuilder: (_) => [
+                for (final MapEntry(key: label, value: e) in templates.entries)
+                  PopupMenuItem(value: e, child: Text(label)),
+              ],
+              onSelected: (e) => model.update(
+                doc.replaceTransform(name, DocTransform(name, e)),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.groups_outlined,
+                      size: 18,
+                      color: theme.colorScheme.primary,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'From team-mates…',
+                      style: theme.textTheme.labelLarge?.copyWith(
+                        color: theme.colorScheme.primary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         const SizedBox(height: 6),
         Text(
           readers.isEmpty
@@ -1226,7 +1574,10 @@ class ColumnPick extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final columns = [...?model.csv?.header, ...model.document.transformNames];
+    final columns = [
+      ...?(model.csv == null ? null : model.dataColumns),
+      ...model.document.transformNames,
+    ];
     if (model.csv == null) {
       return CommitField(
         key: ValueKey('$label $value'),

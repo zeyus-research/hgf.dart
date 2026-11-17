@@ -230,6 +230,86 @@ d,2,b2_B,3,4000,none
     });
   });
 
+  test('mates_sum, mates_mean and mates_count are over team-mates', () {
+    // Teams of two: each player has one mate per row, so check a team of
+    // three by moving c into a's block-1 team.
+    final rows = CsvData.parse(csv);
+    final team = rows.header.indexOf('team');
+    final three = CsvData(rows.header, [
+      for (final r in rows.rows)
+        [...r]..[team] = r[0] == 'c' && r[1] == '1' ? 'b1_A' : r[team],
+    ]);
+    final d = applyTransforms(
+      three,
+      [
+        DocTransform('left', "press == 'left'"),
+        DocTransform('n_left', 'mates_sum(left)'),
+        DocTransform('mean_x', 'mates_mean(x)'),
+        DocTransform('n_x', 'mates_count(x)'),
+        DocTransform('n_press', "mates_count(press == 'none')"),
+        DocTransform('n_text', 'mates_count(press)'),
+      ],
+      participantColumn: 'participant',
+      groupColumn: 'team',
+      timeColumn: 't',
+    );
+    // t = 0: a left, b right, c none (team b1_A); d alone in b1_B.
+    expect(column(d, 'n_left').sublist(0, 2), ['0', '1']); // a: b, c
+    expect(column(d, 'n_left')[4], '1'); // b: a left, c none
+    expect(column(d, 'n_left')[12], ''); // d has no mates
+    expect(column(d, 'n_x')[12], '0');
+    // a at t = 1: b has 20, c has 200.
+    expect(column(d, 'mean_x')[1], '110');
+    // b at t = 1: a's x is missing, c has 200.
+    expect(column(d, 'mean_x')[5], '200');
+    expect(column(d, 'n_x')[5], '1');
+    expect(column(d, 'n_press')[0], '2');
+    // An empty group cell: no team-mates.
+    final alone = CsvData(three.header, [
+      for (final r in three.rows)
+        [...r]..[team] = r[0] == 'a' || r[0] == 'b' ? '' : r[team],
+    ]);
+    final e = applyTransforms(
+      alone,
+      [DocTransform('n', 'mates_count(x)'), DocTransform('m', 'mate(x)')],
+      participantColumn: 'participant',
+      groupColumn: 'team',
+      timeColumn: 't',
+    );
+    expect(column(e, 'n').sublist(0, 8).toSet(), {'0'});
+    expect(column(e, 'm').sublist(0, 8).toSet(), {''});
+    expect(column(d, 'n_text')[0], '2'); // labels, not numbers
+    expect(column(d, 'n_text')[12], '0');
+  });
+
+  test('evaluating step by step gives the whole table', () {
+    final ts = [
+      DocTransform('left', "press == 'left'"),
+      DocTransform('soc', 'mates_mean(left) + lag(mate(left), 1)'),
+      DocTransform('prev', 'lag(press)'),
+      DocTransform('d', 'diff(fill(x, 0)) + mates_count(lag(x, 2))'),
+      DocTransform('w', "where(mate(press) == 'none', lag(soc), -1)"),
+    ];
+    final whole = apply(ts);
+    final data = CsvData.parse(csv);
+    final step = TransformTable(
+      data,
+      ts,
+      participantColumn: 'participant',
+      groupColumn: 'team',
+      timeColumn: 't',
+    );
+    final tc = data.header.indexOf('t');
+    for (var t = 0; t < 4; t++) {
+      step.evaluate([
+        for (var r = 0; r < data.rows.length; r++)
+          if (data.rows[r][tc] == '$t') r,
+      ]);
+    }
+    expect(step.table.header, whole.header);
+    expect(step.table.rows, whole.rows);
+  });
+
   test('an unknown node.field in a readout is an error', () {
     final doc = ModelDocument(
       network: NetworkDocument(

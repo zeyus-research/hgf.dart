@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:hgf/hgf.dart';
 
 import '../model.dart';
+import 'clock.dart';
 import 'transforms.dart';
 
 /// One input node's columns in a [DataLayout], in the network's input
@@ -54,6 +55,7 @@ final class DataLayout {
     this.timeColumn,
     this.timeStepColumn,
     this.groupColumn,
+    this.clock,
     List<DocTransform> transforms = const [],
   }) : inputs = List.unmodifiable(inputs),
        responseColumns = List.unmodifiable(responseColumns),
@@ -61,6 +63,9 @@ final class DataLayout {
        transforms = List.unmodifiable(transforms) {
     if (timeColumn != null && timeStepColumn != null) {
       throw ArgumentError('Give a time column or a time-step column');
+    }
+    if (clock != null && timeColumn == null) {
+      throw ArgumentError('A clock needs a time column (its grid\'s times)');
     }
   }
 
@@ -70,12 +75,27 @@ final class DataLayout {
   final String? participantColumn, timeColumn, timeStepColumn, groupColumn;
   final List<DocTransform> transforms;
 
+  /// Puts event tables onto a shared clock before the [transforms].
+  final DocClock? clock;
+
   /// The width of a row of `Subject.inputs`.
   int get width => inputs.fold(0, (w, i) => w + i.width);
 
-  /// [csv] with the [transforms]' columns appended.
+  /// [csv] on the [clock]'s grid (unless it is on it already, or there is
+  /// no clock).
+  CsvData clocked(CsvData csv) {
+    final c = clock;
+    if (c == null || c.isOnClock(csv, timeColumn!)) return csv;
+    return c.resample(
+      csv,
+      participantColumn: participantColumn,
+      timeColumn: timeColumn!,
+    );
+  }
+
+  /// [csv] on the [clock]'s grid, with the [transforms]' columns appended.
   CsvData transform(CsvData csv) => applyTransforms(
-    csv,
+    clocked(csv),
     transforms,
     participantColumn: participantColumn,
     groupColumn: groupColumn,
@@ -109,123 +129,27 @@ final class DataLayout {
   /// takes the second's).
   List<Subject> subjects(CsvData data) {
     final csv = transform(data);
-    final header = csv.header;
-    int col(String name, String what) {
-      final c = header.indexOf(name);
-      if (c < 0) {
-        throw FormatException(
-          'No column "$name" ($what) in the data; its columns are '
-          '${header.join(', ')}',
-        );
-      }
-      return c;
-    }
-
-    final width = this.width;
-    final nIn = inputs.length;
-    final inputCols = [
-      for (final input in inputs)
-        [for (final name in input.columns) col(name, 'input ${input.name}')],
-    ];
-    final observedCols = [
-      for (final input in inputs)
-        input.observedColumn == null
-            ? null
-            : col(input.observedColumn!, 'observed flags of ${input.name}'),
-    ];
-    final responseCols = [
-      for (final name in responseColumns) col(name, 'responses'),
-    ];
-    final tCol = timeColumn == null ? null : col(timeColumn!, 'time');
-    final dtCol = timeStepColumn == null
-        ? null
-        : col(timeStepColumn!, 'time steps');
-
-    double number(int row, int c) =>
-        csv.number(row, c) ??
-        (throw FormatException(
-          'Row ${row + 2}, column "${header[c]}": "${csv.rows[row][c]}" is '
-          'not a number',
-        ));
-    // A label first: "none" is a label here, not a missing value.
-    int? code(int row, int c, List<String> labels) {
-      final cell = csv.rows[row][c].trim();
-      final i = labels.indexOf(cell);
-      if (i >= 0) return i;
-      if (csv.isMissing(row, c)) return null;
-      final v = int.tryParse(cell);
-      if (v != null && v >= 0 && v < labels.length) return v;
-      throw FormatException(
-        'Row ${row + 2}, column "${header[c]}": "$cell" is not one of '
-        '${labels.join(', ')}',
-      );
-    }
-
+    final read = reader(csv);
+    final width = this.width, nIn = inputs.length;
     return [
       for (final MapEntry(key: id, value: rows) in participantRows(csv).entries)
         () {
           final nTime = rows.length;
           final u = Float64List(nTime * width);
-          final observed = Float64List(nTime * nIn)
-            ..fillRange(0, nTime * nIn, 1);
+          final observed = Float64List(nTime * nIn);
           var masked = false;
           for (var t = 0; t < nTime; t++) {
-            final row = rows[t];
-            var off = 0;
-            for (var k = 0; k < nIn; k++) {
-              final input = inputs[k];
-              final w = input.width;
-              final flagCol = observedCols[k];
-              var seen = true;
-              if (input.categories case final cats?) {
-                final i = code(row, inputCols[k].single, cats);
-                if (i == null) {
-                  seen = false;
-                } else if (input.oneHot) {
-                  u[t * width + off + i] = 1;
-                } else {
-                  u[t * width + off] = i.toDouble();
-                }
-              } else {
-                for (var j = 0; j < w; j++) {
-                  final v = number(row, inputCols[k][j]);
-                  if (v.isNaN) {
-                    seen = false;
-                  } else {
-                    u[t * width + off + j] = v;
-                  }
-                }
-              }
-              if (flagCol != null) {
-                final flag = number(row, flagCol) != 0;
-                if (flag && !seen) {
-                  throw FormatException(
-                    'Row ${row + 2}: input "${input.name}" is empty but '
-                    'flagged observed',
-                  );
-                }
-                seen = flag;
-                masked = true;
-              }
-              if (!seen) {
-                // Empty cells stay 0: a NaN at an unobserved trial would
-                // still reach the parents' beliefs.
-                observed[t * nIn + k] = 0;
-                masked = true;
-                if (flagCol == null) {
-                  u.fillRange(t * width + off, t * width + off + w, 0);
-                }
-              }
-              off += w;
+            if (read.inputs(rows[t], u, t * width, observed, t * nIn)) {
+              masked = true;
             }
           }
           Float64List? timeSteps;
-          if (dtCol != null) {
+          if (read.dtCol case final dtCol?) {
             timeSteps = Float64List.fromList([
-              for (final row in rows) number(row, dtCol),
+              for (final row in rows) read.number(row, dtCol),
             ]);
-          } else if (tCol != null) {
-            final times = [for (final row in rows) number(row, tCol)];
+          } else if (read.tCol case final tCol?) {
+            final times = [for (final row in rows) read.number(row, tCol)];
             timeSteps = Float64List(nTime);
             for (var t = 1; t < nTime; t++) {
               timeSteps[t] = times[t] - times[t - 1];
@@ -233,18 +157,11 @@ final class DataLayout {
             if (nTime > 0) timeSteps[0] = nTime > 1 ? timeSteps[1] : 1.0;
           }
           Float64List? responses;
-          if (responseCols.isNotEmpty) {
-            final nr = responseCols.length;
-            final opts = options;
+          if (responseColumns.isNotEmpty) {
+            final nr = responseColumns.length;
             responses = Float64List(nTime * nr);
             for (var t = 0; t < nTime; t++) {
-              for (var j = 0; j < nr; j++) {
-                final c = responseCols[j];
-                final row = rows[t];
-                responses[t * nr + j] = opts != null
-                    ? code(row, c, opts)?.toDouble() ?? double.nan
-                    : number(row, c);
-              }
+              read.responses(rows[t], responses, t * nr);
             }
           }
           return Subject(
@@ -257,6 +174,10 @@ final class DataLayout {
         }(),
     ];
   }
+
+  /// Reads rows of [csv] (with the [transforms]' columns already there):
+  /// what [subjects] reads with, one row at a time.
+  LayoutReader reader(CsvData csv) => LayoutReader._(this, csv);
 
   /// [data] (after the [transforms]) with [columns] appended: one map
   /// per participant, in the order of [subjects] (see [participantRows]),
@@ -295,6 +216,141 @@ final class DataLayout {
       }
     }
     return CsvData([...csv.header, ...names], rows, decimalComma: false);
+  }
+}
+
+/// Reads one row of a table at a time, as [DataLayout.subjects] does (see
+/// [DataLayout.reader]).
+final class LayoutReader {
+  LayoutReader._(this.layout, this.csv) {
+    final header = csv.header;
+    int col(String name, String what) {
+      final c = header.indexOf(name);
+      if (c < 0) {
+        throw FormatException(
+          'No column "$name" ($what) in the data; its columns are '
+          '${header.join(', ')}',
+        );
+      }
+      return c;
+    }
+
+    inputCols = [
+      for (final input in layout.inputs)
+        [for (final name in input.columns) col(name, 'input ${input.name}')],
+    ];
+    observedCols = [
+      for (final input in layout.inputs)
+        input.observedColumn == null
+            ? null
+            : col(input.observedColumn!, 'observed flags of ${input.name}'),
+    ];
+    responseCols = [
+      for (final name in layout.responseColumns) col(name, 'responses'),
+    ];
+    tCol = layout.timeColumn == null ? null : col(layout.timeColumn!, 'time');
+    dtCol = layout.timeStepColumn == null
+        ? null
+        : col(layout.timeStepColumn!, 'time steps');
+  }
+
+  final DataLayout layout;
+  final CsvData csv;
+  late final List<List<int>> inputCols;
+  late final List<int?> observedCols;
+  late final List<int> responseCols;
+  late final int? tCol, dtCol;
+
+  double number(int row, int c) =>
+      csv.number(row, c) ??
+      (throw FormatException(
+        'Row ${row + 2}, column "${csv.header[c]}": "${csv.rows[row][c]}" is '
+        'not a number',
+      ));
+
+  // A label first: "none" is a label here, not a missing value.
+  int? _code(int row, int c, List<String> labels) {
+    final cell = csv.rows[row][c].trim();
+    final i = labels.indexOf(cell);
+    if (i >= 0) return i;
+    if (csv.isMissing(row, c)) return null;
+    final v = int.tryParse(cell);
+    if (v != null && v >= 0 && v < labels.length) return v;
+    throw FormatException(
+      'Row ${row + 2}, column "${csv.header[c]}": "$cell" is not one of '
+      '${labels.join(', ')}',
+    );
+  }
+
+  /// [row]'s inputs into `u[uOff ..]` (the layout's width; zeros where
+  /// unobserved) and their observed flags into `observed[oOff ..]` (one per
+  /// input). True when an input is unobserved or has a flag column.
+  bool inputs(
+    int row,
+    Float64List u,
+    int uOff,
+    Float64List observed,
+    int oOff,
+  ) {
+    var masked = false;
+    var off = uOff;
+    for (var k = 0; k < layout.inputs.length; k++) {
+      final input = layout.inputs[k];
+      final w = input.width;
+      final flagCol = observedCols[k];
+      u.fillRange(off, off + w, 0);
+      var seen = true;
+      if (input.categories case final cats?) {
+        final i = _code(row, inputCols[k].single, cats);
+        if (i == null) {
+          seen = false;
+        } else if (input.oneHot) {
+          u[off + i] = 1;
+        } else {
+          u[off] = i.toDouble();
+        }
+      } else {
+        for (var j = 0; j < w; j++) {
+          final v = number(row, inputCols[k][j]);
+          if (v.isNaN) {
+            seen = false;
+          } else {
+            u[off + j] = v;
+          }
+        }
+      }
+      if (flagCol != null) {
+        final flag = number(row, flagCol) != 0;
+        if (flag && !seen) {
+          throw FormatException(
+            'Row ${row + 2}: input "${input.name}" is empty but '
+            'flagged observed',
+          );
+        }
+        seen = flag;
+        masked = true;
+      }
+      observed[oOff + k] = seen ? 1 : 0;
+      if (!seen) {
+        // Empty cells stay 0: a NaN at an unobserved trial would still
+        // reach the parents' beliefs.
+        masked = true;
+        if (flagCol == null) u.fillRange(off, off + w, 0);
+      }
+      off += w;
+    }
+    return masked;
+  }
+
+  /// [row]'s responses into `out[off ..]` (option codes with options; NaN
+  /// for a missed response).
+  void responses(int row, Float64List out, int off) {
+    final opts = layout.options;
+    for (final (j, c) in responseCols.indexed) {
+      out[off + j] = opts != null
+          ? _code(row, c, opts)?.toDouble() ?? double.nan
+          : number(row, c);
+    }
   }
 }
 

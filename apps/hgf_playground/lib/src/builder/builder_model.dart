@@ -795,7 +795,7 @@ class BuilderModel extends ChangeNotifier {
   /// The columns the pipeline can read: the loaded data's, or (simulated)
   /// the columns the document reads from its data.
   List<String> get dataColumns {
-    if (csv case final c?) return c.header;
+    if (csv case final c?) return _model.data.columnsOf(c.header);
     final derived = _model.transformNames;
     final out = <String>{};
     void add(String? c) {
@@ -924,11 +924,61 @@ class BuilderModel extends ChangeNotifier {
     _refreshNow();
   }
 
+  /// Simulated participants play in teams of [simTeamSize] (the document's
+  /// group column; 1: each alone), reshuffled every [simRegroupEvery] steps
+  /// (0: never). Models whose inputs read responses (`mates_sum(press ==
+  /// 'left')`, …) are simulated together, step by step
+  /// ([CompiledDocument.simulateTogether]).
+  int simTeamSize = 3;
+  int simRegroupEvery = 0;
+
+  /// Set the teams (see [simTeamSize]); teams of two or more need a group
+  /// column, which is named `team` if the document has none (an undo step).
+  void setSimTeams({int? size, int? regroupEvery}) {
+    final s = (size ?? simTeamSize).clamp(1, 50);
+    final e = math.max(0, regroupEvery ?? simRegroupEvery);
+    if (s == simTeamSize && e == simRegroupEvery) return;
+    simTeamSize = s;
+    simRegroupEvery = e;
+    if (s > 1 && _model.data.groupColumn == null) {
+      final d = _model.data;
+      _setModel(
+        _model.copyWith(
+          data: DocData(
+            participantColumn: d.participantColumn,
+            timeColumn: d.timeColumn,
+            timeStepColumn: d.timeStepColumn,
+            groupColumn: _model.freshName('team', dataColumns),
+          ),
+        ),
+      );
+      return;
+    }
+    _refreshNow();
+  }
+
+  /// Simulated participant [k]'s team at step [t] (see [simTeamSize]):
+  /// consecutive participants at first, a shuffle per block after.
+  String simTeam(int k, int t) {
+    final size = simTeamSize;
+    if (size <= 1) return _simId(k);
+    final block = simRegroupEvery > 0 ? t ~/ simRegroupEvery : 0;
+    var pos = k;
+    if (block > 0) {
+      final order = [for (var i = 0; i < math.max(1, simParticipants); i++) i]
+        ..shuffle(math.Random(data.seed * 13 + 7 * block));
+      pos = order.indexOf(k);
+    }
+    final team = pos ~/ size + 1;
+    return simRegroupEvery > 0 ? 'b${block + 1}_$team' : '$team';
+  }
+
   /// Identifies the data the fit sees: the loaded file, or the simulation's
   /// settings.
   String get dataKey => csv != null
       ? 'csv ${identityHashCode(csv)}'
-      : 'sim ${data.seed} $trials $simParticipants $_inputKey';
+      : 'sim ${data.seed} $trials $simParticipants $simTeamSize '
+            '$simRegroupEvery $_inputKey';
 
   /// Each simulated participant's values of the free parameters (by id):
   /// the document's own values (the inspectors' sliders) for a single
@@ -977,7 +1027,8 @@ class BuilderModel extends ChangeNotifier {
   List<Subject> allSubjects() {
     final c =
         compiled ?? (throw StateError('The document has errors: no subjects'));
-    if (csv case final d?) return c.subjects(d);
+    if (csv != null) return c.subjects(_onClock(c)!);
+    if (_together(c) case final sim?) return sim.subjects;
     final net = network!;
     _ensureInput(net);
     final truth = simulatedTruth;
@@ -985,6 +1036,87 @@ class BuilderModel extends ChangeNotifier {
       for (var k = 0; k < math.max(1, simParticipants); k++)
         _simSubject(c, k, truth),
     ];
+  }
+
+  CsvData? _clockGrid;
+  Object? _clockKey;
+
+  /// The loaded data on [c]'s clock (see `DocClock`), made again only when
+  /// the data or the clock changed; the data itself without a clock; null
+  /// for simulated data.
+  CsvData? _onClock(CompiledDocument c) {
+    final data = csv;
+    if (data == null) return null;
+    final d = c.document.data;
+    if (d.clock == null) return data;
+    final key = Object.hash(
+      identityHashCode(data),
+      jsonEncode(d.clock!.toJson()),
+      d.participantColumn,
+      d.timeColumn,
+    );
+    if (key != _clockKey) {
+      _clockGrid = c.layout.clocked(data);
+      _clockKey = key;
+    }
+    return _clockGrid;
+  }
+
+  /// Whether the simulated participants are simulated together (their
+  /// inputs read responses; see [simTeamSize]).
+  bool get simulatesTogether =>
+      csv == null && (compiled?.inputsReadResponses ?? false);
+
+  ({CsvData data, List<Subject> subjects})? _togetherCache;
+  CompiledDocument? _togetherFor;
+
+  /// The participants simulated together, when [c]'s inputs read
+  /// responses (once per refresh): the raw data (participant, team, time
+  /// and the inputs' own columns, then the responses step by step) and
+  /// the subjects it reads as.
+  ({CsvData data, List<Subject> subjects})? _together(CompiledDocument c) {
+    if (csv != null || !c.inputsReadResponses) return null;
+    if (identical(_togetherFor, c)) return _togetherCache;
+    _ensureInput(network!);
+    final n = math.max(1, simParticipants);
+    final ids = [for (var k = 0; k < n; k++) n > 1 ? _simId(k) : null];
+    final plain = c.toCsv([
+      for (var k = 0; k < n; k++) Subject(inputs: _inputs[k], id: ids[k]),
+    ]);
+    // The derived columns come from the transforms, step by step.
+    final derived = {for (final t in c.document.transforms) t.name};
+    final keep = [
+      for (final (i, h) in plain.header.indexed)
+        if (!derived.contains(h)) i,
+    ];
+    final group = c.document.data.groupColumn;
+    final perParticipant = plain.rows.length ~/ n;
+    final skeleton = CsvData(
+      [for (final i in keep) plain.header[i], ?group],
+      [
+        for (final (r, row) in plain.rows.indexed)
+          [
+            for (final i in keep) row[i],
+            if (group != null) simTeam(r ~/ perParticipant, r % perParticipant),
+          ],
+      ],
+    );
+    final truth = simulatedTruth;
+    _togetherCache = c.simulateTogether(
+      skeleton,
+      math.Random(data.seed + 1),
+      x: {for (var k = 0; k < n; k++) ids[k] ?? '': ?truth[_simId(k)]},
+    );
+    _togetherFor = c;
+    return _togetherCache;
+  }
+
+  /// The simulated data as a table the document reads back: the raw data
+  /// when participants are simulated together, else [CompiledDocument.toCsv].
+  CsvData simulatedCsv() {
+    final c =
+        compiled ?? (throw StateError('The document has errors: no data'));
+    return _together(c)?.data ?? c.toCsv(allSubjects());
   }
 
   /// Simulated participant [k]: its inputs and, with a response, its
@@ -1026,7 +1158,7 @@ class BuilderModel extends ChangeNotifier {
   String? dataCsv() {
     final c = compiled;
     if (c == null || subject == null) return null;
-    return csvText(c.toCsv(csv == null ? allSubjects() : [subject!]));
+    return csvText(csv == null ? simulatedCsv() : c.toCsv([subject!]));
   }
 
   /// The loaded data (or the simulated subject) with the named outputs
@@ -1037,8 +1169,8 @@ class BuilderModel extends ChangeNotifier {
   String? outputsCsv() {
     final c = compiled;
     if (c == null || subject == null) return null;
-    final subs = csv == null ? allSubjects() : c.subjects(csv!);
-    final data = csv ?? c.toCsv(subs);
+    final subs = csv == null ? allSubjects() : c.subjects(_onClock(c)!);
+    final data = _onClock(c) ?? simulatedCsv();
     // withOutputs names participants by their column ('' without one).
     final x = {
       for (final (k, s) in subs.indexed)
@@ -1166,10 +1298,10 @@ class BuilderModel extends ChangeNotifier {
   /// document has errors.
   void _preview(Network net) {
     final c = compiled;
-    if (csv case final data? when c != null) {
+    if (csv != null && c != null) {
       final List<Subject> subs;
       try {
-        subs = c.subjects(data);
+        subs = c.subjects(_onClock(c)!);
       } on FormatException catch (e) {
         dataError = e.message;
         previewError = 'The data: ${e.message}';
@@ -1201,7 +1333,7 @@ class BuilderModel extends ChangeNotifier {
       previewError = _divergence(net, trajectories!);
       return;
     }
-    final s = _simSubject(c, k, simulatedTruth);
+    final s = _together(c)?.subjects[k] ?? _simSubject(c, k, simulatedTruth);
     subject = s;
     hidden = _hiddens[k];
     trajectories = c.filter(s, _previewX(c, _simId(k)));

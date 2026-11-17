@@ -87,6 +87,7 @@ extension _PythonDocument on PythonExport {
       ..writeln('"""')
       ..writeln()
       ..writeln('import csv')
+      ..writeln('import math  # noqa: F401')
       ..writeln('import os')
       ..writeln('import re')
       ..writeln('import sys')
@@ -673,9 +674,10 @@ def fit(ids, subjects):
         'hgf.dart',
       )
       ..writeln('    computes them)."""');
+    if (layout.clock != null) b.writeln('    table = on_clock(table)');
     if (layout.transforms.isEmpty) {
       b.writeln('    return table');
-      return b.toString();
+      return _clockCode(layout) + b.toString();
     }
     b.writeln(
       '    t = Transforms(table, LAYOUT["participant"], LAYOUT["group"], '
@@ -687,8 +689,141 @@ def fit(ids, subjects):
         ..writeln('    t.add(${_pyStr(t.name)}, ${_dataExpr(t.expression)})');
     }
     b.writeln('    return t.table');
+    return _clockCode(layout) + b.toString();
+  }
+
+  /// `CLOCK` and `on_clock(table)`: events onto the shared clock, as
+  /// hgf.dart's `DocClock` (empty without a clock).
+  String _clockCode(DataLayout layout) {
+    final k = layout.clock;
+    if (k == null) return '';
+    String fn(Expr e) => 'lambda t: ${_dataExpr(e)}';
+    final b = StringBuffer()
+      ..writeln("# Events onto the shared clock (hgf.dart's DocClock).")
+      ..writeln('CLOCK = dict(')
+      ..writeln('    onset=${_pyStr(k.onsetColumn)},')
+      ..writeln('    step=${pyFloat(k.step)},')
+      ..writeln(
+        '    session=${k.sessionColumn == null ? 'None' : _pyStr(k.sessionColumn!)},',
+      )
+      ..writeln('    streams=[');
+    for (final st in k.streams) {
+      b
+        ..writeln('        dict(')
+        ..writeln(
+          '            when=${st.when == null ? 'None' : fn(st.when!)},  '
+          '# ${st.when ?? 'every event'}',
+        )
+        ..writeln('            hold=[');
+      for (final MapEntry(:key, :value) in st.hold.entries) {
+        b.writeln('                (${_pyStr(key)}, ${fn(value)}),  # $value');
+      }
+      b
+        ..writeln('            ],')
+        ..writeln('        ),');
+    }
+    b
+      ..writeln('    ],')
+      ..writeln(
+        '    keep=${k.keep == null ? 'None' : fn(k.keep!)},'
+        '${k.keep == null ? '' : '  # ${k.keep}'}',
+      )
+      ..writeln(')')
+      ..writeln()
+      ..writeln()
+      ..write(_clockHelpers)
+      ..writeln()
+      ..writeln();
     return b.toString();
   }
+
+  static const _clockHelpers = r'''
+def _cell(col, r):
+    return col.text[r] if col.text is not None else format_number(col.v[r])
+
+
+def _decimals(step):
+    for d in range(9):
+        s = step * 10**d
+        if abs(s - round(s)) < 1e-9 * max(1, s):
+            return d
+    return 9
+
+
+def on_clock(table):
+    """The event table on the shared clock (hgf.dart's DocClock): one row per
+    participant per step, each stream's columns held from an event until the
+    stream's next one (empty before the first), on a grid of whole multiples
+    of the step from each session's first event to its last. A table that
+    already has the time column and no onset column is on the clock."""
+    c, time = CLOCK, LAYOUT["time"]
+    header = table["header"]
+    if time in header and c["onset"] not in header:
+        return table
+    t = Transforms(table, LAYOUT["participant"], None, None)
+    streams = c["streams"]
+    whens = [None if s["when"] is None else s["when"](t) for s in streams]
+    holds = [[(name, f(t)) for name, f in s["hold"]] for s in streams]
+
+    def index(name, what):
+        if name not in header:
+            raise ValueError(f'No column "{name}" ({what}) in the data')
+        return header.index(name)
+
+    oc = index(c["onset"], "event times")
+    pc = None if LAYOUT["participant"] is None else index(LAYOUT["participant"], "participants")
+    sc = None if c["session"] is None else index(c["session"], "sessions")
+    sessions, session_of, events = {}, {}, {}
+    for r, row in enumerate(table["rows"]):
+        onset = number(table, row[oc])
+        if onset is None or np.isnan(onset):
+            continue
+        p = "" if pc is None else row[pc].strip()
+        ses = "" if sc is None else row[sc].strip()
+        found = False
+        for i in range(len(streams)):
+            w = whens[i]
+            if w is not None and (np.isnan(w.v[r]) or w.v[r] == 0):
+                continue
+            found = True
+            events.setdefault(p, [[] for _ in streams])[i].append(
+                (onset, r, [_cell(col, r) for _, col in holds[i]])
+            )
+        if not found:
+            continue
+        if session_of.setdefault(p, ses) != ses:
+            raise ValueError(f'Participant "{p}" is in sessions "{session_of[p]}" and "{ses}"')
+        s = sessions.setdefault(ses, dict(people=[], lo=onset, hi=onset))
+        if p not in s["people"]:
+            s["people"].append(p)
+        s["lo"], s["hi"] = min(s["lo"], onset), max(s["hi"], onset)
+    step, digits = c["step"], _decimals(c["step"])
+    out = []
+    for ses, s in sessions.items():
+        k0, k1 = math.floor(s["lo"] / step), math.ceil(s["hi"] / step)
+        times = [float(f"{k * step:.{digits}f}") for k in range(k0, k1 + 1)]
+        for p in s["people"]:
+            evs = [sorted(e, key=lambda x: (x[0], x[1])) for e in events[p]]
+            at = [-1] * len(streams)
+            for tm in times:
+                row = ([] if pc is None else [p]) + ([] if sc is None else [ses]) + [format_number(tm)]
+                for i, e in enumerate(evs):
+                    while at[i] + 1 < len(e) and e[at[i] + 1][0] <= tm + step * 1e-9:
+                        at[i] += 1
+                    row += [""] * len(holds[i]) if at[i] < 0 else e[at[i]][2]
+                out.append(row)
+    names = (
+        ([] if pc is None else [LAYOUT["participant"]])
+        + ([] if sc is None else [c["session"]])
+        + [time]
+        + [name for h in holds for name, _ in h]
+    )
+    grid = dict(header=names, rows=out, decimal_comma=table["decimal_comma"])
+    if c["keep"] is not None:
+        k = c["keep"](Transforms(grid, None, None, None))
+        grid["rows"] = [row for r, row in enumerate(out) if not np.isnan(k.v[r]) and k.v[r] != 0]
+    return grid
+''';
 
   /// [e] as a column of a data transform (see the `Transforms` helper).
   static String _dataExpr(Expr e) {
@@ -716,6 +851,9 @@ def fit(ids, subjects):
           'lag' => 't.lag(${xs[0]}, ${k(1)})',
           'diff' => 't.diff(${xs[0]})',
           'mate' => 't.mate(${xs[0]}, ${k(1)})',
+          'mates_sum' => 't.mates(${xs[0]}, "sum")',
+          'mates_mean' => 't.mates(${xs[0]}, "mean")',
+          'mates_count' => 't.mates(${xs[0]}, "count")',
           'missing' => 't.missing(${xs[0]})',
           'fill' => 't.fill(${xs[0]}, ${xs[1]})',
           'where' => 't.where(${xs[0]}, ${xs[1]}, ${xs[2]})',
@@ -1048,9 +1186,27 @@ class Transforms:
     def mate(self, x, k=1):
         if self._mates is None:
             self._mates = self._build_mates()
-        if k > len(self._mates):
-            return Col(np.full(self.n, np.nan), None if x.text is None else [""] * self.n)
-        return self._shift(x, self._mates[k - 1])
+        return self._shift(x, [m[k - 1] if k <= len(m) else -1 for m in self._mates])
+
+    def mates(self, x, fn):
+        """Over the team-mates present at the same time whose x is not
+        missing (for text, not empty): their sum or mean (NaN when there are
+        none), or how many."""
+        if self._mates is None:
+            self._mates = self._build_mates()
+        out = []
+        for others in self._mates:
+            if fn == "count" and x.text is not None:
+                out.append(float(sum(1 for m in others if m >= 0 and x.text[m].lower() not in self._MISSING_TEXT)))
+                continue
+            vs = [x.v[m] for m in others if m >= 0 and not np.isnan(x.v[m])]
+            if fn == "count":
+                out.append(float(len(vs)))
+            elif not vs:
+                out.append(np.nan)
+            else:
+                out.append(sum(vs) if fn == "sum" else sum(vs) / len(vs))
+        return Col(out)
 
     def _build_mates(self):
         if self.participant is None or self.group is None:
@@ -1073,16 +1229,15 @@ class Transforms:
                 key = rows[r][tc].strip() if x is None or np.isnan(x) else x
             keys.append(key)
             at[(p, g, key)] = r
-        most = max((len(m) for m in members.values()), default=0)
-        out = []
-        for rank in range(1, most):
-            ranked = []
-            for r in range(self.n):
-                g = group_of[r]
-                others = [q for q in members[g] if q != self.participant_of[r]]
-                ranked.append(at.get((others[rank - 1], g, keys[r]), -1) if rank <= len(others) else -1)
-            out.append(ranked)
-        return out
+        # Per row, the rows of the other members of its group at the same
+        # time, in the order the members first appear (-1: absent); an empty
+        # group cell has none.
+        return [
+            []
+            if group_of[r].lower() in self._MISSING_TEXT
+            else [at.get((q, group_of[r], keys[r]), -1) for q in members[group_of[r]] if q != self.participant_of[r]]
+            for r in range(self.n)
+        ]
 
     def eq(self, x, s, equal=True):
         if x.text is None:

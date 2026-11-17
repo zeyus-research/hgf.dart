@@ -20,6 +20,8 @@ import 'package:hgf_fit/document.dart';
 import 'package:hgf_fit/hgf_fit.dart';
 import 'package:test/test.dart';
 
+import 'clocked_fixture.dart';
+
 final String _python = File('../../tool/parity/.venv/bin/python').absolute.path;
 final Directory _dir = Directory('.dart_tool/document_export_python_test');
 
@@ -169,6 +171,9 @@ ModelDocument _team() => ModelDocument(
     DocTransform('mate1', 'mate(press, 1)'),
     DocTransform('mate_left', "mate(press, 1) == 'left'"),
     DocTransform('mate2_pos', 'mate(pos, 2)'),
+    DocTransform('mates_left', "mates_sum(press == 'left')"),
+    DocTransform('mates_pos', 'mates_mean(pos) + mates_count(lag(pos))'),
+    DocTransform('mates_pressed', 'mates_count(press)'),
     DocTransform('nothing', "press != 'none'"),
     DocTransform('step', 'diff(pos)'),
     DocTransform('back2', 'lag(pos, 2)'),
@@ -226,20 +231,17 @@ void _expectCsv(String got, String want, {double relTol = 1e-9}) {
   }
 }
 
-void main() {
-  final venv = File(_python).existsSync();
-  final skip = venv ? false : 'needs tool/parity/.venv (uv sync)';
-
-  test(
-    'reads participants and computes transforms as hgf.dart does',
-    () async {
-      final c = _team().compile();
-      final script = PythonExport(c.exportSpec(csv: _teamCsv)).script();
-      _dir.createSync(recursive: true);
-      File('${_dir.path}/teams.py').writeAsStringSync(script);
-      const harness = '''
+/// [doc]'s exported script reads [csv] (transforms, participants, outputs)
+/// as hgf.dart does.
+Future<void> _sameReader(ModelDocument doc, String csv, String name) async {
+  final c = doc.compile();
+  final script = PythonExport(c.exportSpec(csv: csv)).script();
+  _dir.createSync(recursive: true);
+  File('${_dir.path}/$name.py').writeAsStringSync(script);
+  final harness =
+      '''
 import importlib.util, json, sys
-spec = importlib.util.spec_from_file_location("teams", "teams.py")
+spec = importlib.util.spec_from_file_location("$name", "$name.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 table = m.transform(m.parse_csv(m.EMBEDDED_CSV))
@@ -248,37 +250,51 @@ print(json.dumps(dict(
     csv=m._csv_text(table["header"], table["rows"]),
     ids=ids,
     subjects=[dict(
-        inputs=s["inputs"].ravel().tolist(),
-        observed=None if s["observed"] is None else s["observed"].ravel().tolist(),
-        time_steps=None if s["time_steps"] is None else s["time_steps"].tolist(),
+    inputs=s["inputs"].ravel().tolist(),
+    observed=None if s["observed"] is None else s["observed"].ravel().tolist(),
+    time_steps=None if s["time_steps"] is None else s["time_steps"].tolist(),
     ) for s in subjects],
 )))
 ''';
-      final out = await _runPython('teams_harness', harness);
-      final got =
-          jsonDecode(out.trim().split('\n').last) as Map<String, Object?>;
-      final data = CsvData.parse(_teamCsv);
-      _expectCsv(got['csv']! as String, c.transform(data).toText());
-      final want = c.subjects(data);
-      expect(got['ids'], [for (final s in want) s.id]);
-      final subs = got['subjects']! as List<Object?>;
-      for (final (k, s) in want.indexed) {
-        final g = subs[k]! as Map<String, Object?>;
-        List<double>? doubles(Object? v) =>
-            (v as List<Object?>?)?.map((e) => (e! as num).toDouble()).toList();
-        final inputs = doubles(g['inputs'])!;
-        for (var i = 0; i < inputs.length; i++) {
-          expect(inputs[i], closeTo(s.inputs[i], 1e-12), reason: '${s.id} $i');
-        }
-        expect(doubles(g['observed']), s.observed);
-        expect(doubles(g['time_steps']), s.timeSteps);
-      }
+  final out = await _runPython('${name}_harness', harness);
+  final got = jsonDecode(out.trim().split('\n').last) as Map<String, Object?>;
+  final data = CsvData.parse(csv);
+  _expectCsv(got['csv']! as String, c.transform(data).toText());
+  final want = c.subjects(data);
+  expect(got['ids'], [for (final s in want) s.id]);
+  final subs = got['subjects']! as List<Object?>;
+  for (final (k, s) in want.indexed) {
+    final g = subs[k]! as Map<String, Object?>;
+    List<double>? doubles(Object? v) =>
+        (v as List<Object?>?)?.map((e) => (e! as num).toDouble()).toList();
+    final inputs = doubles(g['inputs'])!;
+    for (var i = 0; i < inputs.length; i++) {
+      expect(inputs[i], closeTo(s.inputs[i], 1e-12), reason: '${s.id} $i');
+    }
+    expect(doubles(g['observed']), s.observed);
+    expect(doubles(g['time_steps']), s.timeSteps);
+  }
 
-      // Run as a script: the outputs at the set values.
-      await _runPython('teams', script);
-      final outputs = File('${_dir.path}/data_outputs.csv').readAsStringSync();
-      _expectCsv(outputs, c.withOutputs(data).toText());
-    },
+  // Run as a script: the outputs at the set values.
+  await _runPython(name, script);
+  final outputs = File('${_dir.path}/data_outputs.csv').readAsStringSync();
+  _expectCsv(outputs, c.withOutputs(data).toText());
+}
+
+void main() {
+  final venv = File(_python).existsSync();
+  final skip = venv ? false : 'needs tool/parity/.venv (uv sync)';
+
+  test(
+    'reads participants and computes transforms as hgf.dart does',
+    () => _sameReader(_team(), _teamCsv, 'teams'),
+    skip: skip,
+    timeout: const Timeout(Duration(minutes: 5)),
+  );
+
+  test(
+    'puts events onto the shared clock as hgf.dart does',
+    () => _sameReader(clockedDocument(), clockedEventsCsv, 'clocked'),
     skip: skip,
     timeout: const Timeout(Duration(minutes: 5)),
   );

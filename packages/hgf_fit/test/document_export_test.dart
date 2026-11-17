@@ -11,6 +11,8 @@ import 'package:hgf_fit/document.dart';
 import 'package:hgf_fit/hgf_fit.dart';
 import 'package:test/test.dart';
 
+import 'clocked_fixture.dart';
+
 /// A 3-option choice (left / right / nothing) on a ball's position, a
 /// team-mate's press as a categorical input, participants and time by
 /// column, a transform and two outputs.
@@ -196,6 +198,7 @@ void main() {
       _dir.createSync(recursive: true);
       final scripts = {
         'plain': _doc(fit: const DocFit(method: 'none')),
+        'clocked': clockedDocument(),
         'eb': _doc(
           group: DocGroup(
             pooled: {'omega': DocPopulation.around(const Normal(-3, 1))},
@@ -223,6 +226,22 @@ void main() {
         for (final k in scripts.keys) '${_dir.path}/analyse_$k.dart',
       ]);
       expect(r.exitCode, 0, reason: '${r.stdout}\n${r.stderr}');
+    });
+
+    test('events onto the shared clock', () async {
+      final doc = clockedDocument();
+      final got = await _run('clocked', doc, clockedEventsCsv);
+      final c = doc.compile();
+      final events = CsvData.parse(clockedEventsCsv);
+      final set = c.currentValues();
+      expect(
+        got.outputs,
+        '${c.withOutputs(events, x: {
+          for (final id in ['a', 'b', 'c', 'd']) id: set,
+        }).toText()}\n',
+      );
+      // The outputs are on the grid (time steps of 0.05 s).
+      expect(got.outputs, contains('\na,1,100.05,'));
     });
 
     test('without a fit: the outputs at the set values', () async {
