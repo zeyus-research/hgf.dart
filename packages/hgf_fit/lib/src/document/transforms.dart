@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:hgf/hgf.dart';
 
 import 'clock.dart';
+import 'steps.dart';
 
 /// A data transform: a new column [name], computed from the data's columns
 /// (and earlier transforms) by [expression], before filtering. It is
@@ -552,6 +553,10 @@ final class TransformCache {
   String? _clockKey;
   CsvData? _grid;
 
+  CsvData? _stepsFrom;
+  String? _stepsKey;
+  CsvData? _stepped;
+
   CsvData? _from;
   _Index? _index;
   TransformTable? _last;
@@ -598,6 +603,40 @@ final class TransformCache {
     }
     return _grid!;
   }
+
+  /// [csv] through [steps] (see [applySteps]), made again only when the
+  /// table, the steps or the scope changed.
+  CsvData stepped(CsvData csv, List<DocStep> steps, StepScope scope) {
+    final key = jsonEncode([
+      for (final s in steps) s.toJson(),
+      scope.participantColumn,
+      scope.groupColumn,
+      scope.timeColumn,
+    ]);
+    if (!identical(csv, _stepsFrom) || key != _stepsKey || _stepped == null) {
+      _stepsFrom = null;
+      final rows = <int>[];
+      var t = csv;
+      for (final (i, s) in steps.indexed) {
+        try {
+          t = s.apply(t, scope);
+        } on FormatException catch (e) {
+          stepRows = rows;
+          throw FormatException('Data step ${i + 1} (${s.kind}): ${e.message}');
+        }
+        rows.add(t.rows.length);
+      }
+      stepRows = rows;
+      _stepped = t;
+      _stepsFrom = csv;
+      _stepsKey = key;
+    }
+    return _stepped!;
+  }
+
+  /// How many rows each step of the last [stepped] call gave (up to the
+  /// step that failed, if one did).
+  List<int> stepRows = const [];
 
   /// What [applyTransforms] gives, reusing the last call's work where it
   /// can (see [TransformCache]).

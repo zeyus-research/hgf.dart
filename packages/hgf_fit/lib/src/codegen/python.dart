@@ -3,6 +3,7 @@ import 'package:hgf/hgf.dart';
 import '../codec.dart';
 import '../document/data_layout.dart';
 import '../document/model_document.dart' show DocGroup, DocPopulation;
+import '../document/steps.dart';
 import '../expr_readout.dart';
 import '../parameter.dart';
 import 'export_spec.dart';

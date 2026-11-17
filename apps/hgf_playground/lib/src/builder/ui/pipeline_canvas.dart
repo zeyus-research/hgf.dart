@@ -57,6 +57,7 @@ class PipelineCard {
     required this.at,
     this.headerIn = false,
     this.headerOut,
+    this.chainOut = false,
   });
 
   /// The [DocPart] key.
@@ -74,6 +75,10 @@ class PipelineCard {
   /// An output port on the header's right: a transform's column, or the
   /// network's beliefs (`null` column).
   final ({String? column})? headerOut;
+
+  /// A data step's output (the table, into the next step or the data
+  /// card): drawn on the header's right, not a wire to drag.
+  final bool chainOut;
 
   double get height => cardHeader + rows.length * cardRow + 6;
   Rect get rect => at & Size(cardWidth, height);
@@ -109,13 +114,37 @@ typedef PipelineWire = ({Offset from, Offset to, String part, bool ok});
       ? 'group'
       : null;
   final shown = columns.take(maxDataRows).toList();
+  final steps = d.steps;
+  final prepared = steps.isEmpty && d.clock == null ? null : m.prepared;
+  for (final (i, st) in steps.indexed) {
+    final rows = prepared == null || i >= prepared.stepRows.length
+        ? null
+        : prepared.stepRows[i];
+    cards.add(
+      PipelineCard(
+        part: DocPart.step(i),
+        title: BuilderModel.stepKinds[st.kind] ?? st.kind,
+        subtitle: rows == null
+            ? 'data step ${i + 1}'
+            : 'data step ${i + 1} · $rows rows',
+        rows: [(label: st.summary, tag: null, port: null)],
+        at: pos[DocPart.step(i)]!,
+        headerIn: true,
+        chainOut: true,
+      ),
+    );
+  }
   cards.add(
     PipelineCard(
       part: DocPart.data,
       title: 'Data',
       subtitle: m.csv == null
           ? 'simulated · ${m.trials} trials'
+          : prepared != null
+          ? '${m.csvName ?? 'loaded'} · ${m.csv!.rows.length} → '
+                '${prepared.table.rows.length} rows'
           : '${m.csvName ?? 'loaded'} · ${m.csv!.rows.length} rows',
+      headerIn: steps.isNotEmpty,
       rows: [
         for (final c in shown) (label: c, tag: role(c), port: ColumnOut(c)),
         if (columns.length > shown.length)
@@ -215,7 +244,7 @@ typedef PipelineWire = ({Offset from, Offset to, String part, bool ok});
   }
 
   // Where each column comes from.
-  final dataCard = cards.first;
+  final dataCard = cards[steps.length];
   final sources = <String, Offset>{
     for (final (k, row) in dataCard.rows.indexed)
       if (row.port case ColumnOut(:final column)) column: dataCard.rowPort(k),
@@ -223,7 +252,16 @@ typedef PipelineWire = ({Offset from, Offset to, String part, bool ok});
       if (c.headerOut case (column: final String col)) col: c.headerOutPort,
   };
   final byPart = {for (final c in cards) c.part: c};
-  final wires = <PipelineWire>[];
+  final wires = <PipelineWire>[
+    // The data steps' chain into the data card.
+    for (var i = 0; i < steps.length; i++)
+      (
+        from: cards[i].headerOutPort,
+        to: cards[i + 1].headerInPort,
+        part: DocPart.step(i),
+        ok: true,
+      ),
+  ];
   for (final t in doc.transforms) {
     final card = byPart[DocPart.transform(t.name)]!;
     for (final v in t.expression.variables) {
@@ -784,6 +822,31 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
     }
   }
 
+  /// The data step kinds, at [at]; the pick is added at [index] (default:
+  /// last).
+  Future<void> _stepMenu(Offset at, {int? index}) async {
+    final kind = await _popup<String>(at, [
+      for (final MapEntry(:key, :value) in BuilderModel.stepKinds.entries)
+        PopupMenuItem(value: key, child: Text(value)),
+    ]);
+    if (kind != null) m.addStep(kind, index: index);
+  }
+
+  Future<T?> _popup<T>(Offset at, List<PopupMenuEntry<T>> items) {
+    final box = context.findRenderObject()! as RenderBox;
+    final g = box.localToGlobal(at);
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    return showMenu<T>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(g.dx, g.dy, 1, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: items,
+    );
+  }
+
   Future<void> _contextMenu(Offset at) async {
     _focus.requestFocus();
     final card = _cardAt(at);
@@ -828,6 +891,36 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
             child: const Text('Delete'),
           ),
         ]);
+      } else if (card.part.startsWith('step:')) {
+        final i = int.parse(card.part.substring('step:'.length));
+        final n = m.document.data.steps.length;
+        items.addAll([
+          if (i > 0)
+            PopupMenuItem(
+              value: () => m.moveStep(i, -1),
+              child: const Text('Move earlier'),
+            ),
+          if (i + 1 < n)
+            PopupMenuItem(
+              value: () => m.moveStep(i, 1),
+              child: const Text('Move later'),
+            ),
+          PopupMenuItem(
+            value: () => _stepMenu(at, index: i + 1),
+            child: const Text('Add a data step after…'),
+          ),
+          PopupMenuItem(
+            value: () => m.removePart(card.part),
+            child: const Text('Delete'),
+          ),
+        ]);
+      } else if (card.part == DocPart.data && m.csv != null) {
+        items.add(
+          PopupMenuItem(
+            value: () => _stepMenu(at),
+            child: const Text('Add a data step…'),
+          ),
+        );
       } else if (card.part != DocPart.data && card.part != DocPart.fit) {
         items.add(
           PopupMenuItem(
@@ -838,6 +931,11 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
       }
     } else {
       items.addAll([
+        if (m.csv != null)
+          PopupMenuItem(
+            value: () => _stepMenu(at),
+            child: const Text('Add a data step…'),
+          ),
         PopupMenuItem(
           value: () => m.addTransform(at: c),
           child: const Text('Add a transform'),
@@ -865,18 +963,7 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
       ]);
     }
     if (items.isEmpty) return;
-    final box = context.findRenderObject()! as RenderBox;
-    final g = box.localToGlobal(at);
-    final overlay =
-        Overlay.of(context).context.findRenderObject()! as RenderBox;
-    final pick = await showMenu<VoidCallback>(
-      context: context,
-      position: RelativeRect.fromRect(
-        Rect.fromLTWH(g.dx, g.dy, 1, 1),
-        Offset.zero & overlay.size,
-      ),
-      items: items,
-    );
+    final pick = await _popup(at, items);
     pick?.call();
   }
 
@@ -1234,7 +1321,9 @@ class _PipelinePainter extends CustomPainter {
       if (row.port != null) _port(canvas, c.rowPort(k), accent);
     }
     if (c.headerIn) _port(canvas, c.headerInPort, accent);
-    if (c.headerOut != null) _port(canvas, c.headerOutPort, accent);
+    if (c.headerOut != null || c.chainOut) {
+      _port(canvas, c.headerOutPort, accent);
+    }
   }
 
   void _port(Canvas canvas, Offset p, Color color) {

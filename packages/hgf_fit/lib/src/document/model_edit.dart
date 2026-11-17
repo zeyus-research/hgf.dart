@@ -6,6 +6,7 @@ import 'model_document.dart';
 import 'network_document.dart';
 import 'parameters.dart';
 import 'clock.dart';
+import 'steps.dart';
 import 'deep_document.dart';
 import 'transforms.dart';
 
@@ -22,6 +23,9 @@ abstract final class DocPart {
 
   /// A deep network, by id.
   static String deep(String id) => 'deep:$id';
+
+  /// A data-pipeline step, by its index in `DocData.steps`.
+  static String step(int index) => 'step:$index';
 }
 
 /// Identifiers: column, input, transform and output names that expressions
@@ -414,7 +418,8 @@ List<DocIssue> checkModel(
   FitCodec codec = const FitCodec(),
 }) {
   final raw = columns;
-  // With a clock, the pipeline reads its grid.
+  // With a clock, the pipeline reads its grid, then the steps' table.
+  final clocked = columns == null ? null : doc.data.clockColumnsOf(columns);
   columns = columns == null ? null : doc.data.columnsOf(columns);
   final issues = <DocIssue>[
     if (doc.hasNetwork || doc.deep.isEmpty)
@@ -657,7 +662,7 @@ List<DocIssue> checkModel(
         warn('The clock holds no columns: add a stream.', [DocPart.data]);
       }
       // The event table's columns, when the data is not on the clock yet.
-      if (raw != null && !identical(columns, raw) && columns != raw) {
+      if (raw != null && !identical(clocked, raw)) {
         for (final v in k.reads) {
           if (!raw.contains(v)) {
             error('The clock reads "$v", which the data does not have.', [
@@ -666,6 +671,46 @@ List<DocIssue> checkModel(
           }
         }
       }
+    }
+  }
+
+  // Data-pipeline steps, each reading the table the steps before it give.
+  var at = clocked;
+  for (final (i, st) in d.steps.indexed) {
+    final part = DocPart.step(i);
+    if (at != null) {
+      for (final v in st.reads) {
+        if (!at.contains(v)) {
+          error(
+            'Step ${i + 1} (${st.kind}) reads "$v", which the data does not '
+            'have at that step.',
+            [part],
+          );
+        }
+      }
+      final added = st.columnsAfter(const []);
+      for (final n in added) {
+        if (at.contains(n)) {
+          warn('Step ${i + 1} (${st.kind}) overwrites the column "$n".', [
+            part,
+          ]);
+        }
+      }
+      at = st.columnsAfter(at);
+    }
+    switch (st) {
+      case StandardiseStep(columns: final cs) when cs.isEmpty:
+        warn('Step ${i + 1} standardises no column.', [part]);
+      case DecimateStep(factor: 1, columns: final cs) when cs.isEmpty:
+        warn('Step ${i + 1} decimates by 1: it does nothing.', [part]);
+      case SplitStep(byParticipant: true) when d.participantColumn == null:
+        error(
+          'Step ${i + 1} splits by participant, but there is no participant '
+          'column.',
+          [part],
+        );
+      default:
+        break;
     }
   }
 

@@ -5,7 +5,11 @@ import 'package:hgf/hgf.dart';
 
 import '../model.dart';
 import 'clock.dart';
+import 'steps.dart';
 import 'transforms.dart';
+
+/// The tables [DataLayout.prepared] gave, by its layouts' keys.
+final _preparedBy = Expando<String>('prepared');
 
 /// One input node's columns in a [DataLayout], in the network's input
 /// order: [columns] (as many as the node takes data columns), or, with
@@ -57,8 +61,10 @@ final class DataLayout {
     this.timeStepColumn,
     this.groupColumn,
     this.clock,
+    List<DocStep> steps = const [],
     List<DocTransform> transforms = const [],
   }) : inputs = List.unmodifiable(inputs),
+       steps = List.unmodifiable(steps),
        responseColumns = List.unmodifiable(responseColumns),
        options = options == null ? null : List.unmodifiable(options),
        transforms = List.unmodifiable(transforms) {
@@ -78,6 +84,17 @@ final class DataLayout {
 
   /// Puts event tables onto a shared clock before the [transforms].
   final DocClock? clock;
+
+  /// The data-pipeline steps, after the [clock] and before the
+  /// [transforms].
+  final List<DocStep> steps;
+
+  /// Where the [steps] run.
+  StepScope get scope => (
+    participantColumn: participantColumn,
+    groupColumn: groupColumn,
+    timeColumn: timeColumn,
+  );
 
   /// The width of a row of `Subject.inputs`.
   int get width => inputs.fold(0, (w, i) => w + i.width);
@@ -102,10 +119,44 @@ final class DataLayout {
     );
   }
 
-  /// [csv] on the [clock]'s grid, with the [transforms]' columns appended;
-  /// a [cache] reuses what it can of the last call's work.
-  CsvData transform(CsvData csv, {TransformCache? cache}) {
+  /// [csv] on the [clock]'s grid and through the [steps]: what the
+  /// [transforms] read. With a [cache], made again only when needed.
+  ///
+  /// A table this gave already (for this layout's clock, steps and
+  /// columns) comes back as it is, so the readers ([subjects],
+  /// [withColumns], …) take raw or prepared data alike.
+  CsvData prepared(CsvData csv, {TransformCache? cache}) {
+    if (steps.isEmpty) return clocked(csv, cache: cache);
+    if (_preparedBy[csv] == _prepareKey) return csv;
     final grid = clocked(csv, cache: cache);
+    final out = cache != null
+        ? cache.stepped(grid, steps, scope)
+        : applySteps(grid, steps, scope);
+    _preparedBy[out] = _prepareKey;
+    return out;
+  }
+
+  /// [table] (made from a [prepared] one, e.g. with a column filled in)
+  /// marked as prepared: the readers don't run the steps on it again.
+  CsvData asPrepared(CsvData table) {
+    if (steps.isNotEmpty) _preparedBy[table] = _prepareKey;
+    return table;
+  }
+
+  /// What [prepared] does, as text: tables it gave are tagged with it.
+  late final String _prepareKey = jsonEncode([
+    clock?.toJson(),
+    for (final s in steps) s.toJson(),
+    participantColumn,
+    groupColumn,
+    timeColumn,
+  ]);
+
+  /// [csv] on the [clock]'s grid, through the [steps], with the
+  /// [transforms]' columns appended; a [cache] reuses what it can of the
+  /// last call's work.
+  CsvData transform(CsvData csv, {TransformCache? cache}) {
+    final grid = prepared(csv, cache: cache);
     if (cache != null) {
       return cache.apply(
         grid,

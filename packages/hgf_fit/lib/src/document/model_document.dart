@@ -16,6 +16,7 @@ import '../transform.dart';
 import 'clock.dart';
 import 'data_layout.dart';
 import 'network_document.dart';
+import 'steps.dart';
 import 'transforms.dart';
 
 /// A named input: the network's input node [node] (an address), read from
@@ -174,6 +175,7 @@ final class DocData {
     this.timeStepColumn,
     this.groupColumn,
     this.clock,
+    this.steps = const [],
   }) : assert(
          timeColumn == null || timeStepColumn == null,
          'Give a time column or a time-step column, not both',
@@ -182,10 +184,13 @@ final class DocData {
   final String? participantColumn, timeColumn, timeStepColumn, groupColumn;
   final DocClock? clock;
 
-  /// The columns the pipeline sees in data with [header]: the clock's
-  /// grid when there is a clock and the data is not on it yet, else
-  /// [header].
-  List<String> columnsOf(List<String> header) {
+  /// The data-pipeline steps, in order, after the [clock] and before the
+  /// transforms (see [DocStep]).
+  final List<DocStep> steps;
+
+  /// The columns the clock gives for data with [header]: its grid when
+  /// there is a clock and the data is not on it yet, else [header].
+  List<String> clockColumnsOf(List<String> header) {
     final c = clock;
     final t = timeColumn;
     if (c == null || t == null) return header;
@@ -193,12 +198,18 @@ final class DocData {
     return c.columns(participantColumn: participantColumn, timeColumn: t);
   }
 
+  /// The columns the pipeline sees in data with [header]: after the clock
+  /// ([clockColumnsOf]) and the [steps].
+  List<String> columnsOf(List<String> header) =>
+      stepColumns(clockColumnsOf(header), steps);
+
   DocData copyWith({
     String? Function()? participantColumn,
     String? Function()? timeColumn,
     String? Function()? timeStepColumn,
     String? Function()? groupColumn,
     DocClock? Function()? clock,
+    List<DocStep>? steps,
   }) => DocData(
     participantColumn: participantColumn == null
         ? this.participantColumn
@@ -209,6 +220,7 @@ final class DocData {
         : timeStepColumn(),
     groupColumn: groupColumn == null ? this.groupColumn : groupColumn(),
     clock: clock == null ? this.clock : clock(),
+    steps: steps ?? this.steps,
   );
 
   Map<String, Object?> toJson() => {
@@ -217,6 +229,7 @@ final class DocData {
     'time_step_column': ?timeStepColumn,
     'group_column': ?groupColumn,
     if (clock case final c?) 'clock': c.toJson(),
+    if (steps.isNotEmpty) 'steps': [for (final s in steps) s.toJson()],
   };
 
   factory DocData.fromJson(Map<String, Object?> json) => DocData(
@@ -227,6 +240,10 @@ final class DocData {
     clock: json['clock'] == null
         ? null
         : DocClock.fromJson((json['clock'] as Map).cast<String, Object?>()),
+    steps: [
+      for (final s in (json['steps'] as List? ?? const []))
+        DocStep.fromJson((s as Map).cast<String, Object?>()),
+    ],
   );
 }
 
@@ -959,7 +976,7 @@ final class CompiledDocument {
       );
     }
     final rc = r.dataColumns.single;
-    data = layout.clocked(data);
+    data = layout.prepared(data);
     final header = [...data.header];
     if (!header.contains(rc)) header.add(rc);
     final rcol = header.indexOf(rc);
@@ -969,6 +986,7 @@ final class CompiledDocument {
           ..[rcol] = '',
     ], decimalComma: data.decimalComma);
     final l = layout;
+    l.asPrepared(raw);
     final table = TransformTable(
       raw,
       l.transforms,
@@ -1186,6 +1204,7 @@ final class CompiledDocument {
       timeStepColumn: d.timeStepColumn,
       groupColumn: d.groupColumn,
       clock: d.clock,
+      steps: d.steps,
       transforms: document.transforms,
     );
   }();

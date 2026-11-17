@@ -675,9 +675,10 @@ def fit(ids, subjects):
       )
       ..writeln('    computes them)."""');
     if (layout.clock != null) b.writeln('    table = on_clock(table)');
+    if (layout.steps.isNotEmpty) b.writeln('    table = run_steps(table)');
     if (layout.transforms.isEmpty) {
       b.writeln('    return table');
-      return _clockCode(layout) + b.toString();
+      return _clockCode(layout) + _stepsCode(layout) + b.toString();
     }
     b.writeln(
       '    t = Transforms(table, LAYOUT["participant"], LAYOUT["group"], '
@@ -689,8 +690,285 @@ def fit(ids, subjects):
         ..writeln('    t.add(${_pyStr(t.name)}, ${_dataExpr(t.expression)})');
     }
     b.writeln('    return t.table');
-    return _clockCode(layout) + b.toString();
+    return _clockCode(layout) + _stepsCode(layout) + b.toString();
   }
+
+  /// `STEPS` and `run_steps(table)`: the data-pipeline steps, as hgf.dart's
+  /// `DocStep`s (empty without steps).
+  String _stepsCode(DataLayout layout) {
+    if (layout.steps.isEmpty) return '';
+    String fn(Expr e) => 'lambda t: ${_dataExpr(e)}';
+    String opt(Expr? e) => e == null ? 'None' : fn(e);
+    String strs(List<String> xs) => '[${xs.map(_pyStr).join(', ')}]';
+    final b = StringBuffer()
+      ..writeln("# The data-pipeline steps (hgf.dart's DocStep), in order.")
+      ..writeln('STEPS = [');
+    for (final st in layout.steps) {
+      final args = switch (st) {
+        DecimateStep() => [
+          'factor=${st.factor}',
+          'how=${_pyStr(st.how.name)}',
+          'columns={${[for (final MapEntry(:key, :value) in st.columns.entries) '${_pyStr(key)}: ${_pyStr(value.name)}'].join(', ')}}',
+          'within=${strs(st.within)}',
+        ],
+        SegmentStep() => [
+          'at=${fn(st.at)}',
+          'before=${st.before}',
+          'after=${st.after ?? 'None'}',
+          'column=${_pyStr(st.column)}',
+          'offset=${st.offsetColumn == null ? 'None' : _pyStr(st.offsetColumn!)}',
+        ],
+        FilterStep() => ['keep=${fn(st.keep)}'],
+        StandardiseStep() => [
+          'columns=${strs(st.columns)}',
+          'per_participant=${st.perParticipant ? 'True' : 'False'}',
+          'fit_on=${opt(st.fitOn)}',
+        ],
+        SplitStep() => [
+          'column=${_pyStr(st.column)}',
+          'parts=[${[for (final p in st.parts) '(${_pyStr(p.label)}, ${pyFloat(p.fraction)})'].join(', ')}]',
+          'by_participant=${st.byParticipant ? 'True' : 'False'}',
+          'seed=${st.seed}',
+        ],
+      };
+      b
+        ..writeln('    # ${st.kind}: ${st.summary}')
+        ..writeln('    dict(kind=${_pyStr(st.kind)}, ${args.join(', ')}),');
+    }
+    b
+      ..writeln(']')
+      ..writeln()
+      ..writeln()
+      ..write(_stepHelpers)
+      ..writeln()
+      ..writeln();
+    return b.toString();
+  }
+
+  static const _stepHelpers = r'''
+def _step_index(table, name, what):
+    if name not in table["header"]:
+        raise ValueError(f'No column "{name}" ({what}) in the data')
+    return table["header"].index(name)
+
+
+def _step_units(table):
+    if LAYOUT["participant"] is None:
+        return [list(range(len(table["rows"])))]
+    c = _step_index(table, LAYOUT["participant"], "participants")
+    groups = {}
+    for r, row in enumerate(table["rows"]):
+        groups.setdefault(row[c].strip(), []).append(r)
+    return list(groups.values())
+
+
+def _step_eval(table, f):
+    return f(Transforms(table, LAYOUT["participant"], LAYOUT["group"], LAYOUT["time"])).v
+
+
+def _on(v):
+    return not np.isnan(v) and v != 0
+
+
+def _aggregate(table, block, c, a):
+    rows = table["rows"]
+    if a == "first":
+        return rows[block[0]][c]
+    if a == "last":
+        return rows[block[-1]][c]
+    if a == "mode":
+        counts = {}
+        for r in block:
+            s = rows[r][c].strip()
+            if s.lower() not in Transforms._MISSING_TEXT:
+                counts[s] = counts.get(s, 0) + 1
+        best = None
+        for k, n in counts.items():
+            if best is None or n > counts[best]:
+                best = k
+        return "" if best is None else best
+    xs = []
+    for r in block:
+        v = number(table, rows[r][c])
+        if v is None:
+            raise ValueError(f'Column "{table["header"][c]}" has text ("{rows[r][c]}"), which "{a}" cannot aggregate')
+        if not np.isnan(v):
+            xs.append(v)
+    if not xs:
+        return ""
+    if a in ("mean", "sum"):
+        s = 0.0
+        for x in xs:
+            s += x
+        return format_number(s / len(xs) if a == "mean" else s)
+    if a == "min":
+        return format_number(min(xs))
+    if a == "max":
+        return format_number(max(xs))
+    return format_number(1.0 if any(x != 0 for x in xs) else 0.0)
+
+
+def _decimate(table, s):
+    header, rows = table["header"], table["rows"]
+    if s["factor"] == 1 and not s["columns"] and s["how"] == "first":
+        return table
+    aggs = [s["columns"].get(h, s["how"]) for h in header]
+    for k, h in enumerate(header):
+        if h in s["columns"] or aggs[k] in ("first", "last", "mode"):
+            continue
+        if h in (LAYOUT["participant"], LAYOUT["group"], LAYOUT["time"]) or any(
+            number(table, row[k]) is None for row in rows
+        ):
+            aggs[k] = "first"
+    for c in s["columns"]:
+        _step_index(table, c, "to aggregate")
+    wc = [_step_index(table, w, "blocks end where it changes") for w in s["within"]]
+    out = []
+    for unit in _step_units(table):
+        start = 0
+        while start < len(unit):
+            end = start + 1
+            while (
+                end < len(unit)
+                and end - start < s["factor"]
+                and all(rows[unit[end]][c].strip() == rows[unit[start]][c].strip() for c in wc)
+            ):
+                end += 1
+            block = unit[start:end]
+            out.append([_aggregate(table, block, c, a) for c, a in enumerate(aggs)])
+            start = end
+    return dict(table, rows=out)
+
+
+def _segment(table, s):
+    v = _step_eval(table, s["at"])
+    header = list(table["header"])
+    for name in (s["column"], s["offset"]):
+        if name is not None and name not in header:
+            header.append(name)
+    sc = header.index(s["column"])
+    oc = -1 if s["offset"] is None else header.index(s["offset"])
+    before, after = s["before"], s["after"]
+    out = []
+    for unit in _step_units(table):
+        onsets = [i for i, r in enumerate(unit) if _on(v[r])]
+        seg = [-1] * len(unit)
+        for k, o in enumerate(onsets):
+            if after is None:
+                end = onsets[k + 1] - before - 1 if k + 1 < len(onsets) else len(unit) - 1
+            else:
+                end = o + after
+            for i in range(max(0, o - before), min(end, len(unit) - 1) + 1):
+                seg[i] = k
+        for i, r in enumerate(unit):
+            k = seg[i]
+            if k < 0:
+                continue
+            row = list(table["rows"][r]) + [""] * (len(header) - len(table["header"]))
+            row[sc] = str(k + 1)
+            if oc >= 0:
+                row[oc] = str(i - onsets[k])
+            out.append(row)
+    return dict(table, header=header, rows=out)
+
+
+def _filter(table, s):
+    v = _step_eval(table, s["keep"])
+    return dict(table, rows=[row for r, row in enumerate(table["rows"]) if _on(v[r])])
+
+
+def _standardise(table, s):
+    cs = [_step_index(table, c, "to standardise") for c in s["columns"]]
+    fit = None if s["fit_on"] is None else _step_eval(table, s["fit_on"])
+    rows = [list(r) for r in table["rows"]]
+    units = _step_units(table) if s["per_participant"] else [list(range(len(rows)))]
+    for c in cs:
+        for unit in units:
+            xs = []
+            for r in unit:
+                x = number(table, table["rows"][r][c])
+                if x is None:
+                    raise ValueError(f'Column "{table["header"][c]}" has text ("{table["rows"][r][c]}")')
+                xs.append(x)
+            use = [i for i, r in enumerate(unit) if not np.isnan(xs[i]) and (fit is None or _on(fit[r]))]
+            if not use:
+                raise ValueError(f'No rows to fit the mean and sd of "{table["header"][c]}" on')
+            total = 0.0
+            for i in use:
+                total += xs[i]
+            mean = total / len(use)
+            ss = 0.0
+            for i in use:
+                ss += (xs[i] - mean) * (xs[i] - mean)
+            sd = math.sqrt(ss / len(use))
+            scale = sd if sd > 1e-12 else 1.0
+            for i, r in enumerate(unit):
+                rows[r][c] = format_number((xs[i] - mean) / scale)
+    return dict(table, rows=rows)
+
+
+def _shuffled(n, seed):
+    # 0..n-1 shuffled with mulberry32, as hgf.dart's SplitStep.shuffled.
+    state = seed & 0xFFFFFFFF
+
+    def imul(a, b):
+        return (a * b) & 0xFFFFFFFF
+
+    def nxt():
+        nonlocal state
+        state = (state + 0x6D2B79F5) & 0xFFFFFFFF
+        t = imul(state ^ (state >> 15), 1 | state)
+        t = ((t + imul(t ^ (t >> 7), 61 | t)) & 0xFFFFFFFF) ^ t
+        return ((t ^ (t >> 14)) & 0xFFFFFFFF) / 4294967296
+
+    out = list(range(n))
+    for i in range(n - 1, 0, -1):
+        j = math.floor(nxt() * (i + 1))
+        out[i], out[j] = out[j], out[i]
+    return out
+
+
+def _split(table, s):
+    header = list(table["header"])
+    if s["column"] not in header:
+        header.append(s["column"])
+    c = header.index(s["column"])
+    rows = [list(r) + [""] * (len(header) - len(r)) for r in table["rows"]]
+    parts = s["parts"]
+    total = 0.0
+    for _, f in parts:
+        total += f
+
+    def label(i, n):
+        cum = 0.0
+        for name, f in parts:
+            cum += f
+            if i < math.floor(cum / total * n + 0.5):
+                return name
+        return parts[-1][0]
+
+    units = _step_units(table)
+    if s["by_participant"]:
+        for i, u in enumerate(_shuffled(len(units), s["seed"])):
+            for r in units[u]:
+                rows[r][c] = label(i, len(units))
+    else:
+        for unit in units:
+            for i, r in enumerate(unit):
+                rows[r][c] = label(i, len(unit))
+    return dict(table, header=header, rows=rows)
+
+
+def run_steps(table):
+    # The table through the data-pipeline steps, in order.
+    run = dict(decimate=_decimate, segment=_segment, filter=_filter, standardise=_standardise, split=_split)
+    for i, s in enumerate(STEPS):
+        try:
+            table = run[s["kind"]](table, s)
+        except ValueError as e:
+            raise ValueError(f'Data step {i + 1} ({s["kind"]}): {e}') from None
+    return table
+''';
 
   /// `CLOCK` and `on_clock(table)`: events onto the shared clock, as
   /// hgf.dart's `DocClock` (empty without a clock).

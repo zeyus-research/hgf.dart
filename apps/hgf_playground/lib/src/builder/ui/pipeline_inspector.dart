@@ -12,6 +12,7 @@ import '../doc_layout.dart' show ownerIdOf;
 import 'fit_panel.dart' show FitPanel, FreeToggle;
 import 'inspector.dart' show NumberField;
 import 'pipeline_canvas.dart' show readoutName;
+import 'step_inspector.dart' show StepPanel;
 
 /// The inspector of the pipeline canvas: the part selected (data,
 /// transform, input, network, response or output), or an overview.
@@ -33,6 +34,12 @@ class PipelinePanel extends StatelessWidget {
     }
     final colon = part.indexOf(':');
     final key = colon < 0 ? '' : part.substring(colon + 1);
+    if (part.startsWith('step:')) {
+      final i = int.tryParse(key);
+      if (i != null && i < doc.data.steps.length) {
+        return StepPanel(key: ValueKey(part), model: model, index: i);
+      }
+    }
     if (part.startsWith('transform:') && doc.transform(key) != null) {
       return _TransformPanel(model: model, name: key);
     }
@@ -464,6 +471,75 @@ class _DataPanel extends StatelessWidget {
           onChanged: (c) => set(group: () => c),
         ),
         if (model.csv != null || d.clock != null) _ClockSection(model: model),
+        if (model.csv != null || d.steps.isNotEmpty)
+          _StepsSection(model: model),
+      ],
+    );
+  }
+}
+
+/// The data steps after the clock ([DocStep]), in order: each opens its
+/// own panel; the menu adds one.
+class _StepsSection extends StatelessWidget {
+  const _StepsSection({required this.model});
+
+  final BuilderModel model;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final steps = model.document.data.steps;
+    final rows = model.prepared?.stepRows ?? const <int>[];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 12),
+        Text('Data steps', style: theme.textTheme.labelMedium),
+        for (final (i, st) in steps.indexed)
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: CircleAvatar(radius: 11, child: Text('${i + 1}')),
+            title: Text(BuilderModel.stepKinds[st.kind] ?? st.kind),
+            subtitle: Text(
+              '${st.summary}${i < rows.length ? ' · ${rows[i]} rows' : ''}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            onTap: () => model.select(PartSelection(DocPart.step(i))),
+          ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: PopupMenuButton<String>(
+            tooltip: 'Add a data step',
+            itemBuilder: (_) => [
+              for (final MapEntry(:key, :value)
+                  in BuilderModel.stepKinds.entries)
+                PopupMenuItem(value: key, child: Text(value)),
+            ],
+            onSelected: model.addStep,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.add, size: 18, color: theme.colorScheme.primary),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Add a data step',
+                    style: TextStyle(color: theme.colorScheme.primary),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        Text(
+          'After the clock, before the transforms: decimate, cut segments '
+          'around events, drop rows, z-score columns, label train / test. '
+          'The exports run the same steps.',
+          style: theme.textTheme.bodySmall,
+        ),
       ],
     );
   }

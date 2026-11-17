@@ -2340,13 +2340,67 @@ fitting, export) reads it.
 8. [ ] hgf_deep layers and a data-loading pipeline as nodes of the same
    kind; Julia export. Deep networks first (agreed 2026-11-17: building
    the structure and exporting it is useful without the data nodes):
-   done 2026-11-17, see "Deep networks in the builder" below. Next: the
-   data-pipeline nodes (resample / decimate, segment by events, filter
-   rows, standardise, split), then training deep networks in the builder
-   and wiring models together (a deep network's predictions as columns).
+   done 2026-11-17, see "Deep networks in the builder" below. The
+   data-pipeline nodes (decimate, segment by events, filter rows,
+   standardise, split): done 2026-11-17, see "Data-pipeline steps" below.
+   Next: training deep networks in the builder (on the split's rows) and
+   wiring models together (a deep network's predictions as columns; the
+   deep exports reading the clock, steps and transforms).
 
 In parallel (not blocking): vector node kinds on the GPU, a faster dp
 candidate search.
+
+#### Data-pipeline steps (2026-11-17): done
+
+An ordered list of row steps in the data layout, after the clock and
+before the transforms (`DocData.steps`, `"steps"` in `hgf.document/1`;
+`package:hgf_fit/document/steps.dart`). Expressions in steps see the
+table at that step, with the transforms' data functions (lag, diff,
+mate, …); each step works per participant.
+
+- **`DecimateStep`**: blocks of `factor` rows (a block also ends where a
+  `within` column changes), one row each; numbers aggregate by `how`
+  (first, last, mean, sum, min, max, any, mode) or per column; labels and
+  the participant, group and time columns keep the block's first row, so
+  a 120 Hz grid decimated by 12 is a 10 Hz grid on the same clock, and
+  `any` keeps a press between kept rows.
+- **`SegmentStep`**: each row where `at` is nonzero starts a segment from
+  `before` rows before to `after` rows after (none: up to the next); the
+  later event takes overlapping rows; rows in no segment are dropped; a
+  segment-number column and an optional rows-from-event column.
+- **`FilterStep`**: keep the rows where an expression is nonzero.
+- **`StandardiseStep`**: z-scores in place (population sd, as hgf_deep's
+  `Standardiser`), per participant or overall, fitted on the rows an
+  expression picks (`split == 'train'`).
+- **`SplitStep`**: a label column (train / test, any parts and shares),
+  each participant's rows in time order, or whole participants shuffled
+  by a seeded mulberry32 (the same in Dart, on the web and in Python).
+- `DataLayout.prepared` (clock, then steps) is what the transforms read;
+  it tags its output, so readers given a prepared table don't step it
+  again (found: the builder and `simulateTogether` passed prepared tables
+  to `subjects`). `TransformCache.stepped` keeps the stepped table and
+  each step's row count. `checkModel` follows the columns step by step
+  (`DocPart.step(i)`): a step reading a column it doesn't have yet is an
+  error; overwriting a column, a no-op decimation or standardising
+  nothing a warning.
+- **Exports:** the Dart scripts build the steps as constructor calls; the
+  pyhgf scripts get `STEPS` and `run_steps(table)` (a port of every step).
+  `steppedDocument()` (every kind, on the clocked fixture) gives the same
+  table, subjects and outputs in Dart, in the exported Dart script and in
+  the exported Python script.
+- **Builder:** step cards chain into the Data card from the left (rows
+  after each step on the card; the Data card shows raw → prepared rows).
+  Right-click the canvas or the Data card ("Add a data step…"), or the
+  Data panel's "Data steps" list; a step's card menu moves it earlier or
+  later, adds one after it, deletes it. The step panel
+  (`step_inspector.dart`) edits each kind (aggregates per column, columns
+  as chips, the split's parts as `train 0.8; test 0.2`); with a clock,
+  decimation shows the new step size. New steps get defaults that keep
+  the preview running (segments at `diff(trial) != 0` when there is a
+  trial / round / block column).
+- Left: the deep exports read the raw CSV (no clock, steps or
+  transforms), and deep training doesn't use the split yet: both go with
+  training in the builder.
 
 #### Deep networks in the builder (2026-11-17): done
 

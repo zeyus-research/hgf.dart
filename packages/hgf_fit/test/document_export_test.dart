@@ -199,6 +199,7 @@ void main() {
       final scripts = {
         'plain': _doc(fit: const DocFit(method: 'none')),
         'clocked': clockedDocument(),
+        'stepped': steppedDocument(),
         'eb': _doc(
           group: DocGroup(
             pooled: {'omega': DocPopulation.around(const Normal(-3, 1))},
@@ -242,6 +243,21 @@ void main() {
       );
       // The outputs are on the grid (time steps of 0.05 s).
       expect(got.outputs, contains('\na,1,100.05,'));
+    });
+
+    test('data-pipeline steps', () async {
+      final doc = steppedDocument();
+      final got = await _run('stepped', doc, clockedEventsCsv);
+      final c = doc.compile();
+      final events = CsvData.parse(clockedEventsCsv);
+      final set = c.currentValues();
+      expect(
+        got.outputs,
+        '${c.withOutputs(events, x: {
+          for (final id in ['a', 'b', 'c', 'd']) id: set,
+        }).toText()}\n',
+      );
+      expect(got.outputs, contains('split'));
     });
 
     test('without a fit: the outputs at the set values', () async {

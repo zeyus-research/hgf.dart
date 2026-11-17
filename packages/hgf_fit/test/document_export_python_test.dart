@@ -300,6 +300,13 @@ void main() {
   );
 
   test(
+    'runs the data-pipeline steps as hgf.dart does',
+    () => _sameReader(steppedDocument(), clockedEventsCsv, 'stepped'),
+    skip: skip,
+    timeout: const Timeout(Duration(minutes: 5)),
+  );
+
+  test(
     'MAP of every participant: hgf_fit\'s estimates, intervals and outputs',
     () async {
       final csv = _choiceData();

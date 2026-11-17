@@ -129,4 +129,56 @@ c,100.40,press,right,solo,
     expect(c.observed!.every((o) => o == 0), isTrue);
     expect(m.outputsCsv, returnsNormally);
   });
+
+  test('data steps: added, edited, moved, removed; cards chain into data', () {
+    const csv = '''
+participant,t,x,trial
+a,0,1,1
+a,1,2,1
+a,2,3,2
+a,3,4,2
+b,0,5,1
+b,1,6,2
+''';
+    final doc = ModelDocument(
+      name: 'steps',
+      network: NetworkDocument(
+        nodes: [ScalarNode('x', kind: NodeKind.continuousState)],
+        edges: const [],
+      ),
+      inputs: [
+        DocInput('x', node: 'x', columns: ['x']),
+      ],
+      data: const DocData(participantColumn: 'participant', timeColumn: 't'),
+    );
+    final m = BuilderModel()..open(doc);
+    m.loadData(CsvData.parse(csv), name: 'steps.csv');
+    m.addStep('segment');
+    final seg = m.document.data.steps.single as SegmentStep;
+    expect('${seg.at}', 'diff(trial) != 0');
+    expect(m.selectedPart, DocPart.step(0));
+    expect(m.dataColumns, contains('segment'));
+    m.addStep('decimate');
+    m.addStep('standardise');
+    m.replaceStep(2, StandardiseStep(columns: ['x']));
+    expect(m.issues.where((i) => i.isError), isEmpty, reason: '${m.issues}');
+    // diff(trial) != 0 is NaN on each participant's first row: the
+    // segments start at the changes, so a keeps rows 2-3, b row 1.
+    expect(m.prepared!.stepRows, [3, 2, 2]);
+    expect(m.allSubjects().map((s) => s.inputs.length), [1, 1]);
+    m.moveStep(0, 1);
+    expect(m.document.data.steps.map((s) => s.kind), [
+      'decimate',
+      'segment',
+      'standardise',
+    ]);
+    expect(m.selectedPart, DocPart.step(1));
+    final pos = m.pipelinePositions;
+    expect(pos[DocPart.step(0)]!.dx, lessThan(pos[DocPart.step(1)]!.dx));
+    expect(pos[DocPart.step(2)]!.dx, lessThan(pos[DocPart.data]!.dx));
+    m.removePart(DocPart.step(0));
+    expect(m.document.data.steps.length, 2);
+    m.undo();
+    expect(m.document.data.steps.length, 3);
+  });
 }

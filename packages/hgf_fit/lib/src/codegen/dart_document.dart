@@ -83,7 +83,13 @@ extension _DocumentScript on DartExport {
       ..writeln("import 'package:hgf/hgf.dart';")
       ..writeln(
         "import 'package:hgf_fit/document.dart'\n"
-        "    show ${layout.clock == null ? '' : 'ClockStream, DocClock, '}DataLayout${layout.transforms.isEmpty ? '' : ', DocTransform'}, LayoutInput;",
+        "    show ${[
+          if (layout.clock != null) ...['ClockStream', 'DocClock'],
+          'DataLayout',
+          ...{for (final s in layout.steps) ..._stepNames(s)},
+          if (layout.transforms.isNotEmpty) 'DocTransform',
+          'LayoutInput',
+        ].join(', ')};",
       );
     if (model != null) b.writeln("import 'package:hgf_fit/hgf_fit.dart';");
     b
@@ -213,6 +219,13 @@ extension _DocumentScript on DartExport {
         b.writeln("    keep: Expr.parse(${str('$e')}),");
       }
       b.writeln('  ),');
+    }
+    if (layout.steps.isNotEmpty) {
+      b.writeln('  steps: [');
+      for (final st in layout.steps) {
+        b.writeln('    ${_stepCode(st)},');
+      }
+      b.writeln('  ],');
     }
     if (layout.transforms.isNotEmpty) {
       b.writeln('  transforms: [');
@@ -513,4 +526,56 @@ extension _DocumentScript on DartExport {
     b.write(');');
     return b.toString();
   }
+}
+
+/// The `package:hgf_fit/document.dart` names [_stepCode] uses for [s].
+List<String> _stepNames(DocStep s) => switch (s) {
+  DecimateStep() => ['DecimateStep', 'StepAggregate'],
+  SegmentStep() => ['SegmentStep'],
+  FilterStep() => ['FilterStep'],
+  StandardiseStep() => ['StandardiseStep'],
+  SplitStep() => ['SplitStep'],
+};
+
+/// [s] as a Dart constructor call.
+String _stepCode(DocStep s) {
+  String str(String v) => DartExport._str(v);
+  String expr(Expr e) => 'Expr.parse(${str('$e')})';
+  String strings(List<String> xs) => '[${xs.map(str).join(', ')}]';
+  final args = switch (s) {
+    DecimateStep() => [
+      'factor: ${s.factor}',
+      if (s.how != StepAggregate.first) 'how: StepAggregate.${s.how.name}',
+      if (s.columns.isNotEmpty)
+        'columns: {${[for (final MapEntry(:key, :value) in s.columns.entries) '${str(key)}: StepAggregate.${value.name}'].join(', ')}}',
+      if (s.within.isNotEmpty) 'within: ${strings(s.within)}',
+    ],
+    SegmentStep() => [
+      'at: ${expr(s.at)}',
+      if (s.before != 0) 'before: ${s.before}',
+      if (s.after case final a?) 'after: $a',
+      if (s.column != 'segment') 'column: ${str(s.column)}',
+      if (s.offsetColumn case final o?) 'offsetColumn: ${str(o)}',
+    ],
+    FilterStep() => [expr(s.keep)],
+    StandardiseStep() => [
+      'columns: ${strings(s.columns)}',
+      if (!s.perParticipant) 'perParticipant: false',
+      if (s.fitOn case final f?) 'fitOn: ${expr(f)}',
+    ],
+    SplitStep() => [
+      if (s.column != 'split') 'column: ${str(s.column)}',
+      'parts: [${[for (final p in s.parts) '(label: ${str(p.label)}, fraction: ${dartDouble(p.fraction)})'].join(', ')}]',
+      if (s.byParticipant) 'byParticipant: true',
+      if (s.seed != 0) 'seed: ${s.seed}',
+    ],
+  };
+  final name = switch (s) {
+    DecimateStep() => 'DecimateStep',
+    SegmentStep() => 'SegmentStep',
+    FilterStep() => 'FilterStep',
+    StandardiseStep() => 'StandardiseStep',
+    SplitStep() => 'SplitStep',
+  };
+  return DartExport._call(name, args, '    ');
 }

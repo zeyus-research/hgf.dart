@@ -143,6 +143,7 @@ class BuilderModel extends ChangeNotifier {
 
   /// The parts drawn on the pipeline canvas, in drawing order.
   List<String> get pipelineParts => [
+    for (var i = 0; i < _model.data.steps.length; i++) DocPart.step(i),
     DocPart.data,
     for (final t in _model.transforms) DocPart.transform(t.name),
     if (_model.hasNetwork) DocPart.network,
@@ -154,6 +155,11 @@ class BuilderModel extends ChangeNotifier {
 
   Offset _autoPipeline(String part, int k) {
     if (part == DocPart.data) return const Offset(0, 0);
+    if (part.startsWith('step:')) {
+      // A chain into the data card, from the left.
+      final i = int.parse(part.substring('step:'.length));
+      return Offset(-240.0 * (_model.data.steps.length - i), 0);
+    }
     if (part == DocPart.network) return const Offset(560, 0);
     if (part.startsWith('transform:')) {
       final i = _model.transforms.indexWhere(
@@ -926,6 +932,130 @@ class BuilderModel extends ChangeNotifier {
     return name;
   }
 
+  /// The data-pipeline step kinds, as the builder names them.
+  static const stepKinds = {
+    'decimate': 'Decimate',
+    'segment': 'Segment by events',
+    'filter': 'Filter rows',
+    'standardise': 'Standardise',
+    'split': 'Split train / test',
+  };
+
+  /// The columns step [index] reads: the data's (on the clock) and those
+  /// the steps before it add.
+  List<String> columnsBeforeStep(int index) {
+    final c = csv;
+    if (c == null) return const [];
+    final d = _model.data;
+    return stepColumns(
+      d.clockColumnsOf(c.header),
+      d.steps.sublist(0, math.min(index, d.steps.length)),
+    );
+  }
+
+  /// A new step of [kind] with defaults that keep the preview running.
+  DocStep newStep(String kind, int index) {
+    final d = _model.data;
+    final cols = columnsBeforeStep(index);
+    final roles = {
+      d.participantColumn,
+      d.timeColumn,
+      d.timeStepColumn,
+      d.groupColumn,
+      d.clock?.sessionColumn,
+    };
+    final plain = [
+      for (final c in cols)
+        if (!roles.contains(c)) c,
+    ];
+    String q(String c) => isPlainName(c) ? c : '`$c`';
+    final marker = const [
+      'trial',
+      'round',
+      'block',
+      'segment',
+    ].where(plain.contains).firstOrNull;
+    final first = marker ?? plain.firstOrNull;
+    return switch (kind) {
+      'decimate' => DecimateStep(factor: 2),
+      'segment' => SegmentStep(
+        at: Expr.parse(first == null ? '1' : 'diff(${q(first)}) != 0'),
+        column: _model.freshName('segment', cols),
+      ),
+      'filter' => FilterStep(
+        Expr.parse(first == null ? '1' : 'missing(${q(first)}) == 0'),
+      ),
+      'standardise' => StandardiseStep(columns: const []),
+      'split' => SplitStep(column: _model.freshName('split', cols)),
+      _ => throw ArgumentError.value(kind, 'kind'),
+    };
+  }
+
+  /// Add a data-pipeline step of [kind] at [index] (default: last), and
+  /// select it.
+  void addStep(String kind, {int? index}) {
+    final steps = [..._model.data.steps];
+    final at = index ?? steps.length;
+    steps.insert(at, newStep(kind, at));
+    _selection = PartSelection(DocPart.step(at));
+    _setModel(
+      _model.copyWith(data: _model.data.copyWith(steps: steps)),
+      pipeline: _withoutStepPositions(),
+    );
+  }
+
+  /// Replace step [index] with [step].
+  void replaceStep(int index, DocStep step) {
+    final steps = [..._model.data.steps]..[index] = step;
+    update(_model.copyWith(data: _model.data.copyWith(steps: steps)));
+  }
+
+  /// Move step [index] by [by] places (−1: earlier), keeping it selected.
+  void moveStep(int index, int by) {
+    final steps = [..._model.data.steps];
+    final to = index + by;
+    if (to < 0 || to >= steps.length) return;
+    steps.insert(to, steps.removeAt(index));
+    _selection = PartSelection(DocPart.step(to));
+    _setModel(
+      _model.copyWith(data: _model.data.copyWith(steps: steps)),
+      pipeline: _withoutStepPositions(),
+    );
+  }
+
+  /// The pipeline positions without the steps' (they are laid out again
+  /// when steps come, go or move: they are addressed by index).
+  Map<String, Offset> _withoutStepPositions() => {
+    for (final MapEntry(:key, :value) in _pipeline.entries)
+      if (!key.startsWith('step:')) key: value,
+  };
+
+  /// The loaded data on the clock and through the steps, and how many
+  /// rows each step gave; null without data (or when the clock or a step
+  /// fails: the checks say why).
+  ({CsvData table, List<int> stepRows})? get prepared {
+    final c = csv;
+    if (c == null) return null;
+    final d = _model.data;
+    try {
+      final t = DataLayout(
+        inputs: const [],
+        participantColumn: d.participantColumn,
+        timeColumn: d.timeColumn,
+        timeStepColumn: d.timeStepColumn,
+        groupColumn: d.groupColumn,
+        clock: d.clock,
+        steps: d.steps,
+      ).prepared(c, cache: _dataCache);
+      return (
+        table: t,
+        stepRows: d.steps.isEmpty ? const [] : _dataCache.stepRows,
+      );
+    } on Object {
+      return null;
+    }
+  }
+
   /// Add a trajectory output (a node's mean, or [node]'s [field]) at [at],
   /// and select it.
   String addOutput({String? node, String field = 'mean', Offset? at}) {
@@ -985,6 +1115,11 @@ class BuilderModel extends ChangeNotifier {
     final key = colon < 0 ? '' : part.substring(colon + 1);
     final next = switch (kind) {
       'transform' => _model.withoutTransform(key),
+      'step' => _model.copyWith(
+        data: _model.data.copyWith(
+          steps: [..._model.data.steps]..removeAt(int.parse(key)),
+        ),
+      ),
       'output' => _model.withoutOutput(key),
       DocPart.response => _model.withResponse(null),
       'deep' => _model.copyWith(
@@ -1012,7 +1147,12 @@ class BuilderModel extends ChangeNotifier {
     };
     if (next == null) return;
     _selection = null;
-    _setModel(next, pipeline: {..._pipeline}..remove(part));
+    _setModel(
+      next,
+      pipeline: kind == 'step'
+          ? _withoutStepPositions()
+          : ({..._pipeline}..remove(part)),
+    );
   }
 
   /// Read input [inputName] from [column].
@@ -1329,7 +1469,7 @@ class BuilderModel extends ChangeNotifier {
   CsvData? _onClock(CompiledDocument c) {
     final data = csv;
     if (data == null) return null;
-    return c.layout.clocked(data, cache: _dataCache);
+    return c.layout.prepared(data, cache: _dataCache);
   }
 
   /// Whether the simulated participants are simulated together (their

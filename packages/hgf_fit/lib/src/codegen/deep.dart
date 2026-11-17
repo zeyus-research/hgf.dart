@@ -190,8 +190,9 @@ final class DeepDartExport {
       ..writeln("import 'dart:io';")
       ..writeln("import 'dart:typed_data';")
       ..writeln();
-    if (_usesExpr)
+    if (_usesExpr) {
       b.writeln("import 'package:hgf/hgf.dart' show ExprCoupling;");
+    }
     b
       ..writeln("import 'package:hgf_deep/datasets.dart';")
       ..writeln("import 'package:hgf_deep/hgf_deep.dart';")

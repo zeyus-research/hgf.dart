@@ -70,3 +70,41 @@ ModelDocument clockedDocument() => ModelDocument(
     ),
   ),
 );
+
+/// [clockedDocument] with every kind of data-pipeline step after the clock.
+ModelDocument steppedDocument() {
+  final doc = clockedDocument();
+  return doc.copyWith(
+    data: doc.data.copyWith(
+      steps: [
+        SplitStep(
+          parts: const [
+            (label: 'train', fraction: 0.5),
+            (label: 'test', fraction: 0.5),
+          ],
+          byParticipant: true,
+          seed: 3,
+        ),
+        DecimateStep(
+          factor: 2,
+          columns: const {
+            'press': StepAggregate.mode,
+            'reversed': StepAggregate.any,
+            'locked': StepAggregate.max,
+          },
+        ),
+        SegmentStep(
+          at: Expr.parse("press == 'left'"),
+          before: 1,
+          offsetColumn: 'seg_t',
+        ),
+        FilterStep(Expr.parse('seg_t <= 3')),
+        StandardiseStep(
+          columns: ['seg_t'],
+          perParticipant: false,
+          fitOn: Expr.parse("split == 'train'"),
+        ),
+      ],
+    ),
+  );
+}
