@@ -4,7 +4,9 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../ui/files.dart';
 import '../../ui/panels.dart' show SectionCard;
+import '../bids_source.dart';
 import '../builder_model.dart';
+import 'bids_dialog.dart';
 import '../doc_layout.dart' show ownerIdOf;
 import 'fit_panel.dart' show FitPanel, FreeToggle;
 import 'inspector.dart' show NumberField;
@@ -201,6 +203,61 @@ class _DataButtons extends StatelessWidget {
     }
   }
 
+  Future<void> _loadBids(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final source = await pickBids();
+      if (source == null || !context.mounted) return;
+      if (source.events.isEmpty) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('No event tables (sub-*/…/*_events.tsv) found'),
+          ),
+        );
+        return;
+      }
+      final participants = await source.participants();
+      if (!context.mounted) return;
+      final choice = await showBidsDialog(
+        context,
+        name: source.name,
+        events: source.events,
+        participants: participants,
+      );
+      if (choice == null) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Reading ${choice.participants.length} participants…'),
+        ),
+      );
+      final merged = await source.load(
+        participants: participants,
+        include: (sub, _) => choice.participants.contains(sub),
+      );
+      messenger.hideCurrentSnackBar();
+      final g = choice.groupColumn;
+      final groups = g == null || participants == null
+          ? const <String>[]
+          : {
+              for (final s in merged.participants)
+                for (final row in participants.rows)
+                  if (row[participants.header.indexOf('participant_id')]
+                          .trim() ==
+                      s)
+                    row[participants.header.indexOf(g)].trim(),
+            }.toList();
+      model.loadBids(
+        merged,
+        name:
+            '${source.name}'
+            '${groups.isEmpty || groups.length > 3 ? '' : ' (${groups.join(', ')})'}',
+        sessionHint: g,
+      );
+    } on Object catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Could not load: $e')));
+    }
+  }
+
   Future<void> _save(BuildContext context, String? text, String what) async {
     if (text == null) {
       ScaffoldMessenger.of(
@@ -221,6 +278,11 @@ class _DataButtons extends StatelessWidget {
         onPressed: () => _load(context),
         icon: const Icon(Icons.file_open_outlined, size: 18),
         label: const Text('Load CSV…'),
+      ),
+      OutlinedButton.icon(
+        onPressed: () => _loadBids(context),
+        icon: const Icon(Icons.folder_open_outlined, size: 18),
+        label: const Text('Load BIDS…'),
       ),
       if (model.csv != null)
         OutlinedButton.icon(
@@ -263,14 +325,13 @@ class _DataPanel extends StatelessWidget {
       String? Function()? timeStep,
       String? Function()? group,
     }) => model.update(
+      // copyWith keeps the clock.
       doc.copyWith(
-        data: DocData(
-          participantColumn: participant == null
-              ? d.participantColumn
-              : participant(),
-          timeColumn: time == null ? d.timeColumn : time(),
-          timeStepColumn: timeStep == null ? d.timeStepColumn : timeStep(),
-          groupColumn: group == null ? d.groupColumn : group(),
+        data: d.copyWith(
+          participantColumn: participant,
+          timeColumn: time,
+          timeStepColumn: timeStep,
+          groupColumn: group,
         ),
       ),
     );
@@ -464,10 +525,14 @@ class _ClockSection extends StatelessWidget {
                 't',
               ].where(raw.contains).firstOrNull ??
               (raw.isEmpty ? 'onset' : raw.first);
+          final session = model.sessionHint;
           setClock(
             DocClock(
               onsetColumn: onset,
               step: 0.1,
+              sessionColumn: session != null && raw.contains(session)
+                  ? session
+                  : null,
               streams: [
                 if (raw.contains('trial_type') && raw.contains('value'))
                   ClockStream.parse(

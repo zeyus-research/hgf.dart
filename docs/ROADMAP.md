@@ -2806,12 +2806,52 @@ condition of their own (solo): no team-mates, nobody else seen.
   rows in 1.3 s, team-mate columns in 1.1 s (VM). Solo rows have no
   team-mates (73 415); joint rows have two (280 470, 50 with fewer at round
   edges). Presses are balanced (left 117k, right 116k, none 121k).
-- Left: the transforms are computed again on every builder edit (1.1 s
-  on a full session: cache them per data and transforms, or evaluate only
-  the participant previewed); a loader for a BIDS folder (one events.tsv
-  per participant, the participant id from the file name, the session from
-  participants.tsv); a "press seen at any time in the step" rule for
-  presses shorter than a step (none now: the state at the step's time).
+- Left: ~~transform caching, a BIDS loader~~ (done, below); a "press seen
+  at any time in the step" rule for presses shorter than a step (none now:
+  the state at the step's time).
+
+#### Whole sessions: transform caching, a BIDS loader (2026-11-17): done
+
+- **`TransformCache`** (`hgf_fit/document/transforms.dart`), passed as
+  `cache:` to `DataLayout.clocked/transform/subjects/withColumns` and
+  `CompiledDocument.subjects/transform/withOutputs`. It keeps the last
+  grid (per data, by identity, and clock), the last transformed table and
+  the last subjects (`memo`, keyed by what the inputs and response read).
+  The same transforms again: the cached table. Transforms appended, or
+  edited from some point on: only those are computed, on a copy of the
+  table with the earlier columns (`TransformTable._extend`). The rows'
+  participants, previous rows and team-mates (`_Index`, the costly part
+  of `mate`/`mates_*`) are kept while the data and the participant, group
+  and time columns are. Bit for bit what `applyTransforms` gives
+  (`transform_cache_test`: append, edit last, edit middle, shorten, new
+  data, errors). The builder reads loaded data through one cache.
+- **`mergeBidsEvents`** (`hgf_fit/document/bids.dart`): the
+  per-participant `*_events.tsv` as one long table: `participant_id` (from
+  the file's `sub-` entity), `session` (from `ses-`, when there is one),
+  the events' columns (union, in order of first appearance), then
+  `participants.tsv`'s columns joined on `participant_id`; `include`
+  picks participants by their participants.tsv row, `keepRow` picks
+  events. `bidsEntity`, `isBidsEvents`.
+- **Builder: "Load BIDS…"** (Data inspector): a folder on desktop (every
+  `sub-*/beh/*_events.tsv`, else every `sub-*/…/*_events.tsv`; not
+  derivatives or sourcedata), the files themselves on the web (no
+  folders: participants from the names). A dialog groups participants by
+  a participants.tsv column (`group`, `session`, … guessed; the first
+  group chosen to start with) and reads only the chosen ones' tables. A
+  document without a participant column gets `participant_id`; the
+  grouping column is what turning the clock on proposes as its session
+  column. Fixed on the way: the Data inspector's column pickers dropped
+  the clock (`DocData(...)` instead of `copyWith`).
+- **Session 1 of the real data** (`benchmark/bin/bids_session.dart <bids
+  root> [group]`, VM, AOT): read and parse 6 tables 1.6 s, merge
+  (101 656 press/reversal/lock events) 0.06 s, clock (353 935 rows)
+  1.7 s, transforms 1.4 s, subjects (transforms and reading) 1.7 s.
+  Through the cache: the same
+  again 0 ms, a transform appended 0.39 s, the last one edited 0.35–0.4
+  s, the first one edited 0.9 s (team-mates kept); filtering one
+  participant (59 000 steps) 11 ms. Most of what is left on an edit is
+  copying and reading 354k rows; evaluating only the previewed
+  participant would cut it further, but `mate` needs everyone's rows.
 
 **Driving example: the user's 6-person hyperscanning experiment.** A
 ball balancing on a beam (an elevator): a participant lifts the left or
@@ -2996,8 +3036,8 @@ transforms, response, outputs; 2026-11-17), and the first part of slice 3
 (free parameters, the group level, fitting every participant from the
 builder; 2026-11-17), and the exports of every participant and the group
 level, Dart and pyhgf/PyMC, and relative bindings with team-mates
-simulated together, and events onto a shared clock (2026-11-17); next a
-BIDS loader and transform caching for whole sessions, then hgf_deep
+simulated together, and events onto a shared clock, a BIDS loader and
+transform caching for whole sessions (2026-11-17); next hgf_deep
 pipeline nodes. Vector node kinds on the GPU and a
 faster dp candidate search can run alongside.
 

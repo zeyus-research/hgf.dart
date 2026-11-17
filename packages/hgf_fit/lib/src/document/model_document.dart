@@ -1103,9 +1103,16 @@ final class CompiledDocument {
   /// participant id, in the order of first appearance; default the
   /// parameters' starting values). The data's own columns (e.g. its time
   /// stamps) stay, so the outputs line up with other recordings.
-  CsvData withOutputs(CsvData data, {Map<String, List<double>>? x}) {
-    final subs = subjects(data);
-    final ids = layout.participantRows(transform(data)).keys.toList();
+  CsvData withOutputs(
+    CsvData data, {
+    Map<String, List<double>>? x,
+    TransformCache? cache,
+  }) {
+    final subs = subjects(data, cache: cache);
+    final ids = layout
+        .participantRows(transform(data, cache: cache))
+        .keys
+        .toList();
     for (final o in document.outputs) {
       if (data.header.contains(o.name) ||
           document.transforms.any((t) => t.name == o.name)) {
@@ -1116,7 +1123,7 @@ final class CompiledDocument {
     }
     return layout.withColumns(data, [
       for (final (k, id) in ids.indexed) outputs(filter(subs[k], x?[id])),
-    ]);
+    ], cache: cache);
   }
 
   /// How [subjects] reads a CSV: the named inputs' columns in the
@@ -1157,11 +1164,12 @@ final class CompiledDocument {
 
   /// [csv] with the document's transforms' columns appended (see
   /// [DocTransform]); [subjects] reads this.
-  CsvData transform(CsvData csv) => layout.transform(csv);
+  CsvData transform(CsvData csv, {TransformCache? cache}) =>
+      layout.transform(csv, cache: cache);
 
   /// The subjects in [data], read by the document's column names (see
   /// [DocInput], [DocResponse] and [DocData]), after the transforms.
-  List<Subject> subjects(CsvData data) {
+  List<Subject> subjects(CsvData data, {TransformCache? cache}) {
     for (final (k, input) in inputs.indexed) {
       final w = inputWidth(network, document.network, network.inputIdxs[k]);
       final cats = input.categories;
@@ -1179,7 +1187,7 @@ final class CompiledDocument {
         );
       }
     }
-    return layout.subjects(data);
+    return layout.subjects(data, cache: cache);
   }
 
   /// What the code generators take: the model (or the network alone), the

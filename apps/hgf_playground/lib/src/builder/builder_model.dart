@@ -888,11 +888,32 @@ class BuilderModel extends ChangeNotifier {
 
   /// Use [data] (a CSV file named [name]) for the preview; null goes back
   /// to simulated data.
-  void loadData(CsvData? data, {String? name}) {
+  void loadData(CsvData? data, {String? name, String? sessionHint}) {
     csv = data;
     csvName = data == null ? null : name;
+    this.sessionHint = data == null ? null : sessionHint;
     _participant = 0;
     _refreshNow();
+  }
+
+  /// The loaded data's column that groups the participants recorded
+  /// together (a BIDS dataset's `group`, say): what the clock proposes as
+  /// its session column.
+  String? sessionHint;
+
+  /// Use the participants of a BIDS dataset ([merged], see
+  /// `mergeBidsEvents`); a document without a participant column gets
+  /// `participant_id` (an undo step).
+  void loadBids(BidsMerge merged, {required String name, String? sessionHint}) {
+    loadData(merged.data, name: name, sessionHint: sessionHint);
+    final d = _model.data;
+    if (d.participantColumn == null) {
+      update(
+        _model.copyWith(
+          data: d.copyWith(participantColumn: () => 'participant_id'),
+        ),
+      );
+    }
   }
 
   /// How many participants are simulated without loaded data. Each sees
@@ -1027,7 +1048,7 @@ class BuilderModel extends ChangeNotifier {
   List<Subject> allSubjects() {
     final c =
         compiled ?? (throw StateError('The document has errors: no subjects'));
-    if (csv != null) return c.subjects(_onClock(c)!);
+    if (csv != null) return c.subjects(_onClock(c)!, cache: _dataCache);
     if (_together(c) case final sim?) return sim.subjects;
     final net = network!;
     _ensureInput(net);
@@ -1038,28 +1059,17 @@ class BuilderModel extends ChangeNotifier {
     ];
   }
 
-  CsvData? _clockGrid;
-  Object? _clockKey;
+  /// The loaded data's grid, transforms and subjects, kept between edits
+  /// that don't change them (a full session takes seconds to put on the
+  /// clock and transform).
+  final _dataCache = TransformCache();
 
-  /// The loaded data on [c]'s clock (see `DocClock`), made again only when
-  /// the data or the clock changed; the data itself without a clock; null
-  /// for simulated data.
+  /// The loaded data on [c]'s clock (see `DocClock`); the data itself
+  /// without a clock; null for simulated data.
   CsvData? _onClock(CompiledDocument c) {
     final data = csv;
     if (data == null) return null;
-    final d = c.document.data;
-    if (d.clock == null) return data;
-    final key = Object.hash(
-      identityHashCode(data),
-      jsonEncode(d.clock!.toJson()),
-      d.participantColumn,
-      d.timeColumn,
-    );
-    if (key != _clockKey) {
-      _clockGrid = c.layout.clocked(data);
-      _clockKey = key;
-    }
-    return _clockGrid;
+    return c.layout.clocked(data, cache: _dataCache);
   }
 
   /// Whether the simulated participants are simulated together (their
@@ -1169,14 +1179,18 @@ class BuilderModel extends ChangeNotifier {
   String? outputsCsv() {
     final c = compiled;
     if (c == null || subject == null) return null;
-    final subs = csv == null ? allSubjects() : c.subjects(_onClock(c)!);
+    final subs = csv == null
+        ? allSubjects()
+        : c.subjects(_onClock(c)!, cache: _dataCache);
     final data = _onClock(c) ?? simulatedCsv();
     // withOutputs names participants by their column ('' without one).
     final x = {
       for (final (k, s) in subs.indexed)
         '${s.id ?? ''}': ?_previewX(c, participantKey(s, k)),
     };
-    return csvText(c.withOutputs(data, x: x));
+    return csvText(
+      c.withOutputs(data, x: x, cache: csv == null ? null : _dataCache),
+    );
   }
 
   /// The simulated data's settings: one series per input, kind by kind
@@ -1301,7 +1315,7 @@ class BuilderModel extends ChangeNotifier {
     if (csv != null && c != null) {
       final List<Subject> subs;
       try {
-        subs = c.subjects(_onClock(c)!);
+        subs = c.subjects(_onClock(c)!, cache: _dataCache);
       } on FormatException catch (e) {
         dataError = e.message;
         previewError = 'The data: ${e.message}';

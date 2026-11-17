@@ -1,6 +1,9 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:hgf/hgf.dart';
+
+import 'clock.dart';
 
 /// A data transform: a new column [name], computed from the data's columns
 /// (and earlier transforms) by [expression], before filtering. It is
@@ -71,8 +74,21 @@ final class TransformTable {
     String? participantColumn,
     String? groupColumn,
     String? timeColumn,
-  }) : _transforms = List.unmodifiable(transforms),
-       _base = csv.header.length {
+  }) : this._(
+         csv,
+         transforms,
+         _Index(
+           csv,
+           csv.header.length,
+           participantColumn,
+           groupColumn,
+           timeColumn,
+         ),
+       );
+
+  TransformTable._(CsvData csv, List<DocTransform> transforms, _Index index)
+    : _transforms = List.unmodifiable(transforms),
+      _base = csv.header.length {
     final header = [...csv.header];
     for (final t in transforms) {
       if (header.contains(t.name)) {
@@ -85,12 +101,45 @@ final class TransformTable {
     table = CsvData(header, [
       for (final r in csv.rows) [...r, for (final _ in transforms) ''],
     ], decimalComma: csv.decimalComma);
-    _t = _Table(table, _base, participantColumn, groupColumn, timeColumn);
+    _t = _Table(table, _base, index);
+  }
+
+  /// [previous]'s first [keep] transforms (already evaluated: their cells
+  /// and columns are reused) followed by the rest of [transforms], which
+  /// [evaluate] computes.
+  TransformTable._extend(
+    TransformTable previous,
+    List<DocTransform> transforms,
+    int keep,
+  ) : _transforms = List.unmodifiable(transforms),
+      _base = previous._base,
+      _from = keep {
+    final header = previous.table.header.sublist(0, _base + keep);
+    for (final t in transforms.skip(keep)) {
+      if (header.contains(t.name)) {
+        throw FormatException(
+          'Transform "${t.name}": the data already has a column of that name',
+        );
+      }
+      header.add(t.name);
+    }
+    final width = header.length, upTo = _base + keep;
+    table = CsvData(header, [
+      for (final r in previous.table.rows)
+        List<String>.filled(width, '')..setRange(0, upTo, r),
+    ], decimalComma: previous.table.decimalComma);
+    _t = _Table(table, _base, previous._t.index);
+    for (final t in transforms.take(keep)) {
+      _t.columns[t.name] = previous._t.columns[t.name]!;
+    }
   }
 
   final List<DocTransform> _transforms;
   final int _base;
   late final _Table _t;
+
+  /// The first transform [evaluate] computes (earlier ones were reused).
+  int _from = 0;
 
   /// The data with a column per transform (empty until evaluated).
   late final CsvData table;
@@ -111,7 +160,8 @@ final class TransformTable {
   void evaluate([List<int>? rows]) {
     _t.active = rows ?? [for (var r = 0; r < table.rows.length; r++) r];
     _t.pass++;
-    for (final (k, t) in _transforms.indexed) {
+    for (var k = _from; k < _transforms.length; k++) {
+      final t = _transforms[k];
       final _Col out;
       try {
         out = _t.eval(t.expression);
@@ -143,8 +193,8 @@ final class _Col {
 /// Evaluates expressions at the [active] rows. Each expression node keeps
 /// its column across passes (by identity), so `lag` finds the earlier
 /// rows' values of whatever it shifts.
-final class _Table {
-  _Table(
+final class _Index {
+  _Index(
     this.csv,
     this.nData,
     this.participantColumn,
@@ -162,8 +212,8 @@ final class _Table {
       previous[r] = last[participantOf[r]] ?? -1;
       last[participantOf[r]] = r;
     }
-    _groupCol = _col(groupColumn, 'groups');
-    _timeCol = _col(timeColumn, 'time');
+    groupCol = _col(groupColumn, 'groups');
+    timeCol = _col(timeColumn, 'time');
   }
 
   int? _col(String? name, String what) {
@@ -175,15 +225,99 @@ final class _Table {
     return c;
   }
 
+  /// The table it was built on (its first [nData] columns are the data's,
+  /// which is all it reads).
   final CsvData csv;
-
-  /// The data's columns come first in [csv]; the transforms' after.
   final int nData;
   final String? participantColumn, groupColumn, timeColumn;
   final int n;
   late final List<String> participantOf;
   late final Int32List previous;
-  int? _groupCol, _timeCol;
+  late final int? groupCol, timeCol;
+
+  /// Whether it indexes [data] as [csv] (the same rows and data columns).
+  bool fits(
+    CsvData data,
+    String? participantColumn,
+    String? groupColumn,
+    String? timeColumn,
+  ) =>
+      data.rows.length == n &&
+      participantColumn == this.participantColumn &&
+      groupColumn == this.groupColumn &&
+      timeColumn == this.timeColumn;
+
+  late final mates = _buildMates();
+
+  /// Per row, the rows of the other members of its group at the same time,
+  /// in the order the members first appear in the group (−1: absent).
+  List<Int32List> _buildMates() {
+    final gc = groupCol;
+    if (participantColumn == null || gc == null) {
+      throw const FormatException(
+        'mate() needs the data\'s participant and group columns',
+      );
+    }
+    String key(int r) {
+      if (timeCol case final tc?) {
+        final x = csv.number(r, tc);
+        return x == null || x.isNaN ? csv.rows[r][tc].trim() : '$x';
+      }
+      return '';
+    }
+
+    final groupOf = [for (final row in csv.rows) row[gc].trim()];
+    // Members per group, in order of first appearance.
+    final members = <String, List<String>>{};
+    // (participant, group, key) → row; without a time column the key is the
+    // row's position among the participant's rows in the group.
+    final at = <String, int>{};
+    final ordinal = <String, int>{};
+    final keys = List<String>.filled(n, '');
+    for (var r = 0; r < n; r++) {
+      final p = participantOf[r], g = groupOf[r];
+      final m = members[g] ??= [];
+      if (!m.contains(p)) m.add(p);
+      final pg = '$p\u0000$g';
+      final k = timeCol == null
+          ? '${ordinal[pg] = (ordinal[pg] ?? -1) + 1}'
+          : key(r);
+      keys[r] = k;
+      at['$pg\u0000$k'] = r;
+    }
+    // An empty group cell: no team-mates (e.g. rounds played alone).
+    final alone = Int32List(0);
+    return [
+      for (var r = 0; r < n; r++)
+        if (_missing.contains(groupOf[r].toLowerCase()))
+          alone
+        else
+          Int32List.fromList([
+            for (final q in members[groupOf[r]]!)
+              if (q != participantOf[r])
+                at['$q\u0000${groupOf[r]}\u0000${keys[r]}'] ?? -1,
+          ]),
+    ];
+  }
+}
+
+/// Evaluates expressions at the [active] rows. Each expression node keeps
+/// its column across passes (by identity), so `lag` finds the earlier
+/// rows' values of whatever it shifts.
+final class _Table {
+  _Table(this.csv, this.nData, this.index) : n = csv.rows.length;
+
+  final CsvData csv;
+
+  /// The data's columns come first in [csv]; the transforms' after.
+  final int nData;
+
+  /// The rows' participants, previous rows and team-mates (shared by the
+  /// tables a [TransformCache] makes from the same data).
+  final _Index index;
+  final int n;
+  List<String> get participantOf => index.participantOf;
+  Int32List get previous => index.previous;
   List<int> active = const [];
   int pass = 0;
 
@@ -237,62 +371,9 @@ final class _Table {
     }
   }
 
-  late final _mates = _buildMates();
-
-  /// Per row, the rows of the other members of its group at the same time,
-  /// in the order the members first appear in the group (−1: absent).
-  List<Int32List> _buildMates() {
-    final gc = _groupCol;
-    if (participantColumn == null || gc == null) {
-      throw const FormatException(
-        'mate() needs the data\'s participant and group columns',
-      );
-    }
-    String key(int r) {
-      if (_timeCol case final tc?) {
-        final x = csv.number(r, tc);
-        return x == null || x.isNaN ? csv.rows[r][tc].trim() : '$x';
-      }
-      return '';
-    }
-
-    final groupOf = [for (final row in csv.rows) row[gc].trim()];
-    // Members per group, in order of first appearance.
-    final members = <String, List<String>>{};
-    // (participant, group, key) → row; without a time column the key is the
-    // row's position among the participant's rows in the group.
-    final at = <String, int>{};
-    final ordinal = <String, int>{};
-    final keys = List<String>.filled(n, '');
-    for (var r = 0; r < n; r++) {
-      final p = participantOf[r], g = groupOf[r];
-      final m = members[g] ??= [];
-      if (!m.contains(p)) m.add(p);
-      final pg = '$p\u0000$g';
-      final k = _timeCol == null
-          ? '${ordinal[pg] = (ordinal[pg] ?? -1) + 1}'
-          : key(r);
-      keys[r] = k;
-      at['$pg\u0000$k'] = r;
-    }
-    // An empty group cell: no team-mates (e.g. rounds played alone).
-    final alone = Int32List(0);
-    return [
-      for (var r = 0; r < n; r++)
-        if (_missing.contains(groupOf[r].toLowerCase()))
-          alone
-        else
-          Int32List.fromList([
-            for (final q in members[groupOf[r]]!)
-              if (q != participantOf[r])
-                at['$q\u0000${groupOf[r]}\u0000${keys[r]}'] ?? -1,
-          ]),
-    ];
-  }
-
   void mate(_Col out, _Col x, int k) {
     for (final r in active) {
-      final others = _mates[r];
+      final others = index.mates[r];
       final m = k <= others.length ? others[k - 1] : -1;
       out.v[r] = m < 0 ? double.nan : x.v[m];
       if (out.text != null) out.text![r] = m < 0 ? '' : x.text![m];
@@ -306,7 +387,7 @@ final class _Table {
     final text = fn == 'mates_count' ? x.text : null;
     for (final r in active) {
       var sum = 0.0, count = 0;
-      for (final m in _mates[r]) {
+      for (final m in index.mates[r]) {
         if (m < 0) continue;
         if (text != null) {
           if (!_missing.contains(text[m].toLowerCase())) count++;
@@ -452,5 +533,121 @@ final class _Table {
         map(out, [for (final a in args) eval(a)], f);
         return out;
     }
+  }
+}
+
+/// Keeps the last grid and the last transformed table, so evaluating the
+/// same data again after an edit that changed neither is free: the model
+/// builder re-reads the data on every edit, and a full session (hundreds of
+/// thousands of rows) takes a second or more to put on the clock and
+/// transform.
+///
+/// Transforms appended to the last ones (or the last ones edited from some
+/// point on) compute only from there; the rows' participants and
+/// team-mates are kept while the data and the participant, group and time
+/// columns are. The data must not change in place: a new table is new data
+/// (it is matched by identity).
+final class TransformCache {
+  CsvData? _clockFrom;
+  String? _clockKey;
+  CsvData? _grid;
+
+  CsvData? _from;
+  _Index? _index;
+  TransformTable? _last;
+
+  Object? _memoFor;
+  String? _memoKey;
+  Object? _memo;
+
+  /// What [make] gives for [table] read as [key] says, kept until another
+  /// table or key comes (one slot: e.g. the subjects of the last
+  /// transformed table, while the inputs read the same columns).
+  T memo<T extends Object>(Object table, String key, T Function() make) {
+    if (identical(table, _memoFor) && key == _memoKey && _memo is T) {
+      return _memo as T;
+    }
+    final v = make();
+    _memoFor = table;
+    _memoKey = key;
+    _memo = v;
+    return v;
+  }
+
+  /// How many transforms the last [apply] computed (the rest were reused);
+  /// -1 when it returned the cached table as it was.
+  int lastComputed = 0;
+
+  /// [csv] on [clock]'s grid (see [DocClock.resample]), made again only
+  /// when the data, the clock or the columns changed.
+  CsvData clocked(
+    CsvData csv,
+    DocClock clock, {
+    String? participantColumn,
+    required String timeColumn,
+  }) {
+    final key = jsonEncode([clock.toJson(), participantColumn, timeColumn]);
+    if (!identical(csv, _clockFrom) || key != _clockKey || _grid == null) {
+      _grid = clock.resample(
+        csv,
+        participantColumn: participantColumn,
+        timeColumn: timeColumn,
+      );
+      _clockFrom = csv;
+      _clockKey = key;
+    }
+    return _grid!;
+  }
+
+  /// What [applyTransforms] gives, reusing the last call's work where it
+  /// can (see [TransformCache]).
+  CsvData apply(
+    CsvData csv,
+    List<DocTransform> transforms, {
+    String? participantColumn,
+    String? groupColumn,
+    String? timeColumn,
+  }) {
+    if (transforms.isEmpty) {
+      lastComputed = 0;
+      return csv;
+    }
+    final sameData =
+        identical(csv, _from) &&
+        _index != null &&
+        _index!.fits(csv, participantColumn, groupColumn, timeColumn);
+    if (!sameData) {
+      _from = csv;
+      _index = _Index(
+        csv,
+        csv.header.length,
+        participantColumn,
+        groupColumn,
+        timeColumn,
+      );
+      _last = null;
+    }
+    final last = _last;
+    var keep = 0;
+    if (last != null) {
+      final done = last._transforms;
+      while (keep < done.length &&
+          keep < transforms.length &&
+          done[keep].name == transforms[keep].name &&
+          '${done[keep].expression}' == '${transforms[keep].expression}') {
+        keep++;
+      }
+      if (keep == done.length && keep == transforms.length) {
+        lastComputed = -1;
+        return last.table;
+      }
+    }
+    final table = last != null && keep > 0
+        ? TransformTable._extend(last, transforms, keep)
+        : TransformTable._(csv, transforms, _index!);
+    table.evaluate();
+    _last = table;
+    lastComputed = transforms.length - keep;
+    return table.table;
   }
 }

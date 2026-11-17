@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:hgf/hgf.dart';
@@ -82,10 +83,18 @@ final class DataLayout {
   int get width => inputs.fold(0, (w, i) => w + i.width);
 
   /// [csv] on the [clock]'s grid (unless it is on it already, or there is
-  /// no clock).
-  CsvData clocked(CsvData csv) {
+  /// no clock); with a [cache], made again only when needed.
+  CsvData clocked(CsvData csv, {TransformCache? cache}) {
     final c = clock;
     if (c == null || c.isOnClock(csv, timeColumn!)) return csv;
+    if (cache != null) {
+      return cache.clocked(
+        csv,
+        c,
+        participantColumn: participantColumn,
+        timeColumn: timeColumn!,
+      );
+    }
     return c.resample(
       csv,
       participantColumn: participantColumn,
@@ -93,14 +102,27 @@ final class DataLayout {
     );
   }
 
-  /// [csv] on the [clock]'s grid, with the [transforms]' columns appended.
-  CsvData transform(CsvData csv) => applyTransforms(
-    clocked(csv),
-    transforms,
-    participantColumn: participantColumn,
-    groupColumn: groupColumn,
-    timeColumn: timeColumn,
-  );
+  /// [csv] on the [clock]'s grid, with the [transforms]' columns appended;
+  /// a [cache] reuses what it can of the last call's work.
+  CsvData transform(CsvData csv, {TransformCache? cache}) {
+    final grid = clocked(csv, cache: cache);
+    if (cache != null) {
+      return cache.apply(
+        grid,
+        transforms,
+        participantColumn: participantColumn,
+        groupColumn: groupColumn,
+        timeColumn: timeColumn,
+      );
+    }
+    return applyTransforms(
+      grid,
+      transforms,
+      participantColumn: participantColumn,
+      groupColumn: groupColumn,
+      timeColumn: timeColumn,
+    );
+  }
 
   /// The rows of each participant of [csv], in order of first appearance
   /// (rows in file order); without a participant column, one participant
@@ -127,8 +149,27 @@ final class DataLayout {
   /// as 0, never NaN) or a missed response (NaN), and time steps come from
   /// [timeStepColumn], or the differences of [timeColumn] (the first row
   /// takes the second's).
-  List<Subject> subjects(CsvData data) {
-    final csv = transform(data);
+  List<Subject> subjects(CsvData data, {TransformCache? cache}) {
+    final csv = transform(data, cache: cache);
+    if (cache != null) {
+      return cache.memo(csv, 'subjects $_readKey', () => _subjects(csv));
+    }
+    return _subjects(csv);
+  }
+
+  /// What [subjects] reads of a table, as text: equal keys read a table
+  /// alike.
+  late final String _readKey = jsonEncode([
+    for (final i in inputs)
+      [i.name, i.columns, i.categories, i.oneHot, i.observedColumn],
+    responseColumns,
+    options,
+    participantColumn,
+    timeColumn,
+    timeStepColumn,
+  ]);
+
+  List<Subject> _subjects(CsvData csv) {
     final read = reader(csv);
     final width = this.width, nIn = inputs.length;
     return [
@@ -185,8 +226,12 @@ final class DataLayout {
   /// values (NaN, or a column a participant lacks) are empty cells. The
   /// data's own columns stay, so new columns line up with other
   /// recordings.
-  CsvData withColumns(CsvData data, List<Map<String, List<double>>> columns) {
-    final csv = transform(data);
+  CsvData withColumns(
+    CsvData data,
+    List<Map<String, List<double>>> columns, {
+    TransformCache? cache,
+  }) {
+    final csv = transform(data, cache: cache);
     final names = <String>{for (final c in columns) ...c.keys}.toList();
     for (final n in names) {
       if (csv.header.contains(n)) {
