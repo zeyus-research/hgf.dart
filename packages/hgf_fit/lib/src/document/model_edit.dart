@@ -8,6 +8,7 @@ import 'parameters.dart';
 import 'clock.dart';
 import 'steps.dart';
 import 'deep_document.dart';
+import 'deep_training.dart';
 import 'transforms.dart';
 
 /// The parts of a [ModelDocument] an issue can name ([DocIssue.parts]): the
@@ -474,8 +475,23 @@ List<DocIssue> checkModel(
   // Columns the document can read.
   final known = columns == null ? null : {...columns};
   final transformNames = <String>{};
+  // The deep networks' prediction columns, by the network making them.
+  final deepColumns = <String, DocDeep>{
+    for (final d in doc.deep)
+      if (d.layers.isNotEmpty)
+        for (final c in deepPredictionColumns(d)) c: d,
+  };
   for (final t in doc.transforms) {
     final part = DocPart.transform(t.name);
+    for (final v in t.expression.variables) {
+      if (deepColumns[v] case final d? when known?.contains(v) != true) {
+        error(
+          'Transform "${t.name}" reads "$v", a prediction of deep network '
+          '"${d.label}": the deep networks run after the transforms.',
+          [part, DocPart.deep(d.id)],
+        );
+      }
+    }
     if (known != null) {
       if (columns!.contains(t.name)) {
         error(
@@ -485,7 +501,9 @@ List<DocIssue> checkModel(
         );
       }
       for (final v in t.expression.variables) {
-        if (!known.contains(v) && !transformNames.contains(v)) {
+        if (!known.contains(v) &&
+            !transformNames.contains(v) &&
+            !deepColumns.containsKey(v)) {
           error(
             'Transform "${t.name}" reads "$v", which is neither a column nor '
             'an earlier transform.',
@@ -498,7 +516,9 @@ List<DocIssue> checkModel(
   }
   void needColumn(String c, String what, String part) {
     if (known == null) return;
-    if (!known.contains(c) && !transformNames.contains(c)) {
+    if (!known.contains(c) &&
+        !transformNames.contains(c) &&
+        !deepColumns.containsKey(c)) {
       error('No column "$c" ($what) in the data.', [part]);
     }
   }
@@ -715,7 +735,9 @@ List<DocIssue> checkModel(
   }
 
   // Deep networks.
+  // Each reads the data, the transforms and the earlier networks' columns.
   final deepIds = <String>{};
+  final before = {...?known, ...transformNames};
   for (final d in doc.deep) {
     final part = DocPart.deep(d.id);
     if (!deepIds.add(d.id)) {
@@ -723,10 +745,33 @@ List<DocIssue> checkModel(
     }
     checkDeep(
       d,
-      columns: known == null ? null : [...known, ...transformNames],
+      columns: known == null ? null : [...before],
       error: (m) => error(m, [part]),
       warn: (m) => warn(m, [part]),
     );
+    if (d.layers.isEmpty) continue;
+    for (final c in deepPredictionColumns(d)) {
+      if (before.contains(c) && (known != null || transformNames.contains(c))) {
+        error(
+          'Deep network "${d.label}" writes "$c", which is already a '
+          'column; give the network another id.',
+          [part],
+        );
+      }
+      before.add(c);
+    }
+    if (known == null) {
+      // Without the data, at least an earlier network's columns.
+      for (final c in {...d.features, ...d.targets}) {
+        if (deepColumns[c] case final o? when !_isBefore(doc, o, d)) {
+          error(
+            'Deep network "${d.label}" reads "$c" of deep network '
+            '"${o.label}", which comes after it.',
+            [part],
+          );
+        }
+      }
+    }
   }
 
   if (doc.hasNetwork && !issues.any((i) => i.isError)) {
@@ -739,6 +784,9 @@ List<DocIssue> checkModel(
   issues.sort((x, y) => x.severity.index - y.severity.index);
   return issues;
 }
+
+bool _isBefore(ModelDocument doc, DocDeep a, DocDeep b) =>
+    doc.deep.indexOf(a) < doc.deep.indexOf(b);
 
 extension on NodeAddresses {
   /// The id owning [address], if it names a node.

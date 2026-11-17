@@ -1733,6 +1733,7 @@ class ColumnPick extends StatelessWidget {
     final columns = [
       ...?(model.csv == null ? null : model.dataColumns),
       ...model.document.transformNames,
+      ...model.deepColumns,
     ];
     if (model.csv == null) {
       return CommitField(

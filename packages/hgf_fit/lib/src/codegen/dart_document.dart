@@ -4,6 +4,102 @@ part of 'dart.dart';
 /// of the CSV, read through `DataLayout`, fitted together (with the group
 /// level), the estimates and outputs written next to the data.
 extension _DocumentScript on DartExport {
+  /// `DataLayout(...)`: [layout] as a constructor call (deep networks as
+  /// `DocDeep.fromJson`).
+  static String _layoutCode(DataLayout layout) {
+    final b = StringBuffer()
+      ..writeln('DataLayout(')
+      ..writeln('  inputs: [');
+    for (final i in layout.inputs) {
+      b.writeln(
+        '    ${DartExport._call('LayoutInput', [DartExport._str(i.name), 'columns: [${i.columns.map(DartExport._str).join(', ')}]', if (i.categories case final c?) 'categories: [${c.map(DartExport._str).join(', ')}]', if (i.oneHot) 'oneHot: true', if (i.observedColumn case final o?) 'observedColumn: ${DartExport._str(o)}'], '    ')},',
+      );
+    }
+    b.writeln('  ],');
+    if (layout.responseColumns.isNotEmpty) {
+      b.writeln(
+        '  responseColumns: [${layout.responseColumns.map(DartExport._str).join(', ')}],',
+      );
+    }
+    if (layout.options case final o?) {
+      b.writeln('  options: [${o.map(DartExport._str).join(', ')}],');
+    }
+    for (final (key, v) in [
+      ('participantColumn', layout.participantColumn),
+      ('timeColumn', layout.timeColumn),
+      ('timeStepColumn', layout.timeStepColumn),
+      ('groupColumn', layout.groupColumn),
+    ]) {
+      if (v != null) b.writeln('  $key: ${DartExport._str(v)},');
+    }
+    if (layout.clock case final k?) {
+      String str(String v) => DartExport._str(v);
+      b
+        ..writeln('  clock: DocClock(')
+        ..writeln('    onsetColumn: ${str(k.onsetColumn)},')
+        ..writeln('    step: ${dartDouble(k.step)},');
+      if (k.sessionColumn case final c?) {
+        b.writeln('    sessionColumn: ${str(c)},');
+      }
+      b.writeln('    streams: [');
+      for (final st in k.streams) {
+        final hold = [
+          for (final MapEntry(:key, :value) in st.hold.entries)
+            '${str(key)}: ${str('$value')}',
+        ].join(', ');
+        b.writeln(
+          '      ClockStream.parse(${st.when == null ? '' : 'when: ${str('${st.when}')}, '}hold: {$hold}),',
+        );
+      }
+      b.writeln('    ],');
+      if (k.keep case final e?) {
+        b.writeln("    keep: Expr.parse(${str('$e')}),");
+      }
+      b.writeln('  ),');
+    }
+    if (layout.steps.isNotEmpty) {
+      b.writeln('  steps: [');
+      for (final st in layout.steps) {
+        b.writeln('    ${_stepCode(st)},');
+      }
+      b.writeln('  ],');
+    }
+    if (layout.transforms.isNotEmpty) {
+      b.writeln('  transforms: [');
+      for (final t in layout.transforms) {
+        b.writeln(
+          '    ${DartExport._call('DocTransform', [DartExport._str(t.name), DartExport._str('${t.expression}')], '    ')},',
+        );
+      }
+      b.writeln('  ],');
+    }
+    if (layout.deep.isNotEmpty) {
+      b.writeln(
+        '  // Deep networks trained after the transforms: their predictions',
+      );
+      b.writeln('  // are columns (hgf_fit\'s DeepTraining).');
+      b.writeln('  deep: [');
+      for (final d in layout.deep) {
+        b.writeln(
+          '    DocDeep.fromJson(${dartJsonLiteral(d.toJson(), '    ')}),',
+        );
+      }
+      b.writeln('  ],');
+    }
+    b.write(')');
+    return b.toString();
+  }
+
+  /// The names [_layoutCode]'s code takes from `package:hgf_fit/document.dart`.
+  static List<String> _layoutNames(DataLayout layout) => [
+    if (layout.clock != null) ...['ClockStream', 'DocClock'],
+    'DataLayout',
+    ...{for (final s in layout.steps) ..._stepNames(s)},
+    if (layout.transforms.isNotEmpty) 'DocTransform',
+    if (layout.deep.isNotEmpty) 'DocDeep',
+    'LayoutInput',
+  ];
+
   String _documentScript() {
     final layout = spec.layout!;
     final plan = spec.plan;
@@ -83,13 +179,7 @@ extension _DocumentScript on DartExport {
       ..writeln("import 'package:hgf/hgf.dart';")
       ..writeln(
         "import 'package:hgf_fit/document.dart'\n"
-        "    show ${[
-          if (layout.clock != null) ...['ClockStream', 'DocClock'],
-          'DataLayout',
-          ...{for (final s in layout.steps) ..._stepNames(s)},
-          if (layout.transforms.isNotEmpty) 'DocTransform',
-          'LayoutInput',
-        ].join(', ')};",
+        "    show ${_layoutNames(layout).join(', ')};",
       );
     if (model != null) b.writeln("import 'package:hgf_fit/hgf_fit.dart';");
     b
@@ -171,72 +261,7 @@ extension _DocumentScript on DartExport {
       ..writeln(
         '/// An empty cell is an unobserved input or a missed response.',
       )
-      ..writeln('final layout = DataLayout(')
-      ..writeln('  inputs: [');
-    for (final i in layout.inputs) {
-      b.writeln(
-        '    ${DartExport._call('LayoutInput', [DartExport._str(i.name), 'columns: [${i.columns.map(DartExport._str).join(', ')}]', if (i.categories case final c?) 'categories: [${c.map(DartExport._str).join(', ')}]', if (i.oneHot) 'oneHot: true', if (i.observedColumn case final o?) 'observedColumn: ${DartExport._str(o)}'], '    ')},',
-      );
-    }
-    b.writeln('  ],');
-    if (layout.responseColumns.isNotEmpty) {
-      b.writeln(
-        '  responseColumns: [${layout.responseColumns.map(DartExport._str).join(', ')}],',
-      );
-    }
-    if (layout.options case final o?) {
-      b.writeln('  options: [${o.map(DartExport._str).join(', ')}],');
-    }
-    for (final (key, v) in [
-      ('participantColumn', layout.participantColumn),
-      ('timeColumn', layout.timeColumn),
-      ('timeStepColumn', layout.timeStepColumn),
-      ('groupColumn', layout.groupColumn),
-    ]) {
-      if (v != null) b.writeln('  $key: ${DartExport._str(v)},');
-    }
-    if (layout.clock case final k?) {
-      String str(String v) => DartExport._str(v);
-      b
-        ..writeln('  clock: DocClock(')
-        ..writeln('    onsetColumn: ${str(k.onsetColumn)},')
-        ..writeln('    step: ${dartDouble(k.step)},');
-      if (k.sessionColumn case final c?) {
-        b.writeln('    sessionColumn: ${str(c)},');
-      }
-      b.writeln('    streams: [');
-      for (final st in k.streams) {
-        final hold = [
-          for (final MapEntry(:key, :value) in st.hold.entries)
-            '${str(key)}: ${str('$value')}',
-        ].join(', ');
-        b.writeln(
-          '      ClockStream.parse(${st.when == null ? '' : 'when: ${str('${st.when}')}, '}hold: {$hold}),',
-        );
-      }
-      b.writeln('    ],');
-      if (k.keep case final e?) {
-        b.writeln("    keep: Expr.parse(${str('$e')}),");
-      }
-      b.writeln('  ),');
-    }
-    if (layout.steps.isNotEmpty) {
-      b.writeln('  steps: [');
-      for (final st in layout.steps) {
-        b.writeln('    ${_stepCode(st)},');
-      }
-      b.writeln('  ],');
-    }
-    if (layout.transforms.isNotEmpty) {
-      b.writeln('  transforms: [');
-      for (final t in layout.transforms) {
-        b.writeln(
-          '    ${DartExport._call('DocTransform', [DartExport._str(t.name), DartExport._str('${t.expression}')], '    ')},',
-        );
-      }
-      b.writeln('  ],');
-    }
-    b.writeln(');');
+      ..writeln('final layout = ${_layoutCode(layout)};');
 
     if (outputs.isNotEmpty) {
       final extra = {
@@ -578,4 +603,31 @@ String _stepCode(DocStep s) {
     SplitStep() => 'SplitStep',
   };
   return DartExport._call(name, args, '    ');
+}
+
+/// `DataLayout(...)` for [layout]: what a script reads its CSV through.
+String dartDataLayout(DataLayout layout) => _DocumentScript._layoutCode(layout);
+
+/// The names [dartDataLayout]'s code imports from
+/// `package:hgf_fit/document.dart`.
+List<String> dartDataLayoutNames(DataLayout layout) =>
+    _DocumentScript._layoutNames(layout);
+
+/// [json] (maps, lists, strings, numbers, booleans, null) as a Dart
+/// literal, indented by [indent] after its first line.
+String dartJsonLiteral(Object? json, [String indent = '']) {
+  String lit(Object? v, String ind) => switch (v) {
+    null => 'null',
+    bool() || int() => '$v',
+    double() => dartDouble(v),
+    String() => DartExport._str(v),
+    List() when v.isEmpty => '[]',
+    List() =>
+      '[\n${[for (final x in v) '$ind  ${lit(x, '$ind  ')},'].join('\n')}\n$ind]',
+    Map() when v.isEmpty => '<String, Object?>{}',
+    Map() =>
+      '<String, Object?>{\n${[for (final MapEntry(:key, :value) in v.entries) '$ind  ${DartExport._str('$key')}: ${lit(value, '$ind  ')},'].join('\n')}\n$ind}',
+    _ => throw ArgumentError('Not JSON: $v'),
+  };
+  return lit(json, indent);
 }

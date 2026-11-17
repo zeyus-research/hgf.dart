@@ -193,7 +193,7 @@ typedef PipelineWire = ({Offset from, Offset to, String part, bool ok});
         part: DocPart.deep(d.id),
         title: d.label,
         subtitle: '${deepShape(d)} · double-click to edit',
-        rows: deepRows(d),
+        rows: deepRows(d, status: m.deepStatus(d.id)),
         at: pos[DocPart.deep(d.id)]!,
       ),
     );
@@ -248,6 +248,10 @@ typedef PipelineWire = ({Offset from, Offset to, String part, bool ok});
   final sources = <String, Offset>{
     for (final (k, row) in dataCard.rows.indexed)
       if (row.port case ColumnOut(:final column)) column: dataCard.rowPort(k),
+    for (final c in cards)
+      if (c.part.startsWith('deep:'))
+        for (final (k, row) in c.rows.indexed)
+          if (row.port case ColumnOut(:final column)) column: c.rowPort(k),
     for (final c in cards)
       if (c.headerOut case (column: final String col)) col: c.headerOutPort,
   };
@@ -348,9 +352,11 @@ String deepShape(DocDeep d) =>
 
 /// A deep card's rows: its feature columns, then its target columns, each
 /// a drop target for more (a placeholder row while there are none).
-List<CardRow> deepRows(DocDeep d) {
+List<CardRow> deepRows(DocDeep d, {String? status}) {
   final cats = d.categories;
   return [
+    if (status != null && status.isNotEmpty)
+      (label: status, tag: null, port: null),
     if (!d.isContinuous) ...[
       for (final c in d.features)
         (label: c, tag: 'feature', port: DeepIn(d.id, target: false)),
@@ -379,6 +385,10 @@ List<CardRow> deepRows(DocDeep d) {
         tag: null,
         port: DeepIn(d.id, target: true),
       ),
+    // Its predictions: columns for the HGF inputs and later networks.
+    if (d.layers.isNotEmpty && (d.targets.isNotEmpty || d.isContinuous))
+      for (final c in deepPredictionColumns(d))
+        (label: c, tag: 'prediction', port: ColumnOut(c)),
   ];
 }
 
@@ -698,7 +708,15 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
           ? ('Release to add an output of a belief', true)
           : ('Drop on the background to add an output', false);
     }
-    if (card == null) return ('Release to make a transform of "$column"', true);
+    if (card == null) {
+      return m.deepColumns.contains(column)
+          ? (
+              'Drop a prediction on an HGF input or a later deep network '
+                  '(transforms run before the deep networks)',
+              false,
+            )
+          : ('Release to make a transform of "$column"', true);
+    }
     if (card.part == DocPart.network) {
       final k = _rowAt(card, screen);
       if (k == null) return ('Drop on one of the inputs', false);
@@ -744,6 +762,10 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
       return;
     }
     if (card == null) {
+      if (m.deepColumns.contains(column)) {
+        if (drag.tip != null) _tell(drag.tip!);
+        return;
+      }
       m.addTransform(column: column, at: drag.at - const Offset(0, 20));
       return;
     }

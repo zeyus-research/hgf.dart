@@ -1,6 +1,7 @@
 import 'package:hgf/hgf.dart';
 
 import '../codec.dart';
+import '../document/data_layout.dart';
 import '../document/model_document.dart' show DocGroup;
 import '../document/steps.dart';
 import '../parameter.dart';

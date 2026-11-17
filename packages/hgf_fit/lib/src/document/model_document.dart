@@ -1,4 +1,5 @@
 import 'deep_document.dart';
+import 'deep_training.dart';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -519,6 +520,54 @@ final class ModelDocument {
   /// [deep] networks; its [network] then has no nodes).
   bool get hasNetwork => network.nodes.isNotEmpty;
 
+  /// The deep networks whose prediction columns ([deepPredictionColumns])
+  /// [columns] name, and those these read in turn, in document order: the
+  /// ones the data layout trains before reading.
+  List<DocDeep> deepFor(Iterable<String> columns) {
+    final want = {...columns};
+    final picked = <DocDeep>{};
+    for (final d in deep.reversed) {
+      if (d.layers.isEmpty) continue;
+      if (deepPredictionColumns(d).any(want.contains)) {
+        picked.add(d);
+        want.addAll([
+          ...d.features,
+          ...d.targets,
+          ...?d.training.trainOn?.variables,
+        ]);
+      }
+    }
+    return [
+      for (final d in deep)
+        if (picked.contains(d)) d,
+    ];
+  }
+
+  /// The data pipeline deep network [d] reads through: the clock, the
+  /// steps and the transforms, and the earlier deep networks whose
+  /// predictions it reads (no inputs). What its exports read the CSV with.
+  DataLayout deepPipeline(DocDeep d) {
+    final at = deep.indexOf(d);
+    return DataLayout(
+      inputs: const [],
+      participantColumn: data.participantColumn,
+      timeColumn: data.timeColumn,
+      timeStepColumn: data.timeStepColumn,
+      groupColumn: data.groupColumn,
+      clock: data.clock,
+      steps: data.steps,
+      transforms: transforms,
+      deep: [
+        for (final o in deepFor([
+          ...d.features,
+          ...d.targets,
+          ...?d.training.trainOn?.variables,
+        ]))
+          if (at < 0 || deep.indexOf(o) < at) o,
+      ],
+    );
+  }
+
   /// The deep network [id], or `null`.
   DocDeep? deepById(String id) {
     for (final d in deep) {
@@ -975,6 +1024,12 @@ final class CompiledDocument {
         'Simulating together does not support options that reveal inputs',
       );
     }
+    if (layout.deep.isNotEmpty) {
+      throw UnsupportedError(
+        'Simulating together does not support inputs that read deep '
+        'networks\' predictions',
+      );
+    }
     final rc = r.dataColumns.single;
     data = layout.prepared(data);
     final header = [...data.header];
@@ -1178,26 +1233,24 @@ final class CompiledDocument {
   late final DataLayout layout = () {
     final r = document.response;
     final d = document.data;
+    final ins = [
+      for (final (k, input) in inputs.indexed)
+        () {
+          final w = inputWidth(network, document.network, network.inputIdxs[k]);
+          final cats = input.categories;
+          return LayoutInput(
+            input.name,
+            columns: input.columnsFor(cats != null ? 1 : w),
+            categories: cats,
+            oneHot: cats != null && w > 1,
+            observedColumn: input.observedColumn,
+          );
+        }(),
+    ];
+    final responseColumns = r == null ? const <String>[] : r.dataColumns;
     return DataLayout(
-      inputs: [
-        for (final (k, input) in inputs.indexed)
-          () {
-            final w = inputWidth(
-              network,
-              document.network,
-              network.inputIdxs[k],
-            );
-            final cats = input.categories;
-            return LayoutInput(
-              input.name,
-              columns: input.columnsFor(cats != null ? 1 : w),
-              categories: cats,
-              oneHot: cats != null && w > 1,
-              observedColumn: input.observedColumn,
-            );
-          }(),
-      ],
-      responseColumns: r == null ? const [] : r.dataColumns,
+      inputs: ins,
+      responseColumns: responseColumns,
       options: r?.options,
       participantColumn: d.participantColumn,
       timeColumn: d.timeColumn,
@@ -1206,6 +1259,10 @@ final class CompiledDocument {
       clock: d.clock,
       steps: d.steps,
       transforms: document.transforms,
+      deep: document.deepFor([
+        for (final i in ins) ...[...i.columns, ?i.observedColumn],
+        ...responseColumns,
+      ]),
     );
   }();
 

@@ -572,6 +572,7 @@ final class DocDeepTraining {
     this.batchSize,
     this.shuffle = true,
     this.standardise = true,
+    this.trainOn,
   });
 
   factory DocDeepTraining.fromJson(Map<String, Object?> j) {
@@ -593,6 +594,10 @@ final class DocDeepTraining {
       batchSize: j['batch_size'] as int?,
       shuffle: j['shuffle'] as bool? ?? d.shuffle,
       standardise: j['standardise'] as bool? ?? d.standardise,
+      trainOn: switch (j['train_on']) {
+        final String e => Expr.parse(e),
+        _ => null,
+      },
     );
   }
 
@@ -617,8 +622,15 @@ final class DocDeepTraining {
   /// exports then share exactly.
   final bool shuffle;
 
-  /// Whether the features are standardised (mean 0, sd 1) first.
+  /// Whether the features are standardised (mean 0, sd 1) first, with the
+  /// training rows' means and sds.
   final bool standardise;
+
+  /// The rows trained on: where this is nonzero (e.g. `split == 'train'`,
+  /// after a split step); `null`: every row. The others are held out: the
+  /// trained network predicts them too, and they are scored apart. A
+  /// continuous network does not train and ignores it.
+  final Expr? trainOn;
 
   Optimiser? get optimiserObject =>
       learningKind == LearningKind.synapticUncertainty
@@ -640,6 +652,7 @@ final class DocDeepTraining {
     int? Function()? batchSize,
     bool? shuffle,
     bool? standardise,
+    Expr? Function()? trainOn,
   }) => DocDeepTraining(
     optimiser: optimiser ?? this.optimiser,
     learningRate: learningRate ?? this.learningRate,
@@ -651,6 +664,7 @@ final class DocDeepTraining {
     batchSize: batchSize != null ? batchSize() : this.batchSize,
     shuffle: shuffle ?? this.shuffle,
     standardise: standardise ?? this.standardise,
+    trainOn: trainOn != null ? trainOn() : this.trainOn,
   );
 
   Map<String, Object?> toJson() {
@@ -667,6 +681,7 @@ final class DocDeepTraining {
       'batch_size': ?batchSize,
       if (shuffle != d.shuffle) 'shuffle': shuffle,
       if (standardise != d.standardise) 'standardise': standardise,
+      if (trainOn case final e?) 'train_on': '$e',
     };
   }
 }

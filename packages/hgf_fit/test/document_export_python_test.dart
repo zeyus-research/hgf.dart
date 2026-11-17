@@ -307,6 +307,13 @@ void main() {
   );
 
   test(
+    'trains the deep networks before the HGF network as hgf.dart does',
+    () => _sameReader(deepDocument(), clockedEventsCsv, 'deep'),
+    skip: skip,
+    timeout: const Timeout(Duration(minutes: 5)),
+  );
+
+  test(
     'MAP of every participant: hgf_fit\'s estimates, intervals and outputs',
     () async {
       final csv = _choiceData();

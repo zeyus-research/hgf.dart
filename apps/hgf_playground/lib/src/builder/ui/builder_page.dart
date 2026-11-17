@@ -13,6 +13,7 @@ import '../builder_model.dart';
 import 'builder_canvas.dart';
 import 'deep_canvas.dart';
 import 'deep_inspector.dart' show exportDeep;
+import 'deep_preview.dart';
 import 'inspector.dart';
 import 'pipeline_canvas.dart';
 
@@ -252,11 +253,13 @@ class _BuilderPageState extends State<BuilderPage> {
   Widget _narrow(BuildContext context) {
     const h = 130.0;
     final net = m.network;
-    final panels =
-        (net == null || m.trajectories == null
-            ? 1
-            : HgfTrajectoryView.panelCount(net)) +
-        BuilderPreview.extraPanels(m);
+    final shownDeep = BuilderPreview.shownDeep(m);
+    final panels = shownDeep != null
+        ? DeepPreview.panelCount(m, shownDeep) + 1
+        : (net == null || m.trajectories == null
+                  ? 1
+                  : HgfTrajectoryView.panelCount(net)) +
+              BuilderPreview.extraPanels(m);
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
@@ -430,6 +433,24 @@ class BuilderPreview extends StatefulWidget {
   /// At most this many outputs are plotted.
   static const maxOutputs = 4;
 
+  /// The deep network the preview shows: the one on the canvas, the
+  /// selected card's, or the first of a model without an HGF network.
+  static DocDeep? shownDeep(BuilderModel m) {
+    if (m.view == BuilderView.deep) return m.deep;
+    if (m.view != BuilderView.pipeline) return null;
+    if (m.selection case PartSelection(
+      :final part,
+    ) when part.startsWith('deep:')) {
+      for (final d in m.document.deep) {
+        if (DocPart.deep(d.id) == part) return d;
+      }
+    }
+    if (!m.document.hasNetwork && m.document.deep.isNotEmpty) {
+      return m.document.deep.first;
+    }
+    return null;
+  }
+
   /// The panels drawn above the network's: the responses and the named
   /// outputs (on the pipeline only).
   static int extraPanels(BuilderModel m) => m.view != BuilderView.pipeline
@@ -495,25 +516,28 @@ class _BuilderPreviewState extends State<BuilderPreview> {
     final m = widget.model;
     final net = m.network, traj = m.trajectories;
     final theme = Theme.of(context);
-    if (m.view == BuilderView.deep) {
-      final d = m.deep;
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Text(
-            d == null
-                ? ''
-                : '"${d.label}" is trained by its exported script for now '
-                      '(the network panel\'s Export buttons; Dart or pyhgf), '
-                      '${d.isContinuous ? 'filtering' : 'reading'} the columns '
-                      'bound on its card. Training in the builder comes with '
-                      'the data-pipeline nodes.',
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
+    if (BuilderPreview.shownDeep(m) case final d?) {
+      if (m.csv == null) {
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text(
+              '"${d.label}" trains on loaded data: load a CSV (Data panel) '
+              'and bind its columns on its card. Or export it (Dart or '
+              'pyhgf) and train it there.',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
           ),
-        ),
+        );
+      }
+      return DeepPreview(
+        model: m,
+        deep: d,
+        hover: _hover,
+        panelHeight: widget.panelHeight,
       );
     }
     if (net == null || traj == null) {
@@ -548,6 +572,16 @@ class _BuilderPreviewState extends State<BuilderPreview> {
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.error,
               ),
+            ),
+          ),
+        if (m.deepPending case final p when p.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text(
+              'Waiting for the predictions of ${p.map((l) => '"$l"').join(', ')} '
+              '(training): the inputs that read them are unobserved until '
+              'then.',
+              style: theme.textTheme.bodySmall?.copyWith(color: muted),
             ),
           ),
         for (final w in _extras(context, m))

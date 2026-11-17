@@ -1,4 +1,5 @@
 import 'package:hgf/hgf.dart';
+import 'package:hgf_deep/hgf_deep.dart' show DeepFixes, LayerKind;
 import 'package:hgf_fit/document.dart';
 
 /// Two sessions of events as in the RiseTogether events.tsv (presses held
@@ -106,5 +107,58 @@ ModelDocument steppedDocument() {
         ),
       ],
     ),
+  );
+}
+
+/// [clockedDocument] with deep networks between the transforms and the HGF
+/// network: a continuous filter of the team-mates' presses (each
+/// participant afresh), a classifier of one's own press from its
+/// prediction and the reversals (trained on the split's train rows), whose
+/// probability of "left" is the HGF network's input. Trained as pyhgf can
+/// match (in order, weights as built, no fixes).
+ModelDocument deepDocument() {
+  final doc = clockedDocument();
+  const pyhgf = DocDeepSettings(fixes: DeepFixes.none);
+  return doc.copyWith(
+    inputs: [
+      DocInput('x', node: 'x', columns: ['press_p_left']),
+    ],
+    data: doc.data.copyWith(steps: [SplitStep(seed: 5)]),
+    transforms: [
+      ...doc.transforms,
+      DocTransform('mates', "mates_mean(press == 'left')"),
+      DocTransform('rev', 'fill(reversed, 0)'),
+    ],
+    deep: [
+      DocDeep(
+        id: 'filt',
+        settings: pyhgf,
+        layers: const [
+          DocLayer(size: 1, kind: LayerKind.continuous),
+          DocLayer(size: 1, kind: LayerKind.continuous, tonicVolatility: -2),
+        ],
+        targets: ['mates'],
+      ),
+      DocDeep(
+        id: 'press',
+        settings: pyhgf,
+        layers: const [
+          DocLayer(size: 3, kind: LayerKind.categorical),
+          DocLayer(size: 4, coupling: 'tanh'),
+          DocLayer(size: 2),
+        ],
+        features: ['filt_prediction', 'rev'],
+        targets: ['press'],
+        categories: ['left', 'right', 'none'],
+        training: DocDeepTraining(
+          init: DeepInit.none,
+          shuffle: false,
+          optimiser: 'sgd',
+          learningRate: 0.05,
+          epochs: 2,
+          trainOn: Expr.parse("split == 'train'"),
+        ),
+      ),
+    ],
   );
 }

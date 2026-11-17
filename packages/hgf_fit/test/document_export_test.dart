@@ -200,6 +200,7 @@ void main() {
         'plain': _doc(fit: const DocFit(method: 'none')),
         'clocked': clockedDocument(),
         'stepped': steppedDocument(),
+        'deep': deepDocument(),
         'eb': _doc(
           group: DocGroup(
             pooled: {'omega': DocPopulation.around(const Normal(-3, 1))},
@@ -258,6 +259,21 @@ void main() {
         }).toText()}\n',
       );
       expect(got.outputs, contains('split'));
+    });
+
+    test('deep networks before the HGF network', () async {
+      final doc = deepDocument();
+      final got = await _run('deep', doc, clockedEventsCsv);
+      final c = doc.compile();
+      final events = CsvData.parse(clockedEventsCsv);
+      final set = c.currentValues();
+      expect(
+        got.outputs,
+        '${c.withOutputs(events, x: {
+          for (final id in ['a', 'b', 'c', 'd']) id: set,
+        }).toText()}\n',
+      );
+      expect(got.outputs, contains('press_p_left'));
     });
 
     test('without a fit: the outputs at the set values', () async {

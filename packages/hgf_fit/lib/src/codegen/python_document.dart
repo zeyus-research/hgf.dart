@@ -100,7 +100,12 @@ extension _PythonDocument on PythonExport {
       ..writeln('import jax  # noqa: E402,F401')
       ..writeln('import jax.numpy as jnp  # noqa: E402')
       ..writeln('import numpy as np  # noqa: E402')
-      ..writeln('from pyhgf.model import Network  # noqa: E402');
+      ..writeln(
+        layout.deep.isEmpty
+            ? 'from pyhgf.model import Network  # noqa: E402'
+            : 'import optax  # noqa: E402\n'
+                  'from pyhgf.model import DeepNetwork, Network  # noqa: E402',
+      );
     if (fitCode != null) {
       b.writeln(
         'from pyhgf.response import (  # noqa: E402,F401\n'
@@ -666,7 +671,7 @@ def fit(ids, subjects):
 
   /// `transform(table)`: the document's data transforms, as hgf.dart
   /// computes them.
-  String _transformCode(DataLayout layout) {
+  static String _transformCode(DataLayout layout) {
     final b = StringBuffer()
       ..writeln('def transform(table):')
       ..writeln(
@@ -676,26 +681,37 @@ def fit(ids, subjects):
       ..writeln('    computes them)."""');
     if (layout.clock != null) b.writeln('    table = on_clock(table)');
     if (layout.steps.isNotEmpty) b.writeln('    table = run_steps(table)');
-    if (layout.transforms.isEmpty) {
-      b.writeln('    return table');
-      return _clockCode(layout) + _stepsCode(layout) + b.toString();
+    if (layout.transforms.isNotEmpty) {
+      b.writeln(
+        '    t = Transforms(table, LAYOUT["participant"], LAYOUT["group"], '
+        'LAYOUT["time"])',
+      );
+      for (final t in layout.transforms) {
+        b
+          ..writeln('    # ${t.name} = ${t.expression}')
+          ..writeln('    t.add(${_pyStr(t.name)}, ${_dataExpr(t.expression)})');
+      }
+      b.writeln('    table = t.table');
     }
-    b.writeln(
-      '    t = Transforms(table, LAYOUT["participant"], LAYOUT["group"], '
-      'LAYOUT["time"])',
-    );
-    for (final t in layout.transforms) {
-      b
-        ..writeln('    # ${t.name} = ${t.expression}')
-        ..writeln('    t.add(${_pyStr(t.name)}, ${_dataExpr(t.expression)})');
+    if (layout.deep.isNotEmpty) {
+      b.writeln(
+        '    # The deep networks, trained after the transforms: their '
+        'predictions are columns.',
+      );
+      for (final d in layout.deep) {
+        b.writeln('    table = ${pyDeepTrainFunction(d)}(table)');
+      }
     }
-    b.writeln('    return t.table');
-    return _clockCode(layout) + _stepsCode(layout) + b.toString();
+    b.writeln('    return table');
+    return _clockCode(layout) +
+        _stepsCode(layout) +
+        (layout.deep.isEmpty ? '' : '${pyDeepFunctions(layout.deep)}\n\n') +
+        b.toString();
   }
 
   /// `STEPS` and `run_steps(table)`: the data-pipeline steps, as hgf.dart's
   /// `DocStep`s (empty without steps).
-  String _stepsCode(DataLayout layout) {
+  static String _stepsCode(DataLayout layout) {
     if (layout.steps.isEmpty) return '';
     String fn(Expr e) => 'lambda t: ${_dataExpr(e)}';
     String opt(Expr? e) => e == null ? 'None' : fn(e);
@@ -972,7 +988,7 @@ def run_steps(table):
 
   /// `CLOCK` and `on_clock(table)`: events onto the shared clock, as
   /// hgf.dart's `DocClock` (empty without a clock).
-  String _clockCode(DataLayout layout) {
+  static String _clockCode(DataLayout layout) {
     final k = layout.clock;
     if (k == null) return '';
     String fn(Expr e) => 'lambda t: ${_dataExpr(e)}';
@@ -1631,3 +1647,30 @@ def number(table, cell):
 
 
 ''';
+
+/// [e] as a column of the `Transforms` helper (a data expression).
+String pyDataExpr(Expr e) => _PythonDocument._dataExpr(e);
+
+/// The data pipeline of a script without an HGF network: `LAYOUT` (the
+/// participant, time and group columns), the CSV and data helpers, and
+/// `transform(table)` (the clock, the steps, the transforms and [layout]'s
+/// deep networks).
+String pyDataPipeline(DataLayout layout) {
+  String opt(String? s) => s == null ? 'None' : _PythonDocument._pyStr(s);
+  return """# How the CSV is read (hgf.dart's DataLayout): the participant, time and group
+# columns.
+LAYOUT = dict(
+    inputs=[],
+    responses=[],
+    options=None,
+    participant=${opt(layout.participantColumn)},
+    time=${opt(layout.timeColumn)},
+    time_step=${opt(layout.timeStepColumn)},
+    group=${opt(layout.groupColumn)},
+)
+
+
+${_PythonDocument._dataHelpers}
+
+${_PythonDocument._transformCode(layout)}""";
+}

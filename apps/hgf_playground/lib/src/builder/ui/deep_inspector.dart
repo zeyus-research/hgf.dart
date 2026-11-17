@@ -1,4 +1,4 @@
-import 'package:hgf/hgf.dart' show parseCoupling;
+import 'package:hgf/hgf.dart' show Expr, parseCoupling;
 import 'package:hgf_deep/hgf_deep.dart'
     show DeepFixes, DeepVolatilityUpdate, LayerKind, LearningKind;
 import 'package:hgf_fit/codegen.dart';
@@ -27,9 +27,10 @@ Future<void> exportDeep(
     return;
   }
   final file = m.csvName;
+  final layout = m.document.deepPipeline(d);
   final script = python
-      ? DeepPythonExport(d, dataFile: file).script()
-      : DeepDartExport(d, dataFile: file).script();
+      ? DeepPythonExport(d, dataFile: file, layout: layout).script()
+      : DeepDartExport(d, dataFile: file, layout: layout).script();
   final base = d.id.replaceAll(RegExp(r'[^A-Za-z0-9_]+'), '_');
   await saveText(
     context,
@@ -253,11 +254,28 @@ class DeepPanel extends StatelessWidget {
             ),
           ],
         ),
-        if (!d.isContinuous) ...[
-          const SizedBox(height: 12),
+        const SizedBox(height: 12),
+        if (d.isContinuous)
           SectionCard(
-            title: 'Training (in the exported script)',
+            title: 'Filtering',
             children: [
+              _TrainingStatus(model: model, deep: d),
+              const SizedBox(height: 4),
+              Text(
+                'Each participant\'s rows are filtered in order by a fresh '
+                'network; the prediction of each row is made before it is '
+                'seen.',
+                style: small,
+              ),
+            ],
+          ),
+        if (!d.isContinuous) ...[
+          SectionCard(
+            title: 'Training',
+            children: [
+              _TrainingStatus(model: model, deep: d),
+              const SizedBox(height: 8),
+              _TrainOn(model: model, deep: d, onChanged: _set),
               Pick<String>(
                 label: 'Learning',
                 value: t.learningKind == LearningKind.synapticUncertainty
@@ -469,6 +487,7 @@ class _AddColumn extends StatelessWidget {
     final columns = [
       ...?(model.csv == null ? null : model.dataColumns),
       ...model.document.transformNames,
+      ...model.deepColumns,
     ];
     if (columns.isEmpty) {
       return CommitField(
@@ -759,4 +778,107 @@ class _Switch extends StatelessWidget {
     value: value,
     onChanged: onChanged,
   );
+}
+
+/// How deep network [deep]'s training goes: a progress bar while it runs,
+/// then its scores (training and held-out rows).
+class _TrainingStatus extends StatelessWidget {
+  const _TrainingStatus({required this.model, required this.deep});
+
+  final BuilderModel model;
+  final DocDeep deep;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final run = model.deepRun(deep.id);
+    final error = model.deepError(deep.id);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (run != null) ...[
+          LinearProgressIndicator(value: run.progress),
+          const SizedBox(height: 4),
+        ],
+        Text(
+          model.deepStatus(deep.id),
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: error != null ? theme.colorScheme.error : null,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Which rows deep network [deep] trains on: an expression (empty: every
+/// row), with the split's training part offered when there is a split.
+class _TrainOn extends StatelessWidget {
+  const _TrainOn({
+    required this.model,
+    required this.deep,
+    required this.onChanged,
+  });
+
+  final BuilderModel model;
+  final DocDeep deep;
+  final ValueChanged<DocDeep> onChanged;
+
+  void _set(Expr? e) => onChanged(
+    deep.copyWith(training: deep.training.copyWith(trainOn: () => e)),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final t = deep.training;
+    final split = [
+      for (final s in model.document.data.steps)
+        if (s is SplitStep) s,
+    ].lastOrNull;
+    final suggestion = split == null
+        ? null
+        : Expr.parse(
+            "${split.column} == '${split.parts.first.label.replaceAll("'", '')}'",
+          );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        CommitField(
+          key: ValueKey('train on ${deep.id} ${t.trainOn}'),
+          label: 'Train on the rows where',
+          value: t.trainOn?.toString() ?? '',
+          hint: 'every row',
+          monospace: true,
+          validate: (v) {
+            if (v.trim().isEmpty) return null;
+            try {
+              Expr.parse(v);
+              return null;
+            } on FormatException catch (e) {
+              return e.message;
+            }
+          },
+          onCommit: (v) => _set(v.trim().isEmpty ? null : Expr.parse(v)),
+        ),
+        if (suggestion != null && '${t.trainOn}' != '$suggestion')
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: ActionChip(
+                avatar: const Icon(Icons.call_split, size: 16),
+                label: Text('Train on $suggestion'),
+                onPressed: () => _set(suggestion),
+              ),
+            ),
+          ),
+        const SizedBox(height: 4),
+        Text(
+          'The other rows are held out: the trained network predicts them '
+          'too, and they are scored apart.',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ],
+    );
+  }
 }

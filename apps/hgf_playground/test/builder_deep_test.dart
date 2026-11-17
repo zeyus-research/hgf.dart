@@ -39,7 +39,8 @@ void main() {
         m.issues.every((i) => i.parts.contains(DocPart.deep('deep'))),
         isTrue,
       );
-      expect(m.previewError, contains('deep networks only'));
+      // Without data: nothing to train on yet.
+      expect(m.previewError, contains('Load data to train'));
     });
 
     test('a preset plus a deep network; deleting the HGF network', () {
@@ -188,10 +189,14 @@ void main() {
         await tester.pumpAndSettle();
       }
 
-      // Row 0: "drop feature columns here"; row 1: the targets.
-      await drag('x1', 0);
+      // Under the status row: "drop feature columns here", the targets.
+      int port({required bool target}) => deep.rows.indexWhere(
+        (x) => x.port is DeepIn && (x.port! as DeepIn).target == target,
+      );
+      expect(deep.rows.first.port, isNull);
+      await drag('x1', port(target: false));
       expect(m.document.deepById('deep')!.features, ['x1']);
-      await drag('press', 1);
+      await drag('press', port(target: true));
       expect(m.document.deepById('deep')!.categories, [
         'left',
         'right',

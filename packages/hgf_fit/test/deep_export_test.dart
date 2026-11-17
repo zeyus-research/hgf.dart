@@ -1,6 +1,7 @@
 /// The deep-network exports: each Dart script analyses clean and runs,
 /// and (with `tool/parity/.venv`, `melos run test:export-python`) the
 /// Python script, run by pyhgf, writes the same predictions to 1e-9.
+@TestOn('vm')
 library;
 
 import 'dart:io';
@@ -11,6 +12,8 @@ import 'package:hgf_deep/hgf_deep.dart';
 import 'package:hgf_fit/codegen.dart';
 import 'package:hgf_fit/document.dart';
 import 'package:test/test.dart';
+
+import 'clocked_fixture.dart';
 
 final Directory _dir = Directory('.dart_tool/deep_export_test');
 final String _python = File('../../tool/parity/.venv/bin/python').absolute.path;
@@ -127,7 +130,35 @@ final cases = <String, (DocDeep, String)>{
 List<List<String>> _read(String path) =>
     CsvData.parse(File(path).readAsStringSync()).rows;
 
+/// Two CSV texts with the same cells (numbers equal up to [tol]).
+void _sameCsv(
+  List<List<String>> got,
+  List<List<String>> want, {
+  double tol = 0,
+}) {
+  expect(got.length, want.length);
+  var compared = 0;
+  for (var i = 0; i < got.length; i++) {
+    expect(got[i].length, want[i].length, reason: 'row $i');
+    for (var j = 0; j < got[i].length; j++) {
+      final a = double.tryParse(got[i][j]), b = double.tryParse(want[i][j]);
+      if (a == null || b == null) {
+        expect(got[i][j].trim(), want[i][j].trim(), reason: 'row $i col $j');
+        continue;
+      }
+      expect(
+        (a - b).abs(),
+        lessThanOrEqualTo(tol * math.max(1, b.abs())),
+        reason: 'row $i column $j: $a vs $b',
+      );
+      compared++;
+    }
+  }
+  expect(compared, greaterThan(0));
+}
+
 void main() {
+  group('through the document\'s pipeline', pipeline);
   setUpAll(() {
     if (_dir.existsSync()) _dir.deleteSync(recursive: true);
     _dir.createSync(recursive: true);
@@ -221,6 +252,89 @@ void main() {
         },
         tags: ['pyhgf'],
         skip: venv ? false : 'needs tool/parity/.venv (uv sync)',
+      );
+    });
+  }
+}
+
+/// The deep networks of [deepDocument], each exported with the pipeline it
+/// reads through (events onto the clock, a split, transforms, the filter
+/// before the classifier).
+void pipeline() {
+  final doc = deepDocument();
+  final dir = Directory('${_dir.path}/pipeline');
+  final events = CsvData.parse(clockedEventsCsv);
+
+  setUpAll(() {
+    dir.createSync(recursive: true);
+    File('${dir.path}/events.csv').writeAsStringSync(clockedEventsCsv);
+    for (final d in doc.deep) {
+      final l = doc.deepPipeline(d);
+      File(
+        '${dir.path}/${d.id}.dart',
+      ).writeAsStringSync(DeepDartExport(d, layout: l).script());
+      File(
+        '${dir.path}/${d.id}.py',
+      ).writeAsStringSync(DeepPythonExport(d, layout: l).script());
+    }
+  });
+
+  test('the classifier reads through the filter', () {
+    final l = doc.deepPipeline(doc.deepById('press')!);
+    expect([for (final d in l.deep) d.id], ['filt']);
+    expect(doc.deepPipeline(doc.deepById('filt')!).deep, isEmpty);
+  });
+
+  test('the Dart scripts analyse clean', () async {
+    final r = await Process.run(Platform.resolvedExecutable, [
+      'analyze',
+      '--fatal-infos',
+      dir.path,
+    ]);
+    expect(r.exitCode, 0, reason: '${r.stdout}\n${r.stderr}');
+  });
+
+  for (final id in ['filt', 'press']) {
+    group(id, () {
+      test('the Dart script gives what DeepTraining gives', () async {
+        final r = await Process.run(Platform.resolvedExecutable, [
+          'run',
+          '${dir.path}/$id.dart',
+          '${dir.path}/events.csv',
+        ]);
+        expect(r.exitCode, 0, reason: '${r.stdout}\n${r.stderr}');
+        if (id == 'press') {
+          expect(r.stdout, contains('on the held-out rows'));
+        }
+        final d = doc.deepById(id)!;
+        final l = doc.deepPipeline(d);
+        final table = l.transform(events);
+        final want = DeepTraining.run(d, table, scope: l.scope).appendTo(table);
+        final got = _read('${dir.path}/events_$id.csv');
+        File(
+          '${dir.path}/events_$id.csv',
+        ).copySync('${dir.path}/${id}_dart.csv');
+        _sameCsv(got, want.rows);
+      });
+
+      test(
+        'pyhgf writes the same predictions',
+        () async {
+          final r = await Process.run(_python, [
+            '${dir.path}/$id.py',
+            '${dir.path}/events.csv',
+          ]);
+          expect(r.exitCode, 0, reason: '${r.stdout}\n${r.stderr}');
+          _sameCsv(
+            _read('${dir.path}/events_$id.csv'),
+            _read('${dir.path}/${id}_dart.csv'),
+            tol: 1e-9,
+          );
+        },
+        tags: ['pyhgf'],
+        skip: File(_python).existsSync()
+            ? false
+            : 'needs tool/parity/.venv (uv sync)',
       );
     });
   }

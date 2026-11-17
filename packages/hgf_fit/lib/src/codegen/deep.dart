@@ -1,23 +1,49 @@
 import 'package:hgf/hgf.dart';
 import 'package:hgf_deep/hgf_deep.dart' show LayerKind, LearningKind;
 
+import '../document/data_layout.dart';
 import '../document/deep_document.dart';
-import 'dart.dart' show dartDouble;
+import '../document/deep_training.dart' show deepPredictionColumns;
+import 'dart.dart' show dartDataLayout, dartDataLayoutNames, dartDouble;
 import 'expr_code.dart' show dartString;
-import 'python.dart' show pyCoupling, pyCsvReader, pyFloat;
+import 'python.dart'
+    show pyCoupling, pyDataExpr, pyDataPipeline, pyFloat, pyIdentifier;
+
+/// The data pipeline of [layout] in words, or `null` when there is none.
+String? _pipelineWords(DataLayout? layout) {
+  if (layout == null) return null;
+  final parts = [
+    if (layout.clock != null) 'puts the events onto the shared clock',
+    if (layout.steps.isNotEmpty)
+      'runs the data steps (${[for (final s in layout.steps) s.kind].join(', ')})',
+    if (layout.transforms.isNotEmpty)
+      'computes the transforms (${[for (final t in layout.transforms) t.name].join(', ')})',
+    if (layout.deep.isNotEmpty)
+      'trains the deep network${layout.deep.length == 1 ? '' : 's'} it reads '
+          '(${[for (final d in layout.deep) d.label].join(', ')})',
+  ];
+  if (parts.isEmpty) return null;
+  return parts.length == 1
+      ? parts.single
+      : '${parts.sublist(0, parts.length - 1).join(', ')} and ${parts.last}';
+}
 
 /// What a deep network's script reads and writes, in words (both targets).
-String _summary(DocDeep d, String comment) {
+String _summary(DocDeep d, DataLayout? layout, String comment) {
   final t = d.training;
   final lines = <String>[];
+  if (_pipelineWords(layout) case final w?) {
+    lines.add('It reads the CSV as the model document does: it $w.');
+  }
+  final per = layout?.participantColumn == null
+      ? ''
+      : ', each participant (${layout!.participantColumn}) on its own';
   if (d.isContinuous) {
     lines.add(
       'It reads the observation column${d.targets.length == 1 ? '' : 's'} '
-      '${d.targets.join(', ')} from the CSV (rows with a missing value are '
-      'skipped), filters them through the network (a continuous network '
-      'does not learn: its couplings are parameters), and writes '
-      '<data>_${d.id}.csv: the data with the prediction of every '
-      'observation made before it was seen.',
+      '${d.targets.join(', ')} (rows with a missing value are skipped) and '
+      'filters them through the network$per (a continuous network does not '
+      'learn: its couplings are parameters).',
     );
   } else {
     final how = t.learningKind == LearningKind.synapticUncertainty
@@ -31,14 +57,18 @@ String _summary(DocDeep d, String comment) {
       'It reads the feature column${d.features.length == 1 ? '' : 's'} '
       '${d.features.join(', ')} and the target '
       '${d.categories == null ? 'column${d.targets.length == 1 ? '' : 's'} ${d.targets.join(', ')}' : 'labels in ${d.targets.single} (${d.categories!.join(', ')})'} '
-      'from the CSV (rows with a missing value are skipped),'
-      '${t.standardise ? ' standardises the features,' : ''} trains for '
-      '${t.epochs} pass${t.epochs == 1 ? '' : 'es'} ($how, $rows'
-      '${t.shuffle ? ', shuffled' : ', in order'}), prints the fit to the '
-      'training rows and writes <data>_${d.id}.csv: the data with a '
-      'prediction column per target node.',
+      '(rows with a missing value are skipped)'
+      '${t.trainOn == null ? '' : ', trains on the rows where ${t.trainOn} (the others are held out)'},'
+      '${t.standardise ? ' standardises the features with the training rows\' means and sds,' : ''} '
+      'trains for ${t.epochs} pass${t.epochs == 1 ? '' : 'es'} ($how, $rows'
+      '${t.shuffle ? ', shuffled' : ', in order'}) and prints the fit.',
     );
   }
+  lines.add(
+    'It writes <data>_${d.id}.csv: the table it read with a prediction column '
+    'per target node'
+    '${d.isContinuous ? ' (each made before its row was seen)' : ''}.',
+  );
   return _wrap(lines.join(' '), comment);
 }
 
@@ -56,29 +86,39 @@ String _wrap(String text, String prefix, {int width = 76}) {
   return out.toString();
 }
 
-/// The prediction columns of [d]'s output CSV.
-List<String> deepPredictionColumns(DocDeep d) {
-  final n = d.targetLayer!.size;
-  if (d.categories case final cats?) {
-    return [for (final c in cats) '${d.id}_p_$c'];
-  }
-  if (n == 1) return ['${d.id}_prediction'];
-  return [for (var k = 0; k < n; k++) '${d.id}_prediction_$k'];
-}
+/// [layout]'s data pipeline without inputs (what a deep network's script
+/// reads through); a plain one when there is none.
+DataLayout _pipelineOf(DataLayout? layout) => DataLayout(
+  inputs: const [],
+  participantColumn: layout?.participantColumn,
+  timeColumn: layout?.timeColumn,
+  timeStepColumn: layout?.timeStepColumn,
+  groupColumn: layout?.groupColumn,
+  clock: layout?.clock,
+  steps: layout?.steps ?? const [],
+  transforms: layout?.transforms ?? const [],
+  deep: layout?.deep ?? const [],
+);
 
-/// A Dart script for one deep network of a model document: it builds the
-/// network, reads its columns from a CSV, trains it (or filters, for a
-/// continuous network) as [DocDeep.training] says, and writes the
-/// predictions next to the data. Depends on hgf_deep only (and hgf for
-/// expression couplings).
+/// A Dart script for one deep network of a model document: it reads the
+/// CSV through the document's data pipeline ([layout]: the clock, the
+/// steps, the transforms and the deep networks this one reads, with
+/// hgf_fit's `DataLayout`), builds the network, trains it (or filters,
+/// for a continuous network) as [DocDeep.training] says, and writes the
+/// predictions next to the table. It gives what hgf_fit's `DeepTraining`
+/// gives (and the builder shows), to the last digit.
 final class DeepDartExport {
-  DeepDartExport(this.deep, {this.title, this.dataFile});
+  DeepDartExport(this.deep, {this.title, this.dataFile, this.layout});
 
   final DocDeep deep;
   final String? title;
 
   /// The CSV read when none is given on the command line.
   final String? dataFile;
+
+  /// The data pipeline (see `ModelDocument.deepPipeline`); `null`: the CSV
+  /// as it is.
+  final DataLayout? layout;
 
   String _coupling(String text) => switch (parseCoupling(text)) {
     final CouplingFn f => 'CouplingFn.${f.name}',
@@ -160,15 +200,19 @@ final class DeepDartExport {
     final d = deep, t = d.training;
     final cont = d.isContinuous;
     final out = deepPredictionColumns(d);
+    final pipeline = _pipelineOf(layout);
     String list(List<String> v) => '[${v.map(dartString).join(', ')}]';
+    final names = {
+      ...dartDataLayoutNames(pipeline),
+      'DeepData',
+    }.where((n) => n != 'LayoutInput').toList()..sort();
     final b = StringBuffer()
       ..writeln(
         '// ${title ?? 'Deep network "${d.label}"'}, exported from hgf.dart.',
       )
       ..writeln('//')
       ..writeln(
-        '// Run it in a Dart package that depends on hgf_deep'
-        '${_usesExpr ? ' and hgf' : ''}',
+        '// Run it in a Dart package that depends on hgf, hgf_deep and hgf_fit',
       )
       ..writeln('// (https://github.com/NexusDynamic/hgf.dart):')
       ..writeln('//')
@@ -178,24 +222,26 @@ final class DeepDartExport {
             : '//   dart run <this file> [data.csv]   (default: $dataFile)',
       )
       ..writeln('//')
-      ..write(_summary(d, '// '))
+      ..write(_summary(d, layout, '// '))
       ..writeln('//')
       ..writeln(
-        '// To read your data another way, replace readData(); the network '
-        'is',
+        '// The network is buildNetwork(); the CSV is read through '
+        '`pipeline`.',
       )
-      ..writeln('// buildNetwork().')
       ..writeln()
       ..write(cont ? '' : "import 'dart:convert';\n")
       ..writeln("import 'dart:io';")
-      ..writeln("import 'dart:typed_data';")
-      ..writeln();
-    if (_usesExpr) {
-      b.writeln("import 'package:hgf/hgf.dart' show ExprCoupling;");
-    }
-    b
-      ..writeln("import 'package:hgf_deep/datasets.dart';")
+      ..writeln()
+      ..writeln(
+        "import 'package:hgf/hgf.dart' show CsvData, Expr"
+        "${_usesExpr ? ', ExprCoupling' : ''};",
+      )
+      ..write(cont ? '' : "import 'package:hgf_deep/datasets.dart';\n")
       ..writeln("import 'package:hgf_deep/hgf_deep.dart';")
+      ..writeln(
+        "import 'package:hgf_fit/document.dart'\n"
+        "    show ${names.join(', ')};",
+      )
       ..writeln()
       ..writeln('const networkId = ${dartString(d.id)};')
       ..writeln('const features = <String>${list(d.features)};')
@@ -208,14 +254,30 @@ final class DeepDartExport {
       ..writeln('const outputColumns = <String>${list(out)};')
       ..writeln()
       ..writeln(
+        '/// The rows trained on (the others are held out and scored '
+        'apart); null:',
+      )
+      ..writeln('/// every row.')
+      ..writeln(
+        t.trainOn == null || cont
+            ? 'const Expr? trainOn = null;'
+            : 'final trainOn = Expr.parse(${dartString('${t.trainOn}')});',
+      )
+      ..writeln()
+      ..writeln(
+        '/// How the CSV is prepared before the network reads it, as the '
+        'model',
+      )
+      ..writeln('/// document prepares it.')
+      ..writeln('final pipeline = ${dartDataLayout(pipeline)};')
+      ..writeln()
+      ..writeln(
         '/// The network, built from the target layer (layer 0) up to the',
       )
       ..writeln(
         "/// ${cont ? 'top level' : 'feature layer'}, as pyhgf builds it.",
       )
       ..writeln('DeepNetwork buildNetwork() => ${network()};')
-      ..writeln()
-      ..writeln(_readData)
       ..writeln()
       ..writeln('void main(List<String> args) {')
       ..writeln(
@@ -224,10 +286,33 @@ final class DeepDartExport {
             : '  final path = args.isEmpty ? ${dartString(dataFile!)} : args.first;',
       )
       ..writeln('  final csv = CsvData.parse(File(path).readAsStringSync());')
-      ..writeln('  final data = readData(csv);')
-      ..writeln('  final net = buildNetwork();');
+      ..writeln('  final table = pipeline.transform(csv);')
+      ..writeln('  final data = DeepData.columns(')
+      ..writeln('    table,')
+      ..writeln('    features: features,')
+      ..writeln('    targets: targets,')
+      ..writeln('    categories: categories,')
+      ..writeln('    trainOn: trainOn,')
+      ..writeln('    scope: pipeline.scope,')
+      ..writeln('  );');
     if (cont) {
-      b.writeln('  final p = net.inputData(data.y);');
+      b
+        ..writeln(
+          '  // Each participant on its own, with a fresh network, in order.',
+        )
+        ..writeln('  final p = Matrix(data.length, data.y.cols);')
+        ..writeln('  final byParticipant = <String, List<int>>{};')
+        ..writeln('  for (var i = 0; i < data.length; i++) {')
+        ..writeln('    (byParticipant[data.participants[i]] ??= []).add(i);')
+        ..writeln('  }')
+        ..writeln('  for (final rows in byParticipant.values) {')
+        ..writeln('    final q = buildNetwork().inputData(pick(data.y, rows));')
+        ..writeln('    for (final (k, i) in rows.indexed) {')
+        ..writeln('      for (var j = 0; j < p.cols; j++) {')
+        ..writeln('        p.data[i * p.cols + j] = q.at(k, j);')
+        ..writeln('      }')
+        ..writeln('    }')
+        ..writeln('  }');
     } else {
       final opt = t.learningKind == LearningKind.synapticUncertainty
           ? 'null'
@@ -242,14 +327,31 @@ final class DeepDartExport {
           'synapticUncertainty: SynapticUncertainty(window: '
               '${dartDouble(t.synapticWindow)})',
       ].join(', ');
+      b
+        ..writeln(
+          '  final trainRows = data.trainIndices, heldOut = data.testIndices;',
+        )
+        ..writeln('  if (trainRows.isEmpty) {')
+        ..writeln("    stderr.writeln('No rows to train on');")
+        ..writeln('    exit(65);')
+        ..writeln('  }');
       if (t.standardise) {
         b
-          ..writeln('  final scale = Standardiser.fit(data.x);')
+          ..writeln("  // Standardised with the training rows' means and sds.")
+          ..writeln(
+            '  final scale = Standardiser.fit(pick(data.x, trainRows));',
+          )
           ..writeln('  final x = scale.apply(data.x);');
       } else {
         b.writeln('  final x = data.x;');
       }
-      b.writeln("  final train = Dataset('train', x, data.y);");
+      b
+        ..writeln('  final net = buildNetwork();')
+        ..writeln('  final train = Dataset(')
+        ..writeln("    'train',")
+        ..writeln('    pick(x, trainRows),')
+        ..writeln('    pick(data.y, trainRows),')
+        ..writeln('  );');
       if (t.init.strategy != null) {
         b.writeln(
           '  net.weightInitialisation(const ${t.init.strategy.runtimeType}(), '
@@ -276,14 +378,24 @@ final class DeepDartExport {
           )
           ..writeln('    net.fit(rows.x, rows.y, $learn);');
       }
+      final regression = d.targetLayer!.kind == LayerKind.volatile;
       b
         ..writeln('  }')
         ..writeln('  final p = net.predict(x);')
         ..writeln(
-          d.targetLayer!.kind == LayerKind.volatile
-              ? "  print('R² on the training rows: \${r2(p, data.y).toStringAsFixed(4)}');"
-              : "  print('accuracy on the training rows: \${accuracy(p, labelsOf(data.y)).toStringAsFixed(4)}');",
+          "  for (final (name, rows) in [('training', trainRows), "
+          "('held-out', heldOut)]) {",
         )
+        ..writeln('    if (rows.isEmpty) continue;')
+        ..writeln(
+          regression
+              ? '    final score = r2(pick(p, rows), pick(data.y, rows));'
+              : '    final score = accuracy(pick(p, rows), labelsOf(pick(data.y, rows)));',
+        )
+        ..writeln(
+          "    print('${regression ? 'R²' : 'accuracy'} on the \$name rows: \${score.toStringAsFixed(4)}');",
+        )
+        ..writeln('  }')
         ..writeln(
           "  final saved = File('\${path.replaceFirst(RegExp(r'\\.[^./\\\\]*\$'), '')}_\$networkId.json')",
         )
@@ -303,9 +415,13 @@ final class DeepDartExport {
         ..writeln("  print('saved the trained network to \${saved.path}');");
     }
     b
-      ..writeln('  final written = writePredictions(csv, data.rows, p, path);')
+      ..writeln(
+        '  final written = writePredictions(table, data.rows, p, path);',
+      )
       ..writeln("  print('wrote \${written.path}');")
       ..writeln('}')
+      ..writeln()
+      ..writeln(_pick)
       ..writeln()
       ..writeln(_writePredictions);
     if (!cont && d.targetLayer!.kind != LayerKind.volatile) {
@@ -327,57 +443,29 @@ final class DeepDartExport {
     return b.toString();
   }
 
-  String get _readData {
-    final labels = deep.categories != null;
-    final target = labels
-        ? r'''
-    final k = categories.indexOf(csv.rows[r][fy.single].trim());
-    if (k < 0) continue;
-    final y = [for (var j = 0; j < categories.length; j++) j == k ? 1.0 : 0.0];'''
-        : r'''
-    final y = [for (final c in fy) csv.number(r, c)];
-    if (y.any((v) => v == null || !v.isFinite)) continue;''';
-    final width = labels ? 'categories.length' : 'targets.length';
-    final readX = deep.features.isEmpty
-        ? ''
-        : r'''
-    final x = [for (final c in fx) csv.number(r, c)];
-    if (x.any((v) => v == null || !v.isFinite)) continue;''';
-    return '''
-/// The rows of [csv] that hold every column the network reads (their
-/// indices in `rows`), the features as `x` and the targets as `y`${labels ? ' (one-hot\n/// over `categories`)' : ''}.
-({Matrix x, Matrix y, List<int> rows}) readData(CsvData csv) {
-  int column(String name) {
-    final c = csv.header.indexOf(name);
-    if (c < 0) throw FormatException('The CSV has no column "\$name"');
-    return c;
+  static const _pick = r'''
+/// The rows [rows] of [m], in that order.
+Matrix pick(Matrix m, List<int> rows) {
+  final out = Matrix(rows.length, m.cols);
+  for (final (i, r) in rows.indexed) {
+    out.data.setRange(i * m.cols, (i + 1) * m.cols, m.data, r * m.cols);
   }
-
-${deep.features.isEmpty ? '' : '  final fx = [for (final f in features) column(f)];\n'}  final fy = [for (final t in targets) column(t)];
-  final xs = <double>[], ys = <double>[], rows = <int>[];
-  for (var r = 0; r < csv.rows.length; r++) {$readX$target
-${deep.features.isEmpty ? '' : '    xs.addAll(x.cast<double>());\n'}    ys.addAll(${labels ? 'y' : 'y.cast<double>()'});
-    rows.add(r);
-  }
-  return (
-    x: Matrix(rows.length, features.length, Float64List.fromList(xs)),
-    y: Matrix(rows.length, $width, Float64List.fromList(ys)),
-    rows: rows,
-  );
+  return out;
 }''';
-  }
 
   static const _writePredictions = r'''
-/// The data with [outputColumns] appended: [p]'s row for each of [rows],
+/// [table] with [outputColumns] appended: [p]'s row for each of [rows],
 /// empty for the rows that were skipped.
-File writePredictions(CsvData csv, List<int> rows, Matrix p, String path) {
+File writePredictions(CsvData table, List<int> rows, Matrix p, String path) {
   final at = {for (var i = 0; i < rows.length; i++) rows[i]: i};
+  String cell(String c) =>
+      c.contains(RegExp('[,"\n]')) ? '"${c.replaceAll('"', '""')}"' : c;
   final b = StringBuffer()
-    ..writeln([...csv.header, ...outputColumns].join(','));
-  for (var r = 0; r < csv.rows.length; r++) {
+    ..writeln([...table.header, ...outputColumns].map(cell).join(','));
+  for (var r = 0; r < table.rows.length; r++) {
     final i = at[r];
     b.writeln([
-      ...csv.rows[r],
+      ...table.rows[r].map(cell),
       for (var j = 0; j < p.cols; j++) i == null ? '' : '${p.at(i, j)}',
     ].join(','));
   }
@@ -387,17 +475,41 @@ File writePredictions(CsvData csv, List<int> rows, Matrix p, String path) {
 }''';
 }
 
+/// The name of [d]'s training function in Python scripts.
+String pyDeepTrainFunction(DocDeep d) => 'train_deep_${pyIdentifier(d.id)}';
+
+/// Python for [deep] networks in a script with the data helpers (`number`,
+/// `Transforms`, `LAYOUT`): the shared helpers, then per network a spec
+/// dict, `build_deep_<id>()` and `train_deep_<id>(table)`, which returns
+/// the table with the prediction columns appended (trained as hgf.dart's
+/// `DeepTraining` trains it).
+String pyDeepFunctions(List<DocDeep> deep) {
+  final b = StringBuffer()..write(DeepPythonExport._helpers);
+  for (final d in deep) {
+    b
+      ..writeln()
+      ..writeln()
+      ..writeln()
+      ..write(DeepPythonExport(d)._functions());
+  }
+  return b.toString();
+}
+
 /// A Python script for one deep network of a model document, with
 /// pyhgf's `DeepNetwork` (JAX, float64): the same steps as
-/// [DeepDartExport]'s script. hgf.dart's corrections to pyhgf
-/// (`DeepFixes`) have no pyhgf equivalent and are flagged; seeded weight
-/// initialisers draw different numbers in JAX.
+/// [DeepDartExport]'s script, the CSV read through the same pipeline.
+/// hgf.dart's corrections to pyhgf (`DeepFixes`) have no pyhgf equivalent
+/// and are flagged; seeded weight initialisers draw different numbers in
+/// JAX, and NumPy shuffles in another order.
 final class DeepPythonExport {
-  DeepPythonExport(this.deep, {this.title, this.dataFile});
+  DeepPythonExport(this.deep, {this.title, this.dataFile, this.layout});
 
   final DocDeep deep;
   final String? title;
   final String? dataFile;
+
+  /// The data pipeline (see [DeepDartExport.layout]).
+  final DataLayout? layout;
 
   String _coupling(String text, {required bool layer}) {
     final c = parseCoupling(text);
@@ -409,7 +521,7 @@ final class DeepPythonExport {
 
   String _bool(bool v) => v ? 'True' : 'False';
 
-  /// `build_network()`'s body.
+  /// `build_deep_<id>()`'s body.
   String network() {
     final s = deep.settings, d = const DocDeepSettings();
     final args = [
@@ -488,70 +600,32 @@ final class DeepPythonExport {
       '"${s.replaceAll(r'\', r'\\').replaceAll('"', r'\"')}"';
   String _list(List<String> v) => '[${v.map(_str).join(', ')}]';
 
-  String script() {
+  String get _id => pyIdentifier(deep.id);
+
+  /// `DEEP_<ID>`, `build_deep_<id>()` and `train_deep_<id>(table)`.
+  String _functions() {
     final d = deep, t = d.training;
     final cont = d.isContinuous;
+    final spec = 'DEEP_${_id.toUpperCase()}';
     final b = StringBuffer()
+      ..writeln('# Deep network "${d.label}": the columns it reads and writes.')
+      ..writeln('$spec = dict(')
+      ..writeln('    id=${_str(d.id)},')
+      ..writeln('    features=${_list(d.features)},')
+      ..writeln('    targets=${_list(d.targets)},')
       ..writeln(
-        '"""${title ?? 'Deep network "${d.label}"'}, exported from hgf.dart.',
+        '    categories=${d.categories == null ? 'None' : _list(d.categories!)},',
       )
-      ..writeln()
+      ..writeln('    outputs=${_list(deepPredictionColumns(d))},')
       ..writeln(
-        'Run it with pyhgf installed (https://github.com/ComputationalPsychiatry/pyhgf):',
+        t.trainOn == null || cont
+            ? '    train_on=None,'
+            : '    train_on=lambda t: ${pyDataExpr(t.trainOn!)},  # ${t.trainOn}',
       )
-      ..writeln()
-      ..writeln(
-        dataFile == null
-            ? '    python <this file> data.csv'
-            : '    python <this file> [data.csv]   (default: $dataFile)',
-      )
-      ..writeln()
-      ..write(_summary(d, ''))
-      ..writeln()
-      ..writeln(
-        'To read your data another way, replace read_data(); the network is',
-      )
-      ..writeln('build_network().');
-    if (!cont && t.init.strategy != null) {
-      b
-        ..writeln()
-        ..writeln(
-          'The initial weights (${t.init.pyhgfName}, seed ${t.seed}) are drawn by JAX, so they',
-        )
-        ..writeln("differ from hgf.dart's, and so does the trained network.");
-    }
-    if (!cont && t.shuffle) {
-      b.writeln(
-        'Rows are shuffled with NumPy, in another order than hgf.dart uses.',
-      );
-    }
-    b
-      ..writeln('"""')
-      ..writeln()
-      ..writeln('import csv')
-      ..writeln('import sys')
-      ..writeln('from functools import partial  # noqa: F401 (couplings)')
-      ..writeln()
-      ..writeln('import jax')
-      ..writeln()
-      ..writeln('jax.config.update("jax_enable_x64", True)')
-      ..writeln()
-      ..writeln('import jax.numpy as jnp  # noqa: E402, F401 (couplings)')
-      ..writeln('import numpy as np  # noqa: E402');
-    if (!cont) b.writeln('import optax  # noqa: E402');
-    b
-      ..writeln('from pyhgf.model import DeepNetwork  # noqa: E402')
-      ..writeln()
-      ..writeln('NETWORK_ID = ${_str(d.id)}')
-      ..writeln('FEATURES = ${_list(d.features)}')
-      ..writeln('TARGETS = ${_list(d.targets)}')
-      ..writeln(
-        'CATEGORIES = ${d.categories == null ? 'None' : _list(d.categories!)}',
-      )
-      ..writeln('OUTPUT_COLUMNS = ${_list(deepPredictionColumns(d))}')
+      ..writeln(')')
       ..writeln()
       ..writeln()
-      ..writeln('def build_network():')
+      ..writeln('def build_deep_$_id():')
       ..writeln(
         '    """The network, built from the target layer (layer 0) up to the',
       )
@@ -559,30 +633,42 @@ final class DeepPythonExport {
       ..writeln(network())
       ..writeln()
       ..writeln()
-      ..write(pyCsvReader)
-      ..writeln(_readData)
-      ..writeln()
-      ..writeln()
-      ..writeln(_writePredictions)
-      ..writeln()
-      ..writeln()
-      ..writeln('def main(path):')
-      ..writeln('    with open(path, encoding="utf-8") as f:')
-      ..writeln('        table = parse_csv(f.read())')
-      ..writeln('    x, y, rows = read_data(table)')
-      ..writeln('    net = build_network()');
+      ..writeln('def ${pyDeepTrainFunction(d)}(table):')
+      ..writeln(
+        '    """The table with the network\'s predictions appended '
+        '(${cont ? 'filtered' : 'trained'} as',
+      )
+      ..writeln('    hgf.dart does)."""')
+      ..writeln('    x, y, rows, train, who = read_deep(table, $spec)');
     if (cont) {
       b
-        ..writeln('    net.input_data(y)')
-        ..writeln('    p = np.asarray(net.predictions).reshape(len(rows), -1)');
+        ..writeln(
+          '    # Each participant on its own, with a fresh network, in order.',
+        )
+        ..writeln('    p = np.zeros(y.shape)')
+        ..writeln('    for pid in dict.fromkeys(who):')
+        ..writeln('        idx = [i for i, w in enumerate(who) if w == pid]')
+        ..writeln('        net = build_deep_$_id()')
+        ..writeln('        net.input_data(y[idx])')
+        ..writeln(
+          '        p[idx] = np.asarray(net.predictions).reshape(len(idx), -1)',
+        );
     } else {
+      b
+        ..writeln('    tr = np.flatnonzero(train)')
+        ..writeln('    if len(tr) == 0:')
+        ..writeln(
+          "        raise ValueError(f'Deep network \"{$spec[\"id\"]}\" has no rows to train on')",
+        );
       if (t.standardise) {
         b
-          ..writeln('    mean = x.mean(axis=0)')
-          ..writeln('    sd = x.std(axis=0)')
+          ..writeln("    # Standardised with the training rows' means and sds.")
+          ..writeln('    mean = x[tr].mean(axis=0)')
+          ..writeln('    sd = x[tr].std(axis=0)')
           ..writeln('    sd = np.where(sd > 1e-12, sd, 1.0)')
           ..writeln('    x = (x - mean) / sd');
       }
+      b.writeln('    net = build_deep_$_id()');
       if (t.init.strategy != null) {
         b.writeln(
           '    net = net.weight_initialisation("${t.init.pyhgfName}", '
@@ -605,12 +691,12 @@ final class DeepPythonExport {
       b.writeln('    for epoch in range(1, ${t.epochs + 1}):');
       b.writeln(
         t.shuffle
-            ? '        order = np.random.default_rng(epoch).permutation(len(x))'
-            : '        order = np.arange(len(x))',
+            ? '        order = tr[np.random.default_rng(epoch).permutation(len(tr))]'
+            : '        order = tr',
       );
       if (t.batchSize case final n?) {
         b
-          ..writeln('        for s in range(0, len(x), $n):')
+          ..writeln('        for s in range(0, len(order), $n):')
           ..writeln('            batch = order[s : s + $n]')
           ..writeln(
             '            net = net.batch_update(x[batch], y[batch], $learn)',
@@ -618,28 +704,103 @@ final class DeepPythonExport {
       } else {
         b.writeln('        net = net.fit(x[order], y[order], $learn)');
       }
-      b.writeln('    p = np.asarray(net.predict(x))');
-      if (d.targetLayer!.kind == LayerKind.volatile) {
-        b
-          ..writeln(
-            '    r2 = 1 - ((p - y) ** 2).sum() / ((y - y.mean()) ** 2).sum()',
-          )
-          ..writeln('    print(f"R² on the training rows: {r2:.4f}")');
-      } else {
-        b
-          ..writeln(
-            '    labels = (y[:, 0] > 0.5) if y.shape[1] == 1 else y.argmax(axis=1)',
-          )
-          ..writeln(
-            '    guess = (p[:, 0] > 0.5) if p.shape[1] == 1 else p.argmax(axis=1)',
-          )
-          ..writeln(
-            '    print(f"accuracy on the training rows: {(labels == guess).mean():.4f}")',
-          );
-      }
+      b
+        ..writeln('    p = np.asarray(net.predict(x))')
+        ..writeln(
+          '    print_deep_scores($spec["id"], p, y, train, '
+          '${d.targetLayer!.kind == LayerKind.volatile ? 'True' : 'False'})',
+        );
+    }
+    b.write('    return append_columns(table, rows, p, $spec["outputs"])');
+    return b.toString();
+  }
+
+  String script() {
+    final d = deep, t = d.training;
+    final cont = d.isContinuous;
+    final pipeline = _pipelineOf(layout);
+    final b = StringBuffer()
+      ..writeln(
+        '"""${title ?? 'Deep network "${d.label}"'}, exported from hgf.dart.',
+      )
+      ..writeln()
+      ..writeln(
+        'Run it with pyhgf installed (https://github.com/ComputationalPsychiatry/pyhgf):',
+      )
+      ..writeln()
+      ..writeln(
+        dataFile == null
+            ? '    python <this file> data.csv'
+            : '    python <this file> [data.csv]   (default: $dataFile)',
+      )
+      ..writeln()
+      ..write(_summary(d, layout, ''))
+      ..writeln()
+      ..writeln(
+        'The network is build_deep_$_id(); the CSV is read through '
+        'transform(table).',
+      );
+    if (!cont && t.init.strategy != null) {
+      b
+        ..writeln()
+        ..writeln(
+          'The initial weights (${t.init.pyhgfName}, seed ${t.seed}) are drawn by JAX, so they',
+        )
+        ..writeln("differ from hgf.dart's, and so does the trained network.");
+    }
+    if (!cont && t.shuffle) {
+      b.writeln(
+        'Rows are shuffled with NumPy, in another order than hgf.dart uses.',
+      );
     }
     b
-      ..writeln('    print("wrote", write_predictions(table, rows, p, path))')
+      ..writeln('"""')
+      ..writeln()
+      ..writeln('import csv')
+      ..writeln('import math  # noqa: F401')
+      ..writeln('import re  # noqa: F401')
+      ..writeln('import sys')
+      ..writeln('from functools import partial  # noqa: F401 (couplings)')
+      ..writeln()
+      ..writeln('import jax')
+      ..writeln()
+      ..writeln('jax.config.update("jax_enable_x64", True)')
+      ..writeln()
+      ..writeln('import jax.numpy as jnp  # noqa: E402, F401 (couplings)')
+      ..writeln('import numpy as np  # noqa: E402')
+      ..writeln('import optax  # noqa: E402, F401')
+      ..writeln('from pyhgf.model import DeepNetwork  # noqa: E402')
+      ..writeln()
+      ..writeln()
+      ..write(pyDataPipeline(pipeline))
+      ..writeln()
+      ..writeln();
+    if (pipeline.deep.isEmpty) {
+      b
+        ..write(_helpers)
+        ..writeln()
+        ..writeln()
+        ..writeln();
+    }
+    b
+      ..writeln(_functions())
+      ..writeln()
+      ..writeln()
+      ..writeln(_writeTable)
+      ..writeln()
+      ..writeln()
+      ..writeln('def main(path):')
+      ..writeln('    with open(path, encoding="utf-8") as f:')
+      ..writeln('        table = parse_csv(f.read())')
+      ..writeln('    table = transform(table)')
+      ..writeln('    table = ${pyDeepTrainFunction(d)}(table)')
+      ..writeln(
+        '    stem = path.rsplit(".", 1)[0] if "." in path.rsplit("/", 1)[-1] '
+        'else path',
+      )
+      ..writeln('    out = f"{stem}_${d.id}.csv"')
+      ..writeln('    write_table(table, out)')
+      ..writeln('    print("wrote", out)')
       ..writeln()
       ..writeln()
       ..writeln('if __name__ == "__main__":')
@@ -651,31 +812,37 @@ final class DeepPythonExport {
     return b.toString();
   }
 
-  static const _readData = r'''
-
-def read_data(table):
-    """The rows that hold every column the network reads (their indices),
-    the features as x and the targets as y (one-hot over CATEGORIES for a
-    label column)."""
+  static const _helpers = r'''
+def read_deep(table, spec):
+    """What a deep network reads (as hgf.dart's DeepData): the rows that hold
+    every column it reads (their indices), the features x and the targets y
+    (one-hot over the categories for a label column), whether each row is a
+    training row, and each row's participant."""
     header = table["header"]
 
     def column(name):
         if name not in header:
-            raise ValueError(f'The CSV has no column "{name}"')
+            raise ValueError(f'Deep network "{spec["id"]}" reads "{name}", which is not a column')
         return header.index(name)
 
-    fx = [column(c) for c in FEATURES]
-    fy = [column(c) for c in TARGETS]
-    xs, ys, rows = [], [], []
+    fx = [column(c) for c in spec["features"]]
+    fy = [column(c) for c in spec["targets"]]
+    cats = spec["categories"]
+    on = None
+    if spec["train_on"] is not None:
+        on = spec["train_on"](Transforms(table, LAYOUT["participant"], LAYOUT["group"], LAYOUT["time"])).v
+    p = LAYOUT["participant"]
+    pc = header.index(p) if p is not None and p in header else None
+    xs, ys, rows, train, who = [], [], [], [], []
     for r, row in enumerate(table["rows"]):
         x = [number(table, row[c]) for c in fx]
         if any(v is None or not np.isfinite(v) for v in x):
             continue
-        if CATEGORIES is not None:
+        if cats is not None:
             label = row[fy[0]].strip()
-            if label not in CATEGORIES:
+            if label not in cats:
                 continue
-            y = [1.0 if c == label else 0.0 for c in CATEGORIES]
+            y = [1.0 if c == label else 0.0 for c in cats]
         else:
             y = [number(table, row[c]) for c in fy]
             if any(v is None or not np.isfinite(v) for v in y):
@@ -683,25 +850,51 @@ def read_data(table):
         xs.append(x)
         ys.append(y)
         rows.append(r)
-    width = len(CATEGORIES) if CATEGORIES is not None else len(TARGETS)
+        train.append(on is None or (not np.isnan(on[r]) and on[r] != 0))
+        who.append("" if pc is None else row[pc].strip())
+    width = len(cats) if cats is not None else len(fy)
     return (
-        np.asarray(xs, dtype=np.float64).reshape(len(rows), len(FEATURES)),
+        np.asarray(xs, dtype=np.float64).reshape(len(rows), len(fx)),
         np.asarray(ys, dtype=np.float64).reshape(len(rows), width),
         rows,
-    )''';
+        np.asarray(train, dtype=bool),
+        who,
+    )
 
-  static const _writePredictions = r'''
-def write_predictions(table, rows, p, path):
-    """The data with OUTPUT_COLUMNS appended: p's row for each of rows,
-    empty for the rows that were skipped."""
+
+def print_deep_scores(name, p, y, train, regression):
+    """R² or accuracy on the training rows and on the held-out ones."""
+    for label, mask in (("training", train), ("held-out", ~train)):
+        if not mask.any():
+            continue
+        pm, ym = p[mask], y[mask]
+        if regression:
+            score = 1 - ((pm - ym) ** 2).sum() / ((ym - ym.mean()) ** 2).sum()
+            print(f"{name}: R² on the {label} rows: {score:.4f}")
+        else:
+            labels = (ym[:, 0] > 0.5) if ym.shape[1] == 1 else ym.argmax(axis=1)
+            guess = (pm[:, 0] > 0.5) if pm.shape[1] == 1 else pm.argmax(axis=1)
+            print(f"{name}: accuracy on the {label} rows: {(labels == guess).mean():.4f}")
+
+
+def append_columns(table, rows, p, names):
+    """The table with the columns names appended: p's row for each of rows,
+    empty for the rows the network skipped."""
+    for n in names:
+        if n in table["header"]:
+            raise ValueError(f'The data already has a column "{n}"')
     at = {r: i for i, r in enumerate(rows)}
-    stem = path.rsplit(".", 1)[0] if "." in path.rsplit("/", 1)[-1] else path
-    out = f"{stem}_{NETWORK_ID}.csv"
-    with open(out, "w", encoding="utf-8", newline="") as f:
+    out = [
+        row + ([repr(float(v)) for v in p[at[r]]] if r in at else [""] * len(names))
+        for r, row in enumerate(table["rows"])
+    ]
+    return {**table, "header": table["header"] + list(names), "rows": out}''';
+
+  static const _writeTable = r'''
+def write_table(table, path):
+    """The table as CSV."""
+    with open(path, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, lineterminator="\n")
-        w.writerow(table["header"] + OUTPUT_COLUMNS)
-        for r, row in enumerate(table["rows"]):
-            i = at.get(r)
-            w.writerow(row + (["" for _ in OUTPUT_COLUMNS] if i is None else [repr(float(v)) for v in p[i]]))
-    return out''';
+        w.writerow(table["header"])
+        w.writerows(table["rows"])''';
 }

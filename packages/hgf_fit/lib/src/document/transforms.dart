@@ -1,9 +1,12 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:hgf/hgf.dart';
 
 import 'clock.dart';
+import 'deep_document.dart';
+import 'deep_training.dart';
 import 'steps.dart';
 
 /// A data transform: a new column [name], computed from the data's columns
@@ -577,6 +580,113 @@ final class TransformCache {
     _memoKey = key;
     _memo = v;
     return v;
+  }
+
+  /// Whether [DataLayout.transform] trains a deep network it has no
+  /// result for (at once), or leaves its columns empty and lists it in
+  /// [pendingDeep] (the builder trains in the background, then
+  /// [putDeep]s the result).
+  bool trainDeep = true;
+
+  final _deepResults = <String, DeepResult>{};
+
+  /// The deep networks the last [withDeep] had no result for, with the
+  /// table each reads and its key ([DeepTraining.keyOf]).
+  List<({DocDeep deep, CsvData table, String key})> pendingDeep = const [];
+
+  /// The trained deep networks the last [withDeep] used, by id.
+  Map<String, DeepResult> usedDeep = const {};
+
+  /// A trained deep network, used from now on wherever its key matches.
+  void putDeep(DeepResult r) {
+    _deepResults[r.key] = r;
+    _deepSlots.clear();
+  }
+
+  /// The result for [key], if trained.
+  DeepResult? deepResult(String key) => _deepResults[key];
+
+  /// The last few [withDeep] calls, by what they appended.
+  final _deepSlots =
+      <
+        String,
+        ({
+          CsvData from,
+          CsvData out,
+          List<({DocDeep deep, CsvData table, String key})> pending,
+          Map<String, DeepResult> used,
+        })
+      >{};
+
+  /// [table] with each of [deep]'s prediction columns appended, in order
+  /// (see [DataLayout.transform]); made again only when the table or the
+  /// networks changed, or a result came. Sets [pendingDeep] and
+  /// [usedDeep].
+  CsvData withDeep(CsvData table, List<DocDeep> deep, StepScope scope) {
+    final docKey = jsonEncode([
+      for (final d in deep) d.toJson(),
+      scope.participantColumn,
+      scope.groupColumn,
+      scope.timeColumn,
+    ]);
+    if (_deepSlots[docKey] case final slot? when identical(slot.from, table)) {
+      pendingDeep = slot.pending;
+      usedDeep = slot.used;
+      return slot.out;
+    }
+    final pending = <({DocDeep deep, CsvData table, String key})>[];
+    final used = <String, DeepResult>{};
+    var out = table;
+    for (final d in deep) {
+      final key = DeepTraining.keyOf(d, out, scope: scope);
+      var r = _deepResults[key];
+      if (r == null && trainDeep) {
+        r = DeepTraining.run(d, out, scope: scope);
+        _deepResults[key] = r;
+      }
+      if (r != null) {
+        used[d.id] = r;
+        out = r.appendTo(out);
+      } else {
+        pending.add((deep: d, table: out, key: key));
+        out = _emptyColumns(out, deepPredictionColumns(d));
+      }
+    }
+    // Keep the results in use and a few recent others (undo, redo).
+    final inUse = {
+      for (final s in _deepSlots.values) ...s.used.values,
+      ...used.values,
+    };
+    final spare = [
+      for (final MapEntry(:key, value: r) in _deepResults.entries)
+        if (!inUse.any((u) => identical(u, r))) key,
+    ];
+    for (final k in spare.take(math.max(0, spare.length - 6))) {
+      _deepResults.remove(k);
+    }
+    pendingDeep = pending;
+    usedDeep = used;
+    _deepSlots.remove(docKey);
+    _deepSlots[docKey] = (from: table, out: out, pending: pending, used: used);
+    while (_deepSlots.length > 4) {
+      _deepSlots.remove(_deepSlots.keys.first);
+    }
+    return out;
+  }
+
+  static CsvData _emptyColumns(CsvData t, List<String> names) {
+    for (final n in names) {
+      if (t.header.contains(n)) {
+        throw FormatException('The data already has a column "$n"');
+      }
+    }
+    return CsvData(
+      [...t.header, ...names],
+      [
+        for (final row in t.rows) [...row, for (final _ in names) ''],
+      ],
+      decimalComma: t.decimalComma,
+    );
   }
 
   /// How many transforms the last [apply] computed (the rest were reused);

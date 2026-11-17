@@ -5,6 +5,8 @@ import 'package:hgf/hgf.dart';
 
 import '../model.dart';
 import 'clock.dart';
+import 'deep_document.dart';
+import 'deep_training.dart';
 import 'steps.dart';
 import 'transforms.dart';
 
@@ -63,7 +65,9 @@ final class DataLayout {
     this.clock,
     List<DocStep> steps = const [],
     List<DocTransform> transforms = const [],
+    List<DocDeep> deep = const [],
   }) : inputs = List.unmodifiable(inputs),
+       deep = List.unmodifiable(deep),
        steps = List.unmodifiable(steps),
        responseColumns = List.unmodifiable(responseColumns),
        options = options == null ? null : List.unmodifiable(options),
@@ -88,6 +92,11 @@ final class DataLayout {
   /// The data-pipeline steps, after the [clock] and before the
   /// [transforms].
   final List<DocStep> steps;
+
+  /// Deep networks trained on the table after the [transforms], in order;
+  /// each appends its prediction columns (see [deepPredictionColumns]),
+  /// which the inputs and the later networks may read.
+  final List<DocDeep> deep;
 
   /// Where the [steps] run.
   StepScope get scope => (
@@ -155,10 +164,24 @@ final class DataLayout {
   /// [csv] on the [clock]'s grid, through the [steps], with the
   /// [transforms]' columns appended; a [cache] reuses what it can of the
   /// last call's work.
+  ///
+  /// Then the [deep] networks append their predictions: trained here
+  /// (once per cache while what they read stays the same), or, when the
+  /// [cache] does not train ([TransformCache.trainDeep]), taken from it,
+  /// empty until it has them.
   CsvData transform(CsvData csv, {TransformCache? cache}) {
     final grid = prepared(csv, cache: cache);
+    final CsvData t;
     if (cache != null) {
-      return cache.apply(
+      t = cache.apply(
+        grid,
+        transforms,
+        participantColumn: participantColumn,
+        groupColumn: groupColumn,
+        timeColumn: timeColumn,
+      );
+    } else {
+      t = applyTransforms(
         grid,
         transforms,
         participantColumn: participantColumn,
@@ -166,13 +189,13 @@ final class DataLayout {
         timeColumn: timeColumn,
       );
     }
-    return applyTransforms(
-      grid,
-      transforms,
-      participantColumn: participantColumn,
-      groupColumn: groupColumn,
-      timeColumn: timeColumn,
-    );
+    if (deep.isEmpty) return t;
+    if (cache != null) return cache.withDeep(t, deep, scope);
+    var out = t;
+    for (final d in deep) {
+      out = DeepTraining.run(d, out, scope: scope).appendTo(out);
+    }
+    return out;
   }
 
   /// The rows of each participant of [csv], in order of first appearance

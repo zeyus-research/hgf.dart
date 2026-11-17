@@ -169,9 +169,12 @@ class BuilderModel extends ChangeNotifier {
     }
     if (part.startsWith('deep:')) {
       final i = _model.deep.indexWhere((d) => DocPart.deep(d.id) == part);
-      // Below the HGF network's card, or in its place.
-      final top = _model.hasNetwork ? 80.0 + _model.inputs.length * 22.0 : 0.0;
-      return Offset(560, top + i * 200.0);
+      // Between the data and the HGF network (its inputs may read the
+      // predictions), under the transforms.
+      final top = _model.transforms.isEmpty
+          ? 0.0
+          : _model.transforms.length * 90.0 + 20;
+      return Offset(280, top + i * 220.0);
     }
     if (part == DocPart.response) return const Offset(840, 0);
     if (part == DocPart.fit) return const Offset(1120, 0);
@@ -1228,6 +1231,228 @@ class BuilderModel extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------------------
+  // Deep networks: trained on the loaded data, in the background
+  // ---------------------------------------------------------------------------
+
+  /// How long an edit may train deep networks before the preview shows
+  /// (small ones then finish at once); the rest trains between frames.
+  int deepBudgetMs = 15;
+
+  /// Trainings under way, by [DeepTraining.key].
+  final _deepRuns = <String, DeepTraining>{};
+  Map<String, DeepTraining> _deepRunById = const {};
+  Map<String, DeepResult> _deepDone = const {};
+  Map<String, String> _deepErrors = const {};
+  Set<String> _deepWaiting = const {};
+  bool _pumping = false, _disposed = false;
+
+  /// Deep network [id] trained on the loaded data (as the exports train
+  /// it), once it is.
+  DeepResult? deepResult(String id) => _deepDone[id];
+
+  /// Deep network [id]'s training, while it runs.
+  DeepTraining? deepRun(String id) => _deepRunById[id];
+
+  /// Why deep network [id] could not be trained.
+  String? deepError(String id) => _deepErrors[id];
+
+  /// Whether deep network [id] waits for another's predictions.
+  bool deepWaiting(String id) => _deepWaiting.contains(id);
+
+  /// Deep network [id]'s training in a few words (its card and panel).
+  String deepStatus(String id) {
+    final d = _model.deepById(id);
+    if (d == null) return '';
+    if (csv == null) return 'load data to train';
+    if (_deepErrors[id] case final e?) return e;
+    if (_deepRunById[id] case final r?) {
+      final pct = (r.progress * 100).floor();
+      return d.isContinuous
+          ? 'filtering… $pct%'
+          : 'training… $pct% · pass ${math.max(1, r.epoch)} of '
+                '${d.training.epochs}';
+    }
+    if (_deepWaiting.contains(id)) return 'waiting for the networks it reads';
+    final r = _deepDone[id];
+    if (r == null) {
+      return partIssues[DocPart.deep(id)] == IssueSeverity.error
+          ? 'fix the errors to train'
+          : 'bind its columns to train';
+    }
+    if (d.isContinuous) return 'filtered ${r.data.length} rows';
+    String f(DeepScore s) =>
+        '${s.name} ${s.value.toStringAsFixed(s.name == 'R²' ? 3 : 2)}';
+    return [
+      'trained on ${r.data.trainIndices.length} rows',
+      if (r.trainScore case final s?) f(s),
+      if (r.testScore case final s?) 'held out ${f(s)}',
+    ].join(' · ');
+  }
+
+  /// Every deep network's prediction columns, in document order (the HGF
+  /// inputs and later deep networks may read them).
+  List<String> get deepColumns => [
+    for (final d in _model.deep)
+      if (d.layers.isNotEmpty) ...deepPredictionColumns(d),
+  ];
+
+  /// The deep networks whose predictions the preview still waits for.
+  List<String> get deepPending => [
+    for (final d in compiled?.layout.deep ?? const <DocDeep>[])
+      if (!_deepDone.containsKey(d.id)) d.label,
+  ];
+
+  /// Starts (or keeps) the training of every deep network that can train
+  /// on the loaded data, and trains for up to [budget] ms at once; returns
+  /// whether a network finished (its predictions are new columns).
+  bool _syncDeep({int budget = 0}) {
+    final data = csv;
+    if (data == null || _model.deep.isEmpty) {
+      _deepRuns.clear();
+      _deepRunById = const {};
+      _deepDone = const {};
+      _deepErrors = const {};
+      _deepWaiting = const {};
+      return false;
+    }
+    final errors = <String, String>{};
+    final ok = <DocDeep>[];
+    for (final d in _model.deep) {
+      final part = DocPart.deep(d.id);
+      final bad = issues.where((i) => i.isError && i.parts.contains(part));
+      if (bad.isNotEmpty) continue;
+      if (d.layers.length < 2 ||
+          d.targets.isEmpty ||
+          (!d.isContinuous && d.features.isEmpty)) {
+        continue;
+      }
+      ok.add(d);
+    }
+    final dd = _model.data;
+    final layout = DataLayout(
+      inputs: const [],
+      participantColumn: dd.participantColumn,
+      timeColumn: dd.timeColumn,
+      timeStepColumn: dd.timeStepColumn,
+      groupColumn: dd.groupColumn,
+      clock: dd.clock,
+      steps: dd.steps,
+      transforms: _model.transforms,
+      deep: ok,
+    );
+    try {
+      layout.transform(data, cache: _dataCache);
+    } on Object catch (e) {
+      final m = e is FormatException ? e.message : '$e';
+      _deepErrors = {for (final d in ok) d.id: m};
+      _deepRuns.clear();
+      _deepRunById = const {};
+      _deepWaiting = const {};
+      return false;
+    }
+    _deepDone = {..._dataCache.usedDeep};
+    final notReady = <String>{};
+    final runs = <String, DeepTraining>{};
+    final byId = <String, DeepTraining>{};
+    final waiting = <String>{};
+    for (final p in _dataCache.pendingDeep) {
+      final d = p.deep;
+      final reads = {
+        ...d.features,
+        ...d.targets,
+        ...?d.training.trainOn?.variables,
+      };
+      final outs = deepPredictionColumns(d);
+      notReady.addAll(outs);
+      if (reads.any(notReady.contains)) {
+        waiting.add(d.id);
+        continue;
+      }
+      var run = _deepRuns[p.key];
+      if (run == null) {
+        try {
+          run = DeepTraining(d, p.table, scope: layout.scope);
+        } on Object catch (e) {
+          errors[d.id] = e is FormatException ? e.message : '$e';
+          continue;
+        }
+      }
+      runs[p.key] = run;
+      byId[d.id] = run;
+    }
+    if (!_model.hasNetwork) {
+      // The preview bar's participants: those the deep networks read.
+      participants = {
+        for (final r in _deepDone.values) ...r.data.participants,
+        for (final r in byId.values) ...r.data.participants,
+      }.where((p) => p.isNotEmpty).toList();
+    }
+    _deepRuns
+      ..clear()
+      ..addAll(runs);
+    _deepRunById = byId;
+    _deepErrors = errors;
+    _deepWaiting = waiting;
+    if (runs.isEmpty) return false;
+    final finished = _train(budget);
+    if (_deepRuns.isNotEmpty) _pump();
+    return finished;
+  }
+
+  /// Trains the runs for up to [ms] milliseconds; whether one finished.
+  bool _train(int ms) {
+    if (ms <= 0) return false;
+    final sw = Stopwatch()..start();
+    var finished = false;
+    for (final run in [..._deepRuns.values]) {
+      try {
+        while (sw.elapsedMilliseconds < ms && !run.advance(64)) {}
+      } on Object catch (e) {
+        _deepErrors = {..._deepErrors, run.deep.id: '$e'};
+        _deepRuns.remove(run.key);
+        _deepRunById = {
+          for (final MapEntry(:key, :value) in _deepRunById.entries)
+            if (key != run.deep.id) key: value,
+        };
+        continue;
+      }
+      if (run.isDone) {
+        _dataCache.putDeep(run.result!);
+        _deepRuns.remove(run.key);
+        finished = true;
+      }
+      if (sw.elapsedMilliseconds >= ms) break;
+    }
+    return finished;
+  }
+
+  /// Trains in slices between frames until every run is done; a network
+  /// that finishes refreshes the preview (its predictions are columns).
+  Future<void> _pump() async {
+    if (_pumping) return;
+    _pumping = true;
+    try {
+      while (!_disposed && _deepRuns.isNotEmpty) {
+        await Future<void>.delayed(const Duration(milliseconds: 4));
+        if (_disposed || _deepRuns.isEmpty) break;
+        if (_train(12)) {
+          _refreshNow();
+        } else {
+          notifyListeners();
+        }
+      }
+    } finally {
+      _pumping = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
+  // ---------------------------------------------------------------------------
   // Checks and preview
   // ---------------------------------------------------------------------------
 
@@ -1462,7 +1687,7 @@ class BuilderModel extends ChangeNotifier {
   /// The loaded data's grid, transforms and subjects, kept between edits
   /// that don't change them (a full session takes seconds to put on the
   /// clock and transform).
-  final _dataCache = TransformCache();
+  final _dataCache = TransformCache()..trainDeep = false;
 
   /// The loaded data on [c]'s clock (see `DocClock`); the data itself
   /// without a clock; null for simulated data.
@@ -1643,6 +1868,22 @@ class BuilderModel extends ChangeNotifier {
 
   void _refreshNow() {
     final sw = Stopwatch()..start();
+    _refreshBody();
+    // Deep networks: small ones finish at once (then the preview reads
+    // their predictions); the rest train in the background.
+    for (
+      var round = 0;
+      _syncDeep(budget: round < 3 ? deepBudgetMs : 0);
+      round++
+    ) {
+      _refreshBody();
+    }
+    previewMicros = sw.elapsedMicroseconds;
+    revision++;
+    notifyListeners();
+  }
+
+  void _refreshBody() {
     network = null;
     trajectories = null;
     previewError = null;
@@ -1655,10 +1896,10 @@ class BuilderModel extends ChangeNotifier {
     if (!_model.hasNetwork && _model.deep.isNotEmpty) {
       // Deep networks only: their checks, no HGF preview.
       found = checkModel(_model, columns: csv?.header);
-      previewError =
-          'The preview shows an HGF network\'s beliefs; this model has deep '
-          'networks only. Add an HGF network from the pipeline\'s menu, or '
-          'export the deep networks (File menu) to train them.';
+      previewError = csv == null
+          ? 'Load data to train the deep networks (Data panel), or export '
+                'them (File menu).'
+          : null;
     } else if (found.any((i) => i.isError)) {
       previewError = 'Fix the errors to see the preview.';
     } else {
@@ -1708,9 +1949,6 @@ class BuilderModel extends ChangeNotifier {
     nodeIssues = ni;
     edgeIssues = ei;
     partIssues = pi;
-    previewMicros = sw.elapsedMicroseconds;
-    revision++;
-    notifyListeners();
   }
 
   /// Filters the preview: the loaded data's participant through the

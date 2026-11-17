@@ -6,6 +6,7 @@ import '../document/model_document.dart' show DocGroup, DocPopulation;
 import '../document/steps.dart';
 import '../expr_readout.dart';
 import '../parameter.dart';
+import 'deep.dart' show pyDeepFunctions, pyDeepTrainFunction;
 import 'export_spec.dart';
 import 'expr_code.dart';
 import 'plan.dart';

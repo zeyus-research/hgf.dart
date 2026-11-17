@@ -2343,12 +2343,81 @@ fitting, export) reads it.
    done 2026-11-17, see "Deep networks in the builder" below. The
    data-pipeline nodes (decimate, segment by events, filter rows,
    standardise, split): done 2026-11-17, see "Data-pipeline steps" below.
-   Next: training deep networks in the builder (on the split's rows) and
-   wiring models together (a deep network's predictions as columns; the
-   deep exports reading the clock, steps and transforms).
+   Training deep networks in the builder (on the split's rows) and wiring
+   models together (a deep network's predictions as columns the HGF
+   inputs read; the exports reading the clock, steps and transforms):
+   done 2026-11-17, see "Deep training and wiring" below. Left: Julia
+   export; continuous layers' couplings and per-layer volatility children
+   in the inspector.
 
 In parallel (not blocking): vector node kinds on the GPU, a faster dp
 candidate search.
+
+#### Deep training and wiring (2026-11-17): done
+
+The pipeline is now data → clock → steps → transforms → **deep
+networks** → HGF network. A deep network trains on the table after the
+transforms and appends its predictions as columns, which the HGF
+network's inputs (and later deep networks) read like any other column.
+
+- **Training** (`hgf_fit/document/deep_training.dart`): `DeepData` reads
+  a network's rows (every column it reads present, labels one-hot), which
+  of them it trains on (`DocDeepTraining.trainOn`, an expression with the
+  transforms' data functions, e.g. `split == 'train'`; `null`: every
+  row) and each row's participant. `DeepTraining` builds the network,
+  initialises the weights (seeded), standardises the features on the
+  training rows, and trains for the passes (fit or minibatches, shuffled
+  by the pass number), then predicts every row it read; a continuous
+  network filters each participant afresh, in order. `advance(rows)` does
+  it a piece at a time (bit-identical to all at once; synaptic learning a
+  whole pass per call, as it keeps its importance within a `fit`).
+  `DeepResult`: the network, the standardiser, the predictions, the score
+  per pass, training and held-out scores (accuracy, or R²), and
+  `appendTo(table)`.
+- **Wiring:** `DataLayout.deep` (the compiled layout takes
+  `ModelDocument.deepFor(...)`: the networks whose columns the inputs,
+  observed flags or response read, and those they read in turn) runs
+  after the transforms. Without a cache it trains at once; a
+  `TransformCache` keeps results by `DeepTraining.keyOf` (the network's
+  JSON and a hash of the cells it reads, so unrelated edits don't
+  retrain) and, with `trainDeep = false` (the builder), leaves missing
+  predictions empty (unobserved inputs) and lists them in `pendingDeep`.
+  `checkModel`: a transform reading a prediction is an error (transforms
+  run first); a prediction column clashing with a data column is an
+  error; a deep network reading a later one's column is an error.
+  `simulateTogether` refuses inputs that read predictions.
+- **Exports:** a deep network's Dart and pyhgf scripts read the CSV
+  through `ModelDocument.deepPipeline(d)` (clock, steps, transforms and
+  the earlier deep networks it reads), train on the `trainOn` rows, print
+  training and held-out scores and write `<data>_<id>.csv` (the table
+  read, plus the predictions). The Dart script uses hgf_fit's
+  `DataLayout` and `DeepData` with an explicit training loop (equal to
+  `DeepTraining` to the last digit); the Python one gets
+  `pyDataPipeline` (the document export's `LAYOUT`, helpers and
+  `transform(table)`, now shared) and `train_deep_<id>(table)`. An HGF
+  document export trains the deep networks it reads inside
+  `transform(table)` (Python) or through `DataLayout(deep: [...])`
+  (Dart, `DocDeep.fromJson` literals). Tested on `deepDocument()` (events
+  on the clock, a split, transforms, a continuous filter feeding a
+  categorical classifier trained on the train rows, whose `p(left)` is
+  the HGF input): Dart scripts equal hgf_fit, pyhgf agrees to 1e-9 (deep
+  scripts and the HGF export's reader).
+- **Builder:** deep networks train on the loaded data as you edit: up to
+  `deepBudgetMs` (15 ms) per edit (small networks finish at once), the
+  rest in slices between frames, with the progress on the card and the
+  panel; a finished network refreshes the preview. Networks that read
+  another's predictions wait for it. A deep card shows its status (pass,
+  progress, training and held-out scores, or why it cannot train) and a
+  row per prediction column, to drag onto an HGF input (dropping one on
+  the background explains that transforms run first). The panel's
+  Training section has "Train on the rows where" (offering the split's
+  training part); continuous networks get a Filtering section. The
+  preview (`deep_preview.dart`) shows the network on the canvas, the
+  selected deep card, or a deep-only model's first: per target or
+  category, the participant's targets (training and held-out rows in two
+  colours) and the prediction, and the training score by pass. The HGF
+  preview says which predictions it still waits for. Exports from the
+  panel and the File menu read through the pipeline.
 
 #### Data-pipeline steps (2026-11-17): done
 
@@ -2399,8 +2468,8 @@ mate, …); each step works per participant.
   the preview running (segments at `diff(trial) != 0` when there is a
   trial / round / block column).
 - Left: the deep exports read the raw CSV (no clock, steps or
-  transforms), and deep training doesn't use the split yet: both go with
-  training in the builder.
+  transforms), and deep training doesn't use the split yet: both done
+  with training in the builder (see "Deep training and wiring").
 
 #### Deep networks in the builder (2026-11-17): done
 
@@ -2451,10 +2520,10 @@ A model document holds an HGF network, deep networks (pyhgf's
   training, Export Dart / pyhgf; per layer: name, size, target kind,
   activation (a name or an expression in `x`), volatility level, ω, bias,
   one-to-one. File menu: an export pair per deep network.
-- Left: training and a live preview in the builder (after the data
-  nodes), wiring a deep network's predictions into the HGF network,
-  continuous layers' couplings and per-layer volatility children in the
-  inspector, Julia.
+- Left: training and a live preview in the builder, and wiring a deep
+  network's predictions into the HGF network (both done, see "Deep
+  training and wiring"); continuous layers' couplings and per-layer
+  volatility children in the inspector, Julia.
 
 #### Model document (2026-11-16): done
 
@@ -3151,8 +3220,10 @@ builder; 2026-11-17), and the exports of every participant and the group
 level, Dart and pyhgf/PyMC, and relative bindings with team-mates
 simulated together, and events onto a shared clock, a BIDS loader and
 transform caching for whole sessions (2026-11-17), deep networks in the
-builder beside or instead of the HGF network, with Dart and pyhgf exports
-(2026-11-17); next the data-pipeline nodes. Vector node kinds on the GPU and a
+builder beside or instead of the HGF network, with Dart and pyhgf exports,
+the data-pipeline steps, and deep networks trained in the builder with their
+predictions wired into the HGF inputs (2026-11-17); next Julia export (after
+upstream settles) or the leftovers of item 8. Vector node kinds on the GPU and a
 faster dp candidate search can run alongside.
 
 ```sh
