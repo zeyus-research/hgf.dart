@@ -134,10 +134,11 @@ void main(List<String> args) {
   edited.subjects(grid, cache: cache);
   lap('cache: last transform edited (${cache.lastComputed} computed)');
   final first = ModelDocument.fromJson(
-    (doc.toJson()..['transforms'] = [
-          {'name': 'left_mates', 'expr': "mates_mean(press == 'right')"},
-          for (final t in doc.transforms.skip(1)) t.toJson(),
-        ]),
+    (doc.toJson()
+      ..['transforms'] = [
+        {'name': 'left_mates', 'expr': "mates_mean(press == 'right')"},
+        for (final t in doc.transforms.skip(1)) t.toJson(),
+      ]),
   ).compile();
   first.subjects(grid, cache: cache);
   lap('cache: first transform edited (${cache.lastComputed} computed)');
