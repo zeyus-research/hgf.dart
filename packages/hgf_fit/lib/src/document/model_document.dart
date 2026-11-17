@@ -1,3 +1,4 @@
+import 'deep_document.dart';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -459,8 +460,10 @@ final class ModelDocument {
     this.data = const DocData(),
     this.fit = const DocFit(),
     DocGroup? group,
+    List<DocDeep> deep = const [],
     Map<String, Object?> layout = const {},
   }) : group = group ?? DocGroup.empty,
+       deep = List.unmodifiable(deep),
        inputs = List.unmodifiable(inputs),
        parameters = List.unmodifiable(parameters),
        outputs = List.unmodifiable(outputs),
@@ -489,7 +492,23 @@ final class ModelDocument {
   /// The group level over participants: which parameters are pooled or
   /// shared (empty: each participant is fitted alone).
   final DocGroup group;
+
+  /// HGF neural networks (pyhgf's `DeepNetwork`), beside or instead of
+  /// the HGF [network].
+  final List<DocDeep> deep;
   final Map<String, Object?> layout;
+
+  /// Whether the document has an HGF network (a document may hold only
+  /// [deep] networks; its [network] then has no nodes).
+  bool get hasNetwork => network.nodes.isNotEmpty;
+
+  /// The deep network [id], or `null`.
+  DocDeep? deepById(String id) {
+    for (final d in deep) {
+      if (d.id == id) return d;
+    }
+    return null;
+  }
 
   /// A document for [network], with ids `n<index>` (or from [id]) and the
   /// input names the code exports' CSV uses: `observation` for a network
@@ -565,9 +584,10 @@ final class ModelDocument {
     return ModelDocument(
       name: json['name'] as String?,
       description: json['description'] as String?,
-      network: NetworkDocument.fromJson(
-        json['network'] as Map<String, Object?>,
-      ),
+      network: switch (json['network']) {
+        final Map<String, Object?> n => NetworkDocument.fromJson(n),
+        _ => NetworkDocument(nodes: const []),
+      },
       inputs: [
         for (final i in (json['inputs'] as List<Object?>?) ?? const [])
           DocInput.fromJson(i as Map<String, Object?>),
@@ -600,6 +620,10 @@ final class ModelDocument {
         final Map<String, Object?> g => DocGroup.fromJson(g),
         _ => null,
       },
+      deep: [
+        for (final d in (json['deep'] as List<Object?>?) ?? const [])
+          DocDeep.fromJson(d as Map<String, Object?>),
+      ],
       layout: (json['layout'] as Map<String, Object?>?) ?? const {},
     );
   }
@@ -608,7 +632,7 @@ final class ModelDocument {
     'format': format,
     'name': ?name,
     'description': ?description,
-    'network': network.toJson(),
+    if (hasNetwork) 'network': network.toJson(),
     if (inputs.isNotEmpty) 'inputs': [for (final i in inputs) i.toJson()],
     if (response case final r?) 'response': r.toJson(),
     if (parameters.isNotEmpty) 'parameters': parameters,
@@ -618,6 +642,7 @@ final class ModelDocument {
     if (data.toJson() case final d when d.isNotEmpty) 'data': d,
     'fit': fit.toJson(),
     if (!group.isEmpty) 'group': group.toJson(),
+    if (deep.isNotEmpty) 'deep': [for (final d in deep) d.toJson()],
     if (layout.isNotEmpty) 'layout': layout,
   };
 
@@ -625,6 +650,9 @@ final class ModelDocument {
   /// decodes custom types and supplies the custom couplings (without them,
   /// the network gets placeholders that build but cannot run).
   CompiledDocument compile({FitCodec codec = const FitCodec()}) {
+    if (!hasNetwork) {
+      throw StateError('The document has no HGF network to compile');
+    }
     final custom = network.customCouplings;
     final couplings = {
       for (final name in custom)

@@ -6,6 +6,7 @@ import 'model_document.dart';
 import 'network_document.dart';
 import 'parameters.dart';
 import 'clock.dart';
+import 'deep_document.dart';
 import 'transforms.dart';
 
 /// The parts of a [ModelDocument] an issue can name ([DocIssue.parts]): the
@@ -18,6 +19,9 @@ abstract final class DocPart {
   static String input(String name) => 'input:$name';
   static String transform(String name) => 'transform:$name';
   static String output(String name) => 'output:$name';
+
+  /// A deep network, by id.
+  static String deep(String id) => 'deep:$id';
 }
 
 /// Identifiers: column, input, transform and output names that expressions
@@ -46,6 +50,7 @@ extension ModelDocumentEdits on ModelDocument {
     DocData? data,
     DocFit? fit,
     DocGroup? group,
+    List<DocDeep>? deep,
     Map<String, Object?>? layout,
   }) => ModelDocument(
     name: name ?? this.name,
@@ -59,6 +64,7 @@ extension ModelDocumentEdits on ModelDocument {
     data: data ?? this.data,
     fit: fit ?? this.fit,
     group: group ?? this.group,
+    deep: deep ?? this.deep,
     layout: layout ?? this.layout,
   );
 
@@ -411,8 +417,9 @@ List<DocIssue> checkModel(
   // With a clock, the pipeline reads its grid.
   columns = columns == null ? null : doc.data.columnsOf(columns);
   final issues = <DocIssue>[
-    for (final i in checkNetwork(doc.network, build: built == null))
-      i.inParts(const [DocPart.network]),
+    if (doc.hasNetwork || doc.deep.isEmpty)
+      for (final i in checkNetwork(doc.network, build: built == null))
+        i.inParts(const [DocPart.network]),
   ];
   void error(String m, List<String> parts, {List<String> nodes = const []}) =>
       issues.add(DocIssue(IssueSeverity.error, m, parts: parts, nodes: nodes));
@@ -662,7 +669,22 @@ List<DocIssue> checkModel(
     }
   }
 
-  if (!issues.any((i) => i.isError)) {
+  // Deep networks.
+  final deepIds = <String>{};
+  for (final d in doc.deep) {
+    final part = DocPart.deep(d.id);
+    if (!deepIds.add(d.id)) {
+      error('Two deep networks have the id "${d.id}".', [part]);
+    }
+    checkDeep(
+      d,
+      columns: known == null ? null : [...known, ...transformNames],
+      error: (m) => error(m, [part]),
+      warn: (m) => warn(m, [part]),
+    );
+  }
+
+  if (doc.hasNetwork && !issues.any((i) => i.isError)) {
     try {
       doc.compile(codec: codec);
     } on Object catch (e) {

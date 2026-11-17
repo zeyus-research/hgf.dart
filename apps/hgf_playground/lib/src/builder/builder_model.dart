@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:hgf/hgf.dart';
 import 'package:hgf_fit/document.dart';
+import 'package:hgf_deep/hgf_deep.dart' show LayerKind;
 import 'package:hgf_fit/hgf_fit.dart' show HgfModel, Parameter, Subject;
 
 import '../model/data.dart';
@@ -44,6 +45,19 @@ final class EdgeSelection extends BuilderSelection {
   int get hashCode => index.hashCode;
 }
 
+/// A layer of the open deep network, by index (0: the target layer).
+final class LayerSelection extends BuilderSelection {
+  const LayerSelection(this.index);
+  final int index;
+
+  @override
+  bool operator ==(Object other) =>
+      other is LayerSelection && other.index == index;
+
+  @override
+  int get hashCode => index.hashCode;
+}
+
 /// A part of the model's pipeline, by its [DocPart] key: the data, a
 /// transform, an input (drawn as the wire from its columns), the network,
 /// the response or an output.
@@ -60,9 +74,9 @@ final class PartSelection extends BuilderSelection {
 }
 
 /// Which canvas the builder shows: the model's pipeline (data, transforms,
-/// the network as one node, the response and outputs), or the HGF network
-/// inside it.
-enum BuilderView { pipeline, network }
+/// the network as one node, the response and outputs), the HGF network
+/// inside it, or one of its deep networks ([BuilderModel.openDeep]).
+enum BuilderView { pipeline, network, deep }
 
 /// One undo step: the document and where its nodes are drawn.
 typedef _Snapshot = ({
@@ -131,10 +145,11 @@ class BuilderModel extends ChangeNotifier {
   List<String> get pipelineParts => [
     DocPart.data,
     for (final t in _model.transforms) DocPart.transform(t.name),
-    DocPart.network,
+    if (_model.hasNetwork) DocPart.network,
+    for (final d in _model.deep) DocPart.deep(d.id),
     if (_model.response != null) DocPart.response,
     for (final o in _model.outputs) DocPart.output(o.name),
-    DocPart.fit,
+    if (_model.hasNetwork) DocPart.fit,
   ];
 
   Offset _autoPipeline(String part, int k) {
@@ -145,6 +160,12 @@ class BuilderModel extends ChangeNotifier {
         (t) => DocPart.transform(t.name) == part,
       );
       return Offset(280, i * 90.0);
+    }
+    if (part.startsWith('deep:')) {
+      final i = _model.deep.indexWhere((d) => DocPart.deep(d.id) == part);
+      // Below the HGF network's card, or in its place.
+      final top = _model.hasNetwork ? 80.0 + _model.inputs.length * 22.0 : 0.0;
+      return Offset(560, top + i * 200.0);
     }
     if (part == DocPart.response) return const Offset(840, 0);
     if (part == DocPart.fit) return const Offset(1120, 0);
@@ -175,6 +196,30 @@ class BuilderModel extends ChangeNotifier {
     notifyListeners();
   }
 
+  String? _deepId;
+
+  /// The id of the deep network the deep canvas shows.
+  String? get openDeep => _deepId;
+
+  /// The deep network the deep canvas shows, if it still exists.
+  DocDeep? get deep => _deepId == null ? null : _model.deepById(_deepId!);
+
+  /// Show deep network [id] on its canvas.
+  void showDeep(String id) {
+    if (_model.deepById(id) == null) return;
+    _deepId = id;
+    _view = BuilderView.deep;
+    _selection = null;
+    notifyListeners();
+  }
+
+  /// Show the HGF network's canvas (adding a network first if there is
+  /// none).
+  void showNetwork() {
+    if (!_model.hasNetwork) addNetwork();
+    showView(BuilderView.network);
+  }
+
   BuilderSelection? _selection;
   BuilderSelection? get selection => _selection;
 
@@ -185,6 +230,11 @@ class BuilderModel extends ChangeNotifier {
 
   int? get selectedEdge => switch (_selection) {
     EdgeSelection(:final index) => index,
+    _ => null,
+  };
+
+  int? get selectedLayer => switch (_selection) {
+    LayerSelection(:final index) => index,
     _ => null,
   };
 
@@ -536,6 +586,8 @@ class BuilderModel extends ChangeNotifier {
         removeEdge(index);
       case PartSelection(:final part):
         removePart(part);
+      case LayerSelection(:final index):
+        removeLayer(index);
       case null:
     }
   }
@@ -660,6 +712,200 @@ class BuilderModel extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Add an HGF network (a continuous input with a volatility parent)
+  /// when the document has none, and select its card.
+  void addNetwork({Offset? at}) {
+    if (_model.hasNetwork) return;
+    final start = ModelDocument.fromNetwork(
+      Network()
+        ..addNodes()
+        ..addNodes(volatilityChildren: [0]),
+    );
+    _positions = layeredLayout(start.network);
+    _selection = const PartSelection(DocPart.network);
+    _setModel(
+      _model.copyWith(network: start.network, inputs: start.inputs),
+      pipeline: {..._pipeline, DocPart.network: ?at},
+    );
+  }
+
+  /// Add a deep network (a small classifier to start from) at [at], and
+  /// select it; returns its id.
+  String addDeep({Offset? at}) {
+    final ids = {for (final d in _model.deep) d.id};
+    var id = 'deep';
+    for (var k = 2; ids.contains(id); k++) {
+      id = 'deep$k';
+    }
+    final part = DocPart.deep(id);
+    _selection = PartSelection(part);
+    _setModel(
+      _model.copyWith(deep: [..._model.deep, DocDeep.starter(id)]),
+      pipeline: {..._pipeline, part: ?at},
+    );
+    return id;
+  }
+
+  /// Replace deep network [id] by [next] (an undo step unless [record] is
+  /// false: call [checkpoint] first while typing). A new id keeps its card
+  /// where it was.
+  void setDeep(String id, DocDeep next, {bool record = true}) {
+    if (next.id != id && _model.deepById(next.id) != null) return;
+    final pipeline = {..._pipeline};
+    if (next.id != id) {
+      if (pipeline.remove(DocPart.deep(id)) case final at?) {
+        pipeline[DocPart.deep(next.id)] = at;
+      }
+    }
+    if (_deepId == id) _deepId = next.id;
+    if (_selection == PartSelection(DocPart.deep(id))) {
+      _selection = PartSelection(DocPart.deep(next.id));
+    }
+    _setModel(
+      _model.copyWith(
+        deep: [for (final d in _model.deep) d.id == id ? next : d],
+      ),
+      pipeline: pipeline,
+      record: record,
+      coalesced: !record,
+    );
+  }
+
+  /// Replace layer [index] of the open deep network.
+  void setLayer(int index, DocLayer layer, {bool record = true}) {
+    final d = deep;
+    if (d == null || index < 0 || index >= d.layers.length) return;
+    final layers = [...d.layers];
+    layers[index] = layer;
+    setDeep(d.id, syncDeepColumns(d.copyWith(layers: layers)), record: record);
+  }
+
+  /// Insert a hidden layer above layer [below] of the open deep network
+  /// (a copy of its nearest hidden layer, else 8 tanh nodes), and select
+  /// it.
+  void insertLayer(int below) {
+    final d = deep;
+    if (d == null || below < 0 || below >= d.layers.length - 1) return;
+    final like = d.layers.skip(1).take(d.layers.length - 2).firstOrNull;
+    final layer = d.isContinuous
+        ? const DocLayer(size: 1, kind: LayerKind.continuous)
+        : like?.copyWith(name: () => null) ??
+              const DocLayer(size: 8, coupling: 'tanh');
+    _selection = LayerSelection(below + 1);
+    setDeep(d.id, d.copyWith(layers: [...d.layers]..insert(below + 1, layer)));
+  }
+
+  /// Remove hidden layer [index] of the open deep network (the target
+  /// and feature layers stay).
+  void removeLayer(int index) {
+    final d = deep;
+    if (d == null || index <= 0 || index >= d.layers.length - 1) return;
+    _selection = null;
+    setDeep(d.id, d.copyWith(layers: [...d.layers]..removeAt(index)));
+  }
+
+  /// Deep network [id] reading [column] as a feature (or, with [target], a
+  /// target): the layer grows to match. A text column read as a target
+  /// becomes a categorical target over its labels.
+  void bindDeepColumn(String id, String column, {required bool target}) {
+    final d = _model.deepById(id);
+    if (d == null) return;
+    if (!target) {
+      if (d.features.contains(column)) return;
+      setDeep(
+        id,
+        syncDeepColumns(d.copyWith(features: [...d.features, column])),
+      );
+      return;
+    }
+    final labels = _labelsOf(column);
+    if (labels != null) {
+      setDeep(
+        id,
+        syncDeepColumns(
+          d.copyWith(targets: [column], categories: () => labels),
+        ),
+      );
+      return;
+    }
+    if (d.targets.contains(column)) return;
+    setDeep(
+      id,
+      syncDeepColumns(
+        d.copyWith(
+          targets: d.categories == null ? [...d.targets, column] : [column],
+          categories: () => null,
+        ),
+      ),
+    );
+  }
+
+  /// Deep network [id] without feature (or target) [column].
+  void unbindDeepColumn(String id, String column, {required bool target}) {
+    final d = _model.deepById(id);
+    if (d == null) return;
+    setDeep(
+      id,
+      syncDeepColumns(
+        target
+            ? d.copyWith(
+                targets: [
+                  for (final c in d.targets)
+                    if (c != column) c,
+                ],
+                categories: () => null,
+              )
+            : d.copyWith(
+                features: [
+                  for (final c in d.features)
+                    if (c != column) c,
+                ],
+              ),
+      ),
+    );
+  }
+
+  /// The labels of [column] in the loaded data when it holds text (in
+  /// order of first appearance), else null.
+  List<String>? _labelsOf(String column) {
+    final data = csv;
+    if (data == null) return null;
+    final c = data.header.indexOf(column);
+    if (c < 0 || data.firstText(c) == null) return null;
+    final seen = <String>{};
+    for (final row in data.rows) {
+      final v = row[c].trim();
+      if (v.isNotEmpty) seen.add(v);
+      if (seen.length > 64) return null;
+    }
+    return seen.toList();
+  }
+
+  /// [d] with its feature and target layers sized to its columns: a
+  /// feature layer as wide as its features; a target layer as wide as its
+  /// targets, or categorical over its categories.
+  static DocDeep syncDeepColumns(DocDeep d) {
+    if (d.layers.length < 2 || d.isContinuous) {
+      if (d.isContinuous && d.targets.isNotEmpty) {
+        final layers = [...d.layers];
+        layers[0] = layers[0].copyWith(size: d.targets.length);
+        return d.copyWith(layers: layers);
+      }
+      return d;
+    }
+    final layers = [...d.layers];
+    if (d.features.isNotEmpty) {
+      layers[layers.length - 1] = layers.last.copyWith(size: d.features.length);
+    }
+    final t = layers.first;
+    if (d.categories case final cats?) {
+      layers[0] = t.copyWith(size: cats.length, kind: LayerKind.categorical);
+    } else if (d.targets.isNotEmpty) {
+      layers[0] = t.copyWith(size: d.targets.length);
+    }
+    return d.copyWith(layers: layers);
+  }
+
   /// Add a transform reading [column] (or `0`) at [at], and select it.
   String addTransform({String? column, Offset? at}) {
     final base = column == null
@@ -741,6 +987,20 @@ class BuilderModel extends ChangeNotifier {
       'transform' => _model.withoutTransform(key),
       'output' => _model.withoutOutput(key),
       DocPart.response => _model.withResponse(null),
+      'deep' => _model.copyWith(
+        deep: [
+          for (final d in _model.deep)
+            if (d.id != key) d,
+        ],
+      ),
+      DocPart.network => _model.copyWith(
+        network: NetworkDocument(nodes: const []),
+        inputs: const [],
+        clearResponse: true,
+        outputs: const [],
+        parameters: const [],
+        group: DocGroup.empty,
+      ),
       'input' => switch (_model.input(key)) {
         final i? => _model.replaceInput(
           key,
@@ -1252,7 +1512,14 @@ class BuilderModel extends ChangeNotifier {
     hidden = const {};
     dataError = null;
     var found = checkNetwork(doc, build: false);
-    if (found.any((i) => i.isError)) {
+    if (!_model.hasNetwork && _model.deep.isNotEmpty) {
+      // Deep networks only: their checks, no HGF preview.
+      found = checkModel(_model, columns: csv?.header);
+      previewError =
+          'The preview shows an HGF network\'s beliefs; this model has deep '
+          'networks only. Add an HGF network from the pipeline\'s menu, or '
+          'export the deep networks (File menu) to train them.';
+    } else if (found.any((i) => i.isError)) {
       previewError = 'Fix the errors to see the preview.';
     } else {
       try {

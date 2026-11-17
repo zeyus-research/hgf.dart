@@ -7,6 +7,7 @@ import '../../ui/panels.dart' show SectionCard;
 import '../bids_source.dart';
 import '../builder_model.dart';
 import 'bids_dialog.dart';
+import 'deep_inspector.dart' show DeepPanel;
 import '../doc_layout.dart' show ownerIdOf;
 import 'fit_panel.dart' show FitPanel, FreeToggle;
 import 'inspector.dart' show NumberField;
@@ -38,6 +39,9 @@ class PipelinePanel extends StatelessWidget {
     if (part.startsWith('input:') && doc.input(key) != null) {
       return _InputPanel(model: model, name: key);
     }
+    if (part.startsWith('deep:') && doc.deepById(key) != null) {
+      return DeepPanel(model: model, deep: doc.deepById(key)!);
+    }
     if (part.startsWith('output:')) {
       for (final o in doc.outputs) {
         if (o.name == key) return _OutputPanel(model: model, output: o);
@@ -62,7 +66,10 @@ class PipelineHelpCard extends StatelessWidget {
         'background to add an output (a node\'s field per time step, e.g. a '
         'prediction error for EEG). Double-click the network to edit it; '
         'right-click for more. Without loaded data the preview simulates '
-        'each input and, with a response, the responses.',
+        'each input and, with a response, the responses. Right-click the '
+        'background to add an HGF network or a deep network (an HGF '
+        'neural network, pyhgf\'s DeepNetwork): drag columns onto its '
+        'features and targets, double-click it to edit its layers.',
         style: Theme.of(context).textTheme.bodySmall,
       ),
     ],
@@ -112,12 +119,13 @@ class _Overview extends StatelessWidget {
               label: const Text('Transform'),
               onPressed: () => model.addTransform(),
             ),
-            ActionChip(
-              avatar: const Icon(Icons.show_chart, size: 16),
-              label: const Text('Output'),
-              onPressed: () => model.addOutput(),
-            ),
-            if (doc.response == null)
+            if (doc.hasNetwork)
+              ActionChip(
+                avatar: const Icon(Icons.show_chart, size: 16),
+                label: const Text('Output'),
+                onPressed: () => model.addOutput(),
+              ),
+            if (doc.response == null && doc.hasNetwork)
               ActionChip(
                 avatar: const Icon(Icons.touch_app_outlined, size: 16),
                 label: const Text('Response'),
@@ -125,8 +133,15 @@ class _Overview extends StatelessWidget {
               ),
             ActionChip(
               avatar: const Icon(Icons.account_tree_outlined, size: 16),
-              label: const Text('Edit the network'),
-              onPressed: () => model.showView(BuilderView.network),
+              label: Text(
+                doc.hasNetwork ? 'Edit the HGF network' : 'Add an HGF network',
+              ),
+              onPressed: model.showNetwork,
+            ),
+            ActionChip(
+              avatar: const Icon(Icons.layers_outlined, size: 16),
+              label: const Text('Add a deep network'),
+              onPressed: () => model.addDeep(),
             ),
           ],
         ),

@@ -17,6 +17,8 @@ library;
 
 export 'src/codegen/dart.dart' show DartExport, dartDouble, dartIdentifier;
 export 'src/codegen/export_spec.dart';
+export 'src/codegen/deep.dart'
+    show DeepDartExport, DeepPythonExport, deepPredictionColumns;
 export 'src/codegen/expr_code.dart';
 export 'src/codegen/plan.dart';
 export 'src/codegen/python.dart' show PythonExport, pyFloat, pyIdentifier;

@@ -919,40 +919,10 @@ def on_clock(table):
   static String _pyStr(String s) =>
       '"${s.replaceAll(r'\', r'\\').replaceAll('"', r'\"')}"';
 
-  static const _dataHelpers = r'''
-_MISSING = {"", "na", "nan", "null", "n/a", "none", "."}
-
-
-def parse_csv(text):
-    """A table (dict of "header" and "rows", cells as text) read as hgf.dart
-    reads CSV: the separator is a tab, a semicolon or a comma (the first the
-    header has; with semicolons a decimal comma reads as a number), blank and
-    `#` lines are skipped, rows are padded to the header's width."""
-    lines = [
-        line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")
-    ]
-    first = lines[0]
-    sep = "\t" if "\t" in first else ";" if ";" in first else ","
-    split = [next(csv.reader([line], delimiter=sep)) for line in lines]
-    header = [h.strip() for h in split[0]]
-    rows = [(r + [""] * len(header))[: len(header)] for r in split[1:]]
-    return dict(header=header, rows=rows, decimal_comma=sep == ";")
-
-
-def number(table, cell):
-    """A cell as a number: NaN when missing, None when it is text."""
-    s = cell.strip()
-    if s.lower() in _MISSING:
-        return float("nan")
-    if table["decimal_comma"]:
-        s = s.replace(",", ".")
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def format_number(v):
+  static const _dataHelpers =
+      '''
+$pyCsvReader'''
+      r'''def format_number(v):
     return "" if np.isnan(v) else str(int(v)) if v == int(v) and abs(v) < 1e15 else repr(float(v))
 
 
@@ -1346,3 +1316,40 @@ def print_estimates(estimates):
             print(f"  {name:<11}  {fmt(v)}{iv}")
 ''';
 }
+
+/// Python that reads CSV as hgf.dart does: `parse_csv(text)` and
+/// `number(table, cell)` (NaN when missing, None for text).
+const pyCsvReader = r'''
+_MISSING = {"", "na", "nan", "null", "n/a", "none", "."}
+
+
+def parse_csv(text):
+    """A table (dict of "header" and "rows", cells as text) read as hgf.dart
+    reads CSV: the separator is a tab, a semicolon or a comma (the first the
+    header has; with semicolons a decimal comma reads as a number), blank and
+    `#` lines are skipped, rows are padded to the header's width."""
+    lines = [
+        line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    ]
+    first = lines[0]
+    sep = "\t" if "\t" in first else ";" if ";" in first else ","
+    split = [next(csv.reader([line], delimiter=sep)) for line in lines]
+    header = [h.strip() for h in split[0]]
+    rows = [(r + [""] * len(header))[: len(header)] for r in split[1:]]
+    return dict(header=header, rows=rows, decimal_comma=sep == ";")
+
+
+def number(table, cell):
+    """A cell as a number: NaN when missing, None when it is text."""
+    s = cell.strip()
+    if s.lower() in _MISSING:
+        return float("nan")
+    if table["decimal_comma"]:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+''';

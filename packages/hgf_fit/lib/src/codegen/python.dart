@@ -962,6 +962,10 @@ def read_csv(path):
 ''';
 }
 
+/// [c] as a JAX callable (`jnp.tanh`, `lambda x: ...`; `None` for the
+/// linear coupling, which pyhgf's builders read as the identity).
+String pyCoupling(Coupling c) => PythonExport._coupling(c);
+
 /// [v] as a Python float literal (`float("nan")` etc. when not finite).
 String pyFloat(double v) {
   if (v.isNaN) return 'float("nan")';

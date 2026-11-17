@@ -39,6 +39,14 @@ final class RecordedIn extends RowPort {
   const RecordedIn();
 }
 
+/// A deep network's features or targets: a column dropped here is read
+/// into its feature (or target) layer.
+final class DeepIn extends RowPort {
+  const DeepIn(this.id, {required this.target});
+  final String id;
+  final bool target;
+}
+
 /// A pipeline card: a part of the model and what it shows.
 class PipelineCard {
   PipelineCard({
@@ -134,19 +142,33 @@ typedef PipelineWire = ({Offset from, Offset to, String part, bool ok});
     );
   }
   final nNodes = doc.network.nodes.length;
-  cards.add(
-    PipelineCard(
-      part: DocPart.network,
-      title: 'HGF network',
-      subtitle: '$nNodes node${nNodes == 1 ? '' : 's'} · double-click to edit',
-      rows: [
-        for (final i in doc.inputs)
-          (label: i.name, tag: prettyId(i.node), port: InputIn(i.name)),
-      ],
-      at: pos[DocPart.network]!,
-      headerOut: (column: null),
-    ),
-  );
+  if (doc.hasNetwork) {
+    cards.add(
+      PipelineCard(
+        part: DocPart.network,
+        title: 'HGF network',
+        subtitle:
+            '$nNodes node${nNodes == 1 ? '' : 's'} · double-click to edit',
+        rows: [
+          for (final i in doc.inputs)
+            (label: i.name, tag: prettyId(i.node), port: InputIn(i.name)),
+        ],
+        at: pos[DocPart.network]!,
+        headerOut: (column: null),
+      ),
+    );
+  }
+  for (final d in doc.deep) {
+    cards.add(
+      PipelineCard(
+        part: DocPart.deep(d.id),
+        title: d.label,
+        subtitle: '${deepShape(d)} · double-click to edit',
+        rows: deepRows(d),
+        at: pos[DocPart.deep(d.id)]!,
+      ),
+    );
+  }
   if (doc.response case final r?) {
     cards.add(
       PipelineCard(
@@ -180,15 +202,17 @@ typedef PipelineWire = ({Offset from, Offset to, String part, bool ok});
     );
   }
 
-  cards.add(
-    PipelineCard(
-      part: DocPart.fit,
-      title: 'Fit',
-      subtitle: fitSubtitle(m),
-      rows: _fitRows(m),
-      at: pos[DocPart.fit]!,
-    ),
-  );
+  if (doc.hasNetwork) {
+    cards.add(
+      PipelineCard(
+        part: DocPart.fit,
+        title: 'Fit',
+        subtitle: fitSubtitle(m),
+        rows: _fitRows(m),
+        at: pos[DocPart.fit]!,
+      ),
+    );
+  }
 
   // Where each column comes from.
   final dataCard = cards.first;
@@ -213,7 +237,17 @@ typedef PipelineWire = ({Offset from, Offset to, String part, bool ok});
       }
     }
   }
-  final net = byPart[DocPart.network]!;
+  for (final d in doc.deep) {
+    final card = byPart[DocPart.deep(d.id)]!;
+    for (final (k, row) in card.rows.indexed) {
+      if (row.port is! DeepIn || row.tag == null) continue;
+      if (sources[row.label] case final from?) {
+        wires.add((from: from, to: card.rowPort(k), part: card.part, ok: true));
+      }
+    }
+  }
+  final net = byPart[DocPart.network];
+  if (net == null) return (cards: cards, wires: wires);
   final widths = <String, int>{};
   if (m.network case final built?) {
     for (final i in doc.inputs) {
@@ -268,6 +302,46 @@ typedef PipelineWire = ({Offset from, Offset to, String part, bool ok});
     ));
   }
   return (cards: cards, wires: wires);
+}
+
+/// A deep network's layer sizes, features to targets (`2 → 8 → 1`).
+String deepShape(DocDeep d) =>
+    [for (final l in d.layers.reversed) '${l.size}'].join(' → ');
+
+/// A deep card's rows: its feature columns, then its target columns, each
+/// a drop target for more (a placeholder row while there are none).
+List<CardRow> deepRows(DocDeep d) {
+  final cats = d.categories;
+  return [
+    if (!d.isContinuous) ...[
+      for (final c in d.features)
+        (label: c, tag: 'feature', port: DeepIn(d.id, target: false)),
+      if (d.features.isEmpty)
+        (
+          label: 'drop feature columns here',
+          tag: null,
+          port: DeepIn(d.id, target: false),
+        ),
+    ],
+    for (final c in d.targets)
+      (
+        label: c,
+        tag: d.isContinuous
+            ? 'observed'
+            : cats == null
+            ? 'target'
+            : '${cats.length} labels',
+        port: DeepIn(d.id, target: true),
+      ),
+    if (d.targets.isEmpty)
+      (
+        label: d.isContinuous
+            ? 'drop observed columns here'
+            : 'drop target columns here',
+        tag: null,
+        port: DeepIn(d.id, target: true),
+      ),
+  ];
 }
 
 /// The fit card's subtitle: the method, and the last result.
@@ -598,6 +672,21 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
     if (card.part == DocPart.response) {
       return ('Release: the responses are in "$column"', true);
     }
+    if (card.part.startsWith('deep:')) {
+      final port = switch (_rowAt(card, screen)) {
+        final k? => card.rows[k].port,
+        null => null,
+      };
+      if (port case DeepIn(:final target)) {
+        return (
+          target
+              ? 'Release: "$column" is a target (the target layer follows)'
+              : 'Release: "$column" is a feature (the feature layer follows)',
+          true,
+        );
+      }
+      return ('Drop on the features or the targets', false);
+    }
     if (card.part.startsWith('transform:')) {
       return ('Write "$column" into the expression to read it', false);
     }
@@ -632,6 +721,16 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
       m.bindResponseColumn(column);
       return;
     }
+    if (card.part.startsWith('deep:')) {
+      final port = switch (_rowAt(card, screen)) {
+        final k? => card.rows[k].port,
+        null => null,
+      };
+      if (port case DeepIn(:final id, :final target)) {
+        m.bindDeepColumn(id, column, target: target);
+        return;
+      }
+    }
     if (drag.tip != null && !drag.ok) _tell(drag.tip!);
   }
 
@@ -657,6 +756,11 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
       if (double && c.part == DocPart.network) {
         _lastTap = null;
         m.showView(BuilderView.network);
+        return;
+      }
+      if (double && c.part.startsWith('deep:')) {
+        _lastTap = null;
+        m.showDeep(c.part.substring('deep:'.length));
         return;
       }
       final port = switch (_rowAt(c, at)) {
@@ -702,12 +806,28 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
             ),
           );
         }
-        items.add(
+        items.addAll([
           PopupMenuItem(
             value: () => m.addOutput(at: card.at + const Offset(280, 160)),
             child: const Text('Add an output'),
           ),
-        );
+          PopupMenuItem(
+            value: () => m.removePart(DocPart.network),
+            child: const Text('Delete the HGF network'),
+          ),
+        ]);
+      } else if (card.part.startsWith('deep:')) {
+        final id = card.part.substring('deep:'.length);
+        items.addAll([
+          PopupMenuItem(
+            value: () => m.showDeep(id),
+            child: const Text('Edit the layers'),
+          ),
+          PopupMenuItem(
+            value: () => m.removePart(card.part),
+            child: const Text('Delete'),
+          ),
+        ]);
       } else if (card.part != DocPart.data && card.part != DocPart.fit) {
         items.add(
           PopupMenuItem(
@@ -722,15 +842,26 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
           value: () => m.addTransform(at: c),
           child: const Text('Add a transform'),
         ),
-        PopupMenuItem(
-          value: () => m.addOutput(at: c),
-          child: const Text('Add an output'),
-        ),
-        if (m.document.response == null)
+        if (m.document.hasNetwork)
+          PopupMenuItem(
+            value: () => m.addOutput(at: c),
+            child: const Text('Add an output'),
+          ),
+        if (m.document.response == null && m.document.hasNetwork)
           PopupMenuItem(
             value: () => m.addResponse(at: c),
             child: const Text('Add a response'),
           ),
+        const PopupMenuDivider(),
+        if (!m.document.hasNetwork)
+          PopupMenuItem(
+            value: () => m.addNetwork(at: c),
+            child: const Text('Add an HGF network'),
+          ),
+        PopupMenuItem(
+          value: () => m.addDeep(at: c),
+          child: const Text('Add a deep network'),
+        ),
       ]);
     }
     if (items.isEmpty) return;
@@ -780,6 +911,11 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
     }
     if (k == LogicalKeyboardKey.enter && m.selectedPart == DocPart.network) {
       m.showView(BuilderView.network);
+      return KeyEventResult.handled;
+    }
+    if (k == LogicalKeyboardKey.enter &&
+        (m.selectedPart?.startsWith('deep:') ?? false)) {
+      m.showDeep(m.selectedPart!.substring('deep:'.length));
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
@@ -959,6 +1095,8 @@ class _PipelinePainter extends CustomPainter {
       ? const Color(0xFF1BAF7A)
       : part == DocPart.fit
       ? const Color(0xFF8E6AC8)
+      : part.startsWith('deep:')
+      ? const Color(0xFFD0743C)
       : scheme.outline;
 
   @override

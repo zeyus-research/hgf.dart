@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:hgf_deep/datasets.dart';
+import 'package:hgf/hgf.dart' show ExprCoupling;
 import 'package:hgf_deep/hgf_deep.dart';
 import 'package:test/test.dart';
 
@@ -89,6 +90,23 @@ sepal_length,sepal_width,petal_length,species
   });
 
   group('DeepNetwork.toJson / fromJson', () {
+    test('expression couplings save and load', () {
+      final net = DeepNetwork()
+        ..addLayer(1)
+        ..addLayer(3, coupling: ExprCoupling('2 * tanh(x / 2)'))
+        ..addLayer(2)
+        ..weightInitialisation(const XavierInit(), seed: 3);
+      final json = jsonDecode(jsonEncode(net.toJson())) as Map<String, Object?>;
+      expect((json['layers'] as List)[1]['coupling'], '2 * tanh(x / 2)');
+      final back = DeepNetwork.fromJson(json);
+      expect(back.configs[1].coupling, ExprCoupling('2 * tanh(x / 2)'));
+      final x = Matrix.fromRows([
+        [0.3, -0.2],
+        [1.1, 0.4],
+      ]);
+      expect(back.predict(x).data, net.predict(x).data);
+    });
+
     DeepNetwork trained() {
       final net =
           DeepNetwork(

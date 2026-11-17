@@ -29,20 +29,22 @@ Float64List _decList(Object? v, int length, String what) {
   return Float64List.fromList([for (final x in list) _dec(x)]);
 }
 
-String _couplingName(Coupling c) => switch (c) {
-  CouplingFn() => c.pyhgfName,
-  CustomCoupling() => c.name,
-  _ => throw UnsupportedError(
-    'Cannot name the coupling ${c.runtimeType}: use a CouplingFn or a '
-    'CustomCoupling',
-  ),
-};
+String _couplingName(Coupling c) {
+  try {
+    return couplingText(c);
+  } on UnsupportedError {
+    throw UnsupportedError(
+      'Cannot name the coupling ${c.runtimeType}: use a CouplingFn, an '
+      'ExprCoupling or a CustomCoupling',
+    );
+  }
+}
 
 Coupling _coupling(String name, Map<String, Coupling> custom) {
   final c = custom[name];
   if (c != null) return c;
   try {
-    return CouplingFn.parse(name);
+    return parseCoupling(name);
   } on ArgumentError {
     throw ArgumentError(
       'Unknown coupling "$name": pass it in DeepNetwork.fromJson(couplings:)',

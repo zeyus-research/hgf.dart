@@ -11,6 +11,8 @@ import '../../model/presets.dart';
 import '../../ui/files.dart';
 import '../builder_model.dart';
 import 'builder_canvas.dart';
+import 'deep_canvas.dart';
+import 'deep_inspector.dart' show exportDeep;
 import 'inspector.dart';
 import 'pipeline_canvas.dart';
 
@@ -119,9 +121,11 @@ class _BuilderPageState extends State<BuilderPage> {
             tooltip: m.view == BuilderView.network
                 ? 'Lay out again (parents above children)'
                 : 'Lay out again',
-            onPressed: m.view == BuilderView.network
-                ? m.autoLayout
-                : m.autoLayoutPipeline,
+            onPressed: switch (m.view) {
+              BuilderView.network => m.autoLayout,
+              BuilderView.pipeline => m.autoLayoutPipeline,
+              BuilderView.deep => null,
+            },
             icon: const Icon(Icons.auto_fix_high_outlined),
           ),
           PopupMenuButton<String>(
@@ -161,20 +165,38 @@ class _BuilderPageState extends State<BuilderPage> {
                 ),
               ),
               const PopupMenuDivider(),
-              PopupMenuItem(
-                value: () => _exportCode(python: false),
-                child: const ListTile(
-                  leading: Icon(Icons.code),
-                  title: Text('Export: Dart script'),
+              if (m.document.hasNetwork) ...[
+                PopupMenuItem(
+                  value: () => _exportCode(python: false),
+                  child: const ListTile(
+                    leading: Icon(Icons.code),
+                    title: Text('Export: Dart script'),
+                  ),
                 ),
-              ),
-              PopupMenuItem(
-                value: () => _exportCode(python: true),
-                child: const ListTile(
-                  leading: Icon(Icons.code),
-                  title: Text('Export: Python script (pyhgf)'),
+                PopupMenuItem(
+                  value: () => _exportCode(python: true),
+                  child: const ListTile(
+                    leading: Icon(Icons.code),
+                    title: Text('Export: Python script (pyhgf)'),
+                  ),
                 ),
-              ),
+              ],
+              for (final d in m.document.deep) ...[
+                PopupMenuItem(
+                  value: () => exportDeep(context, m, d, python: false),
+                  child: ListTile(
+                    leading: const Icon(Icons.layers_outlined),
+                    title: Text('Export "${d.label}": Dart script'),
+                  ),
+                ),
+                PopupMenuItem(
+                  value: () => exportDeep(context, m, d, python: true),
+                  child: ListTile(
+                    leading: const Icon(Icons.layers_outlined),
+                    title: Text('Export "${d.label}": Python (pyhgf)'),
+                  ),
+                ),
+              ],
             ],
           ),
           const SizedBox(width: 8),
@@ -195,9 +217,11 @@ class _BuilderPageState extends State<BuilderPage> {
         _Breadcrumbs(model: m),
         const Divider(height: 1),
         Expanded(
-          child: m.view == BuilderView.pipeline
-              ? PipelineCanvas(model: m)
-              : BuilderCanvas(model: m),
+          child: switch (m.view) {
+            BuilderView.pipeline => PipelineCanvas(model: m),
+            BuilderView.network => BuilderCanvas(model: m),
+            BuilderView.deep => DeepCanvas(model: m),
+          },
         ),
       ],
     ),
@@ -261,39 +285,53 @@ class _Breadcrumbs extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final inNetwork = model.view == BuilderView.network;
-    final hasNetworkIssue = model.partIssues.containsKey(DocPart.network);
+    final view = model.view;
+    final deep = view == BuilderView.deep ? model.deep : null;
+    final issuePart = deep != null ? DocPart.deep(deep.id) : DocPart.network;
+    final hasIssue = model.partIssues.containsKey(issuePart);
+    final showNetwork =
+        view == BuilderView.network ||
+        (view == BuilderView.pipeline && model.document.hasNetwork);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Row(
         children: [
           TextButton.icon(
-            onPressed: inNetwork
+            onPressed: view != BuilderView.pipeline
                 ? () => model.showView(BuilderView.pipeline)
                 : null,
             icon: const Icon(Icons.linear_scale, size: 18),
             label: const Text('Pipeline'),
           ),
-          const Icon(Icons.chevron_right, size: 18),
-          TextButton.icon(
-            onPressed: inNetwork
-                ? null
-                : () => model.showView(BuilderView.network),
-            icon: Icon(
-              hasNetworkIssue
-                  ? Icons.error_outline
-                  : Icons.account_tree_outlined,
-              size: 18,
-              color: hasNetworkIssue ? theme.colorScheme.error : null,
+          if (showNetwork || deep != null) ...[
+            const Icon(Icons.chevron_right, size: 18),
+            TextButton.icon(
+              onPressed: view == BuilderView.pipeline
+                  ? () => model.showView(BuilderView.network)
+                  : null,
+              icon: Icon(
+                hasIssue
+                    ? Icons.error_outline
+                    : deep != null
+                    ? Icons.layers_outlined
+                    : Icons.account_tree_outlined,
+                size: 18,
+                color: hasIssue ? theme.colorScheme.error : null,
+              ),
+              label: Text(deep?.label ?? 'HGF network'),
             ),
-            label: const Text('HGF network'),
-          ),
+          ],
           const Spacer(),
           Flexible(
             child: Text(
-              inNetwork
-                  ? 'Parents above children; drag from a port to connect'
-                  : 'Data → transforms → network → response and outputs',
+              switch (view) {
+                BuilderView.network =>
+                  'Parents above children; drag from a port to connect',
+                BuilderView.deep =>
+                  'Features on top, targets below; + inserts a layer',
+                BuilderView.pipeline =>
+                  'Data → transforms → models → response and outputs',
+              },
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
@@ -457,6 +495,27 @@ class _BuilderPreviewState extends State<BuilderPreview> {
     final m = widget.model;
     final net = m.network, traj = m.trajectories;
     final theme = Theme.of(context);
+    if (m.view == BuilderView.deep) {
+      final d = m.deep;
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Text(
+            d == null
+                ? ''
+                : '"${d.label}" is trained by its exported script for now '
+                      '(the network panel\'s Export buttons; Dart or pyhgf), '
+                      '${d.isContinuous ? 'filtering' : 'reading'} the columns '
+                      'bound on its card. Training in the builder comes with '
+                      'the data-pipeline nodes.',
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      );
+    }
     if (net == null || traj == null) {
       return Center(
         child: Padding(

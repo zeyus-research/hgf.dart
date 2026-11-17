@@ -2337,11 +2337,70 @@ fitting, export) reads it.
    shared clock) become one row per step on a grid shared by everyone in
    a session, each state held until its next event (zero-order hold), so
    `mate`/`mates_*` line up team-mates by the grid's time.
-8. [ ] Later: hgf_deep layers and a data-loading pipeline as nodes of
-   the same kind; Julia export.
+8. [ ] hgf_deep layers and a data-loading pipeline as nodes of the same
+   kind; Julia export. Deep networks first (agreed 2026-11-17: building
+   the structure and exporting it is useful without the data nodes):
+   done 2026-11-17, see "Deep networks in the builder" below. Next: the
+   data-pipeline nodes (resample / decimate, segment by events, filter
+   rows, standardise, split), then training deep networks in the builder
+   and wiring models together (a deep network's predictions as columns).
 
 In parallel (not blocking): vector node kinds on the GPU, a faster dp
 candidate search.
+
+#### Deep networks in the builder (2026-11-17): done
+
+A model document holds an HGF network, deep networks (pyhgf's
+`DeepNetwork`, hgf_deep), or both; the UI keeps each simple on its own.
+
+- **Document** (`hgf_fit/document/deep_document.dart`, `"deep"` in
+  `hgf.document/1`): `DocDeep` (id, name, `DocDeepSettings`, `DocLayer`s
+  in pyhgf's order, target layer first, feature and target columns,
+  `categories` for a label column read one-hot, `DocDeepTraining`:
+  optimiser, learning kind, init, seed, passes, minibatch, standardise,
+  shuffle). Structure only (no weights); `build()` gives a fresh
+  `DeepNetwork`. All 74 hgf_deep fixtures round-trip (structure JSON
+  identical). The HGF network is now optional: an empty one is left out of
+  the JSON, `hasNetwork` says which, `compile()` throws without one;
+  `checkModel` checks each deep network (hgf_deep's own build checks with
+  the layer named, column counts against layer sizes, columns against the
+  data) under `DocPart.deep(id)`. hgf_fit now depends on hgf_deep.
+- **Exports** (`hgf_fit/codegen/deep.dart`): `DeepDartExport` and
+  `DeepPythonExport`, one self-contained script per deep network (a
+  mixed document exports one file per model): `buildNetwork()`, a
+  replaceable `readData()` (rows with a gap skipped, labels one-hot),
+  standardise, train (`fit` or minibatches) or filter (continuous), print
+  accuracy / R², write `<data>_<id>.csv` (the data plus a prediction
+  column per target node) and, in Dart, the trained network's JSON.
+  `deep_export_test.dart`: four networks (binary with tonic volatility,
+  three labels with `none` among them, regression with an expression
+  coupling in minibatches, a continuous filter) analyse clean and run;
+  with `tool/parity/.venv`, pyhgf's predictions agree to 1e-9 (no shuffle,
+  no seeded init, `DeepFixes.none`; flagged in the Python header
+  otherwise). Found on the way: a diverging network (SGD on weights of 1)
+  over several passes amplifies the two engines' last-digit differences
+  without bound (every single pass agrees to 1e-14); not a bug, the test
+  avoids it.
+- **hgf_deep:** `DeepNetwork.toJson` / `fromJson` now save expression
+  couplings (`couplingText` / `parseCoupling`).
+- **Builder:** right-click the pipeline (or the overview's chips) to add
+  an HGF network or a deep network; the HGF card, response, outputs and
+  fit only appear with an HGF network. A deep card lists its features and
+  targets; drop data columns on them (the feature and target layers
+  follow the number of columns; a text column becomes a categorical
+  target over its labels). Double-click opens its layer canvas
+  (`deep_canvas.dart`): features on top, targets at the bottom, dense or
+  one-to-one connections, up to 24 nodes drawn per layer, "+" between
+  layers inserts a hidden layer, Delete removes one. The inspector
+  (`deep_inspector.dart`): templates (classifier, regression, continuous
+  filter), columns (typed when there is no data), network settings,
+  training, Export Dart / pyhgf; per layer: name, size, target kind,
+  activation (a name or an expression in `x`), volatility level, ω, bias,
+  one-to-one. File menu: an export pair per deep network.
+- Left: training and a live preview in the builder (after the data
+  nodes), wiring a deep network's predictions into the HGF network,
+  continuous layers' couplings and per-layer volatility children in the
+  inspector, Julia.
 
 #### Model document (2026-11-16): done
 
@@ -3037,8 +3096,9 @@ transforms, response, outputs; 2026-11-17), and the first part of slice 3
 builder; 2026-11-17), and the exports of every participant and the group
 level, Dart and pyhgf/PyMC, and relative bindings with team-mates
 simulated together, and events onto a shared clock, a BIDS loader and
-transform caching for whole sessions (2026-11-17); next hgf_deep
-pipeline nodes. Vector node kinds on the GPU and a
+transform caching for whole sessions (2026-11-17), deep networks in the
+builder beside or instead of the HGF network, with Dart and pyhgf exports
+(2026-11-17); next the data-pipeline nodes. Vector node kinds on the GPU and a
 faster dp candidate search can run alongside.
 
 ```sh

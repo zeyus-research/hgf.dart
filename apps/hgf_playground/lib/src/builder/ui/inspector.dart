@@ -9,6 +9,7 @@ import '../../model/presets.dart' show paramsFor, ParamDef;
 import '../../ui/panels.dart' show LabeledSlider, SectionCard, fmt;
 import '../builder_model.dart';
 import '../doc_layout.dart';
+import 'deep_inspector.dart';
 import 'fit_panel.dart' show FreeToggle;
 import 'pipeline_inspector.dart';
 
@@ -71,6 +72,21 @@ class BuilderInspector extends StatelessWidget {
             key: ValueKey('part ${model.selectedPart}'),
             model: model,
           )
+        else if (model.view == BuilderView.deep)
+          switch ((model.deep, model.selectedLayer)) {
+            (final d?, final i?) when i < d.layers.length => DeepLayerPanel(
+              key: ValueKey('layer ${d.id} $i'),
+              model: model,
+              deep: d,
+              index: i,
+            ),
+            (final d?, _) => DeepPanel(
+              key: ValueKey('deep ${d.id}'),
+              model: model,
+              deep: d,
+            ),
+            _ => const SizedBox.shrink(),
+          }
         else
           switch (model.selection) {
             NodeSelection(:final id) when model.doc.node(id) != null =>
