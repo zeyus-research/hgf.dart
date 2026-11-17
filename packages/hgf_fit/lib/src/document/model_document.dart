@@ -12,6 +12,7 @@ import '../model.dart';
 import '../parameter.dart';
 import '../prior.dart';
 import '../transform.dart';
+import 'data_layout.dart';
 import 'network_document.dart';
 import 'transforms.dart';
 
@@ -948,247 +949,81 @@ final class CompiledDocument {
   /// parameters' starting values). The data's own columns (e.g. its time
   /// stamps) stay, so the outputs line up with other recordings.
   CsvData withOutputs(CsvData data, {Map<String, List<double>>? x}) {
-    final csv = transform(data);
     final subs = subjects(data);
-    final groups = _groups(csv);
-    final names = [for (final o in document.outputs) o.name];
-    for (final n in names) {
-      if (csv.header.contains(n)) {
+    final ids = layout.participantRows(transform(data)).keys.toList();
+    for (final o in document.outputs) {
+      if (data.header.contains(o.name) ||
+          document.transforms.any((t) => t.name == o.name)) {
         throw FormatException(
-          'The data already has a column "$n"; rename the output',
+          'The data already has a column "${o.name}"; rename the output',
         );
       }
     }
-    final rows = [
-      for (final r in csv.rows) [...r, for (final _ in names) ''],
-    ];
-    final base = csv.header.length;
-    for (final (k, MapEntry(key: id, value: rowIdx))
-        in groups.entries.indexed) {
-      final traj = filter(subs[k], x?[id]);
-      final outs = outputs(traj);
-      for (final (j, n) in names.indexed) {
-        final series = outs[n]!;
-        for (final (t, r) in rowIdx.indexed) {
-          rows[r][base + j] = _cell(series[t]);
-        }
-      }
-    }
-    return CsvData([...csv.header, ...names], rows);
+    return layout.withColumns(data, [
+      for (final (k, id) in ids.indexed) outputs(filter(subs[k], x?[id])),
+    ]);
   }
 
-  /// The rows of each participant of [csv], in order of first appearance.
-  Map<String, List<int>> _groups(CsvData csv) {
-    final groups = <String, List<int>>{};
-    if (document.data.participantColumn case final p?) {
-      final c = csv.header.indexOf(p);
-      if (c < 0) {
-        throw FormatException('No column "$p" (participants) in the data');
-      }
-      for (var r = 0; r < csv.rows.length; r++) {
-        (groups[csv.rows[r][c].trim()] ??= []).add(r);
-      }
-    } else {
-      groups[''] = [for (var r = 0; r < csv.rows.length; r++) r];
-    }
-    return groups;
-  }
+  /// How [subjects] reads a CSV: the named inputs' columns in the
+  /// network's input order, the response's columns and options, the data
+  /// layout and the transforms. The exported Dart scripts write it out.
+  late final DataLayout layout = () {
+    final r = document.response;
+    final d = document.data;
+    return DataLayout(
+      inputs: [
+        for (final (k, input) in inputs.indexed)
+          () {
+            final w = inputWidth(
+              network,
+              document.network,
+              network.inputIdxs[k],
+            );
+            final cats = input.categories;
+            return LayoutInput(
+              input.name,
+              columns: input.columnsFor(cats != null ? 1 : w),
+              categories: cats,
+              oneHot: cats != null && w > 1,
+              observedColumn: input.observedColumn,
+            );
+          }(),
+      ],
+      responseColumns: r == null ? const [] : r.dataColumns,
+      options: r?.options,
+      participantColumn: d.participantColumn,
+      timeColumn: d.timeColumn,
+      timeStepColumn: d.timeStepColumn,
+      groupColumn: d.groupColumn,
+      transforms: document.transforms,
+    );
+  }();
 
   /// [csv] with the document's transforms' columns appended (see
   /// [DocTransform]); [subjects] reads this.
-  CsvData transform(CsvData csv) {
-    final d = document.data;
-    return applyTransforms(
-      csv,
-      document.transforms,
-      participantColumn: d.participantColumn,
-      groupColumn: d.groupColumn,
-      timeColumn: d.timeColumn,
-    );
-  }
+  CsvData transform(CsvData csv) => layout.transform(csv);
 
   /// The subjects in [data], read by the document's column names (see
   /// [DocInput], [DocResponse] and [DocData]), after the transforms.
   List<Subject> subjects(CsvData data) {
-    final csv = transform(data);
-    final header = csv.header;
-    int col(String name, String what) {
-      final c = header.indexOf(name);
-      if (c < 0) {
+    for (final (k, input) in inputs.indexed) {
+      final w = inputWidth(network, document.network, network.inputIdxs[k]);
+      final cats = input.categories;
+      final n = input.columnsFor(cats != null ? 1 : w).length;
+      if (n != (cats != null ? 1 : w)) {
         throw FormatException(
-          'No column "$name" ($what) in the data; its columns are '
-          '${header.join(', ')}',
+          'Input "${input.name}" takes ${cats != null ? 1 : w} column(s), '
+          'not $n',
         );
       }
-      return c;
-    }
-
-    final d = document.data;
-    final groups = _groups(csv);
-
-    // Per input: its columns, offset and width.
-    final widths = [
-      for (final i in network.inputIdxs)
-        inputWidth(network, document.network, i),
-    ];
-    final width = widths.fold(0, (a, b) => a + b);
-    final nIn = inputs.length;
-    final inputCols = [
-      for (var k = 0; k < nIn; k++)
-        [
-          for (final name in inputs[k].columnsFor(widths[k]))
-            col(name, 'input ${inputs[k].name}'),
-        ],
-    ];
-    for (var k = 0; k < nIn; k++) {
-      final input = inputs[k];
-      final want = input.categories != null ? 1 : widths[k];
-      if (inputCols[k].length != want) {
-        throw FormatException(
-          'Input "${input.name}" takes $want column(s), not '
-          '${inputCols[k].length}',
-        );
-      }
-      if (input.categories case final cats?
-          when widths[k] > 1 && cats.length != widths[k]) {
+      if (cats != null && w > 1 && cats.length != w) {
         throw FormatException(
           'Input "${input.name}" has ${cats.length} categories; its node '
-          'has ${widths[k]}',
+          'has $w',
         );
       }
     }
-    final observedCols = [
-      for (final input in inputs)
-        input.observedColumn == null
-            ? null
-            : col(input.observedColumn!, 'observed flags of ${input.name}'),
-    ];
-    final r = document.response;
-    final responseCols = r == null
-        ? const <int>[]
-        : [for (final name in r.dataColumns) col(name, 'response ${r.name}')];
-    final tCol = d.timeColumn == null ? null : col(d.timeColumn!, 'time');
-    final dtCol = d.timeStepColumn == null
-        ? null
-        : col(d.timeStepColumn!, 'time steps');
-
-    double number(int row, int c) =>
-        csv.number(row, c) ??
-        (throw FormatException(
-          'Row ${row + 2}, column "${header[c]}": "${csv.rows[row][c]}" is '
-          'not a number',
-        ));
-    // A label first: "none" is a label here, not a missing value.
-    int? code(int row, int c, List<String> labels) {
-      final cell = csv.rows[row][c].trim();
-      final i = labels.indexOf(cell);
-      if (i >= 0) return i;
-      if (csv.isMissing(row, c)) return null;
-      final v = int.tryParse(cell);
-      if (v != null && v >= 0 && v < labels.length) return v;
-      throw FormatException(
-        'Row ${row + 2}, column "${header[c]}": "$cell" is not one of '
-        '${labels.join(', ')}',
-      );
-    }
-
-    return [
-      for (final MapEntry(key: id, value: rows) in groups.entries)
-        () {
-          final nTime = rows.length;
-          final u = Float64List(nTime * width);
-          final observed = Float64List(nTime * nIn)
-            ..fillRange(0, nTime * nIn, 1);
-          var masked = false;
-          for (var t = 0; t < nTime; t++) {
-            final row = rows[t];
-            var off = 0;
-            for (var k = 0; k < nIn; k++) {
-              final input = inputs[k];
-              final w = widths[k];
-              final flagCol = observedCols[k];
-              var seen = true;
-              if (input.categories case final cats?) {
-                final i = code(row, inputCols[k].single, cats);
-                if (i == null) {
-                  seen = false;
-                } else {
-                  if (w == 1) {
-                    u[t * width + off] = i.toDouble();
-                  } else {
-                    u[t * width + off + i] = 1;
-                  }
-                }
-              } else {
-                for (var j = 0; j < w; j++) {
-                  final v = number(row, inputCols[k][j]);
-                  if (v.isNaN) {
-                    seen = false;
-                  } else {
-                    u[t * width + off + j] = v;
-                  }
-                }
-              }
-              if (flagCol != null) {
-                final flag = number(row, flagCol) != 0;
-                if (flag && !seen) {
-                  throw FormatException(
-                    'Row ${row + 2}: input "${input.name}" is empty but '
-                    'flagged observed',
-                  );
-                }
-                seen = flag;
-                masked = true;
-              }
-              if (!seen) {
-                // Empty cells stay 0: a NaN at an unobserved trial would
-                // still reach the parents' beliefs.
-                observed[t * nIn + k] = 0;
-                masked = true;
-                if (flagCol == null) {
-                  u.fillRange(t * width + off, t * width + off + w, 0);
-                }
-              }
-              off += w;
-            }
-          }
-          Float64List? timeSteps;
-          if (dtCol != null) {
-            timeSteps = Float64List.fromList([
-              for (final row in rows) number(row, dtCol),
-            ]);
-          } else if (tCol != null) {
-            final times = [for (final row in rows) number(row, tCol)];
-            timeSteps = Float64List(nTime);
-            for (var t = 1; t < nTime; t++) {
-              timeSteps[t] = times[t] - times[t - 1];
-            }
-            if (nTime > 0) timeSteps[0] = nTime > 1 ? timeSteps[1] : 1.0;
-          }
-          Float64List? responses;
-          if (r != null && r.readsData) {
-            final nr = responseCols.length;
-            responses = Float64List(nTime * nr);
-            for (var t = 0; t < nTime; t++) {
-              for (var j = 0; j < nr; j++) {
-                final c = responseCols[j];
-                final row = rows[t];
-                final opts = r.options;
-                responses[t * nr + j] = opts != null
-                    ? code(row, c, opts)?.toDouble() ?? double.nan
-                    : number(row, c);
-              }
-            }
-          }
-          return Subject(
-            inputs: u,
-            observed: masked ? observed : null,
-            timeSteps: timeSteps,
-            responses: responses,
-            id: d.participantColumn == null ? null : id,
-          );
-        }(),
-    ];
+    return layout.subjects(data);
   }
 
   /// What the code generators take: the model (or the network alone), the
@@ -1198,18 +1033,33 @@ final class CompiledDocument {
     FitCodec codec = const FitCodec(),
     ExportData? data,
     String? dataFile,
-  }) => ExportSpec(
-    network: network.toJson(),
-    model: model == null ? null : codec.encodeModel(model!),
-    data: data,
-    dataFile: dataFile,
-    fit: model == null ? null : document.fit.exportFit,
-    title: document.name,
-    columnNames: columnNames,
-    derivedColumns: {
-      for (final t in document.transforms) t.name: '${t.expression}',
-    },
-  );
+    String? csv,
+  }) {
+    final m = model;
+    final fits = m != null && m.dimension > 0;
+    final a = document.network.addresses;
+    return ExportSpec(
+      network: network.toJson(),
+      model: m == null ? null : codec.encodeModel(m),
+      data: data,
+      dataFile: dataFile,
+      fit: fits ? document.fit.exportFit : null,
+      title: document.name,
+      columnNames: columnNames,
+      derivedColumns: {
+        for (final t in document.transforms) t.name: '${t.expression}',
+      },
+      layout: layout,
+      csv: csv,
+      group: fits && document.fit.exportFit != null && !document.group.isEmpty
+          ? document.group
+          : null,
+      outputs: [
+        for (final o in document.outputs)
+          (name: o.name, node: a.indexOf(o.node), field: o.field),
+      ],
+    );
+  }
 
   /// The CSV columns of the exports: the named inputs' columns, their
   /// observed-flag columns (`observed_<name>` by default), the response's

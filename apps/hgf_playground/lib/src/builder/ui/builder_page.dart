@@ -48,12 +48,14 @@ class _BuilderPageState extends State<BuilderPage> {
     mimeType: 'application/json',
   );
 
-  /// The document as a runnable script: its network, the previewed data
-  /// and, with a response and free parameters, the fit.
+  /// The document as a runnable script: its network, every participant
+  /// of the data (the loaded file's, read from it; simulated ones,
+  /// embedded) and, with free parameters, the fit of all of them with the
+  /// group level, writing the estimates and the outputs per row.
   Future<void> _exportCode({required bool python}) async {
     final messenger = ScaffoldMessenger.of(context);
-    final c = m.compiled, s = m.subject;
-    if (c == null || s == null) {
+    final c = m.compiled;
+    if (c == null || m.subject == null) {
       messenger.showSnackBar(
         const SnackBar(content: Text('Fix the errors to export the model')),
       );
@@ -61,35 +63,23 @@ class _BuilderPageState extends State<BuilderPage> {
     }
     final String script;
     try {
-      final data = ExportData(
-        inputs: s.inputs,
-        observed: s.observed,
-        timeSteps: s.timeSteps,
-        responses: s.responses,
+      final loaded = m.csv != null;
+      final spec = c.exportSpec(
+        dataFile: loaded ? (m.csvName ?? 'data.csv') : null,
+        csv: loaded ? null : c.toCsv(m.allSubjects()).toText(),
       );
-      var spec = c.exportSpec(data: data);
-      if (c.model == null || c.model!.dimension == 0) {
-        spec = ExportSpec(
-          network: c.network.toJson(),
-          data: data,
-          title: spec.title,
-          columnNames: spec.columnNames,
-          derivedColumns: spec.derivedColumns,
-        );
-      }
       script = python ? PythonExport(spec).script() : DartExport(spec).script();
     } on Object catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Could not export: $e')));
       return;
     }
     if (!mounted) return;
-    if (m.participants.length > 1 || !m.document.group.isEmpty) {
+    if (m.csv != null) {
       messenger.showSnackBar(
-        const SnackBar(
+        SnackBar(
           content: Text(
-            'The script holds the previewed participant only, fitted alone: '
-            'exports of every participant and of the group level are not '
-            'there yet.',
+            'The script reads ${m.csvName ?? 'data.csv'}: keep it next to '
+            'the script, or pass the CSV\'s path when you run it.',
           ),
         ),
       );

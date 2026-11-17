@@ -1,11 +1,15 @@
 import 'package:hgf/hgf.dart';
 
 import '../codec.dart';
+import '../document/data_layout.dart';
+import '../document/model_document.dart' show DocGroup, DocPopulation;
 import '../expr_readout.dart';
 import '../parameter.dart';
 import 'export_spec.dart';
 import 'expr_code.dart';
 import 'plan.dart';
+
+part 'python_document.dart';
 
 /// Generates a Python script that uses pyhgf (and PyMC to fit), so the
 /// work can continue in the lab's usual stack.
@@ -16,6 +20,11 @@ import 'plan.dart';
 /// priors, the network's log-likelihood wrapped from JAX with
 /// `pytensor.wrap_jax` (pyhgf's recommended route), and `pm.find_MAP` or
 /// `pm.sample`.
+///
+/// With [ExportSpec.layout] (a model document), [script] reads every
+/// participant of the document's CSV as hgf.dart does (the transforms
+/// included), fits them in one PyMC model (individual, pooled and shared
+/// parameters) and writes the estimates and the outputs per row.
 ///
 /// hgf.dart extensions pyhgf doesn't have are flagged in comments: the
 /// eHGF MGF correction, the dp-state surprise, a non-default maximum
@@ -439,6 +448,10 @@ final class PythonExport {
           ..writeln('            target_accept=${pyFloat(fit.targetAccept)},')
           ..writeln('            nuts={"max_treedepth": ${fit.maxTreeDepth}},')
           ..writeln('            random_seed=${fit.seed},')
+          ..writeln(
+            '            # One process: JAX deadlocks in forked chain processes.',
+          )
+          ..writeln('            cores=1,')
           ..writeln('        )')
           ..writeln('    import arviz as az')
           ..writeln()
@@ -525,12 +538,22 @@ final class PythonExport {
     return id;
   }
 
-  String _prior(String name, Map<String, Object?> j, Object? initial) {
+  String _prior(
+    String name,
+    Map<String, Object?> j,
+    Object? initial, {
+    String? initval,
+    String? dims,
+  }) {
     String d(String key) => pyFloat(readJsonDouble(j[key]));
     bool finite(String key) => readJsonDouble(j[key]).isFinite;
-    final init = initial == null
-        ? ''
-        : ', initval=${pyFloat(readJsonDouble(initial))}';
+    final init =
+        '${initval != null
+            ? ', initval=$initval'
+            : initial == null
+            ? ''
+            : ', initval=${pyFloat(readJsonDouble(initial))}'}'
+        '${dims == null ? '' : ', dims="$dims"'}';
     final n = '"$name"';
     return switch (j['type']) {
       'Normal' => 'pm.Normal($n, mu=${d('mean')}, sigma=${d('sd')}$init)',
@@ -555,6 +578,7 @@ final class PythonExport {
 
   /// The whole script.
   String script() {
+    if (spec.layout != null) return _documentScript();
     final model = spec.model;
     final network = buildNetwork();
     final fit = spec.fit;

@@ -163,11 +163,13 @@ melos:
         thread: wall time, frame intervals while fitting, and recovery of a
         simulated agent's parameters (headless Chromium).
     test:export-python:
-      run: cd packages/hgf_fit && dart test --tags pyhgf test/codegen_python_test.dart
+      run: cd packages/hgf_fit && dart test --tags pyhgf test/codegen_python_test.dart test/document_export_python_test.dart
       description: >-
         The Python export run by pyhgf: every parity fixture's exported
-        network against hgf.dart (parity tolerance), and an exported PyMC fit
-        against hgf_fit's MAP (needs tool/parity/.venv: `uv sync` there).
+        network against hgf.dart (parity tolerance), an exported PyMC fit
+        against hgf_fit's MAP, and a model document's export of every
+        participant (reader, transforms, MAP + Laplace, outputs, group level;
+        ~2 min) (needs tool/parity/.venv: `uv sync` there).
     fixtures:
       run: cd tool/parity && uv run python gen_fixtures.py
       description: Regenerate the pyhgf parity fixtures (needs ../pyhgf and uv).

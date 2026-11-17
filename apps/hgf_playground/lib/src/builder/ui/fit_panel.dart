@@ -4,6 +4,8 @@ import 'package:hgf_fit/document.dart';
 import 'package:hgf_fit/hgf_fit.dart'
     show
         FitCodec,
+        GroupEstimate,
+        GroupRow,
         GammaPrior,
         HalfNormal,
         LogNormal,

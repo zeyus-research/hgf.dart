@@ -673,33 +673,6 @@ final class RecoveryJob extends FitJobSpec<RecoveryOutcome> {
   }
 }
 
-/// A group-level estimate in a [DocumentFitOutcome]: a pooled parameter's
-/// typical value (its population mean, mapped to the natural scale) or
-/// spread (the population sd, on the unconstrained scale), or a shared
-/// parameter's value. Bounds are NaN where the method gives none.
-typedef GroupEstimate = ({
-  String name,
-  GroupRow kind,
-  double value,
-  double lower,
-  double upper,
-});
-
-/// What a [GroupEstimate] row is.
-enum GroupRow {
-  /// A pooled parameter's population mean, on the natural scale (the
-  /// typical participant's value).
-  typical,
-
-  /// A pooled parameter's population sd, on its unconstrained scale (log
-  /// scale for a positive parameter: 0.5 means participants differ by
-  /// factors of about e^0.5).
-  spread,
-
-  /// A parameter shared by all participants.
-  shared,
-}
-
 /// The result of a [DocumentFitJob]: per participant a value of every
 /// parameter (shared ones repeated), with 95 % intervals, and the
 /// group-level estimates.
@@ -776,7 +749,7 @@ final class DocumentFitJob extends FitJobSpec<DocumentFitOutcome> {
     final sw = Stopwatch()..start();
     final runner = await ctx.runner(config, gpu: gpu);
     final workers = runner.workers;
-    final n = subjects.length, k = model.dimension;
+    final n = subjects.length;
     // As the builder names them (BuilderModel.participantKey).
     final ids = [for (final (s, x) in subjects.indexed) '${x.id ?? s + 1}'];
     final names = model.names;
@@ -803,8 +776,6 @@ final class DocumentFitJob extends FitJobSpec<DocumentFitOutcome> {
         ? null
         : '$failed ${failed == 1 ? 'participant has' : 'participants have'} no '
               'finite fit (the beliefs diverge everywhere tried).';
-    List<Float64List> table() => [for (var s = 0; s < n; s++) Float64List(k)];
-    final est = table(), lo = table(), hi = table();
     final hm = grouped
         ? HierarchicalModel(
             model,
@@ -815,8 +786,8 @@ final class DocumentFitJob extends FitJobSpec<DocumentFitOutcome> {
         : null;
 
     DocumentFitOutcome done(
-      String label, {
-      List<GroupEstimate> group = const [],
+      String label,
+      ParticipantEstimates e, {
       required bool converged,
       double? logEvidence,
       int? divergences,
@@ -825,10 +796,10 @@ final class DocumentFitJob extends FitJobSpec<DocumentFitOutcome> {
       method: label,
       names: names,
       participants: ids,
-      estimate: est,
-      lower: lo,
-      upper: hi,
-      group: group,
+      estimate: e.estimate,
+      lower: e.lower,
+      upper: e.upper,
+      group: e.group,
       converged: converged,
       millis: sw.elapsedMilliseconds,
       where: runner.where(),
@@ -843,18 +814,14 @@ final class DocumentFitJob extends FitJobSpec<DocumentFitOutcome> {
       final lap = await workers.laplace(model, map);
       ctx.check();
       var evidence = 0.0, curved = 0;
-      for (var s = 0; s < n; s++) {
-        final r = map.results[s], l = lap.results[s];
-        final (a, b) = l.interval();
-        est[s].setAll(0, r.x);
-        lo[s].setAll(0, a);
-        hi[s].setAll(0, b);
+      for (final l in lap.results) {
         evidence += l.logEvidence;
         if (l.positiveDefinite) curved++;
       }
       final unconverged = map.results.where((r) => !r.converged).length;
       return done(
         'MAP per participant',
+        ParticipantEstimates.fromLaplace(lap, participants: ids),
         converged: unconverged == 0 && failed == 0,
         logEvidence: evidence,
         note: [
@@ -873,38 +840,9 @@ final class DocumentFitJob extends FitJobSpec<DocumentFitOutcome> {
       );
       final eb = await workers.fitEmpiricalBayes(hm!, subjects, start: starts);
       ctx.check();
-      for (var s = 0; s < n; s++) {
-        final e = eb.subjects[s];
-        final se = e.unconstrainedStandardErrors;
-        est[s].setAll(0, e.x);
-        for (var i = 0; i < k; i++) {
-          final t = model.parameters[i].transform;
-          lo[s][i] = t.toConstrained(e.y[i] - 1.959964 * se[i]);
-          hi[s][i] = t.toConstrained(e.y[i] + 1.959964 * se[i]);
-        }
-      }
       return done(
         'empirical Bayes',
-        group: [
-          for (final MapEntry(key: name, value: p)
-              in eb.populations.entries) ...[
-            (
-              name: name,
-              kind: GroupRow.typical,
-              value: model.parameters[names.indexOf(name)].transform
-                  .toConstrained(p.mean),
-              lower: double.nan,
-              upper: double.nan,
-            ),
-            (
-              name: name,
-              kind: GroupRow.spread,
-              value: p.sd,
-              lower: double.nan,
-              upper: double.nan,
-            ),
-          ],
-        ],
+        ParticipantEstimates.fromEmpiricalBayes(eb, participants: ids),
         converged: eb.converged,
         logEvidence: eb.logEvidence,
         note: eb.converged
@@ -918,18 +856,6 @@ final class DocumentFitJob extends FitJobSpec<DocumentFitOutcome> {
       targetAccept: config.targetAccept,
       maxTreeDepth: config.maxTreeDepth,
     );
-    (double, double, double) summarise(List<Float64List> chains) {
-      final all = Float64List.fromList(
-        chains.expand((c) => c).toList()..sort(),
-      );
-      if (all.isEmpty) return (double.nan, double.nan, double.nan);
-      var sum = 0.0;
-      for (final v in all) {
-        sum += v;
-      }
-      return (sum / all.length, quantileOf(all, 0.025), quantileOf(all, 0.975));
-    }
-
     if (hm == null) {
       final p = SamplingProgress();
       ctx.report(
@@ -960,19 +886,10 @@ final class DocumentFitJob extends FitJobSpec<DocumentFitOutcome> {
         timer.cancel();
       }
       ctx.check();
-      var ok = true;
-      for (var s = 0; s < n; s++) {
-        final d = nuts.results[s];
-        ok = ok && d.nChains > 0 && d.converged();
-        for (var i = 0; i < k; i++) {
-          final (m, a, b) = summarise(d.parameter(i));
-          est[s][i] = m;
-          lo[s][i] = a;
-          hi[s][i] = b;
-        }
-      }
+      final ok = nuts.results.every((d) => d.nChains > 0 && d.converged());
       return done(
         'NUTS per participant',
+        ParticipantEstimates.fromNuts(nuts, participants: ids),
         converged: ok,
         divergences: nuts.divergences,
         note: nuts.divergences > 0
@@ -1002,58 +919,15 @@ final class DocumentFitJob extends FitJobSpec<DocumentFitOutcome> {
       seed: seed,
     );
     ctx.check();
-    final draws = fit.draws;
-    for (var s = 0; s < n; s++) {
-      for (var i = 0; i < k; i++) {
-        final name = names[i];
-        final idx = shared.contains(name)
-            ? hm.indexOf(name)
-            : hm.indexOf(name, subject: s);
-        final (m, a, b) = summarise(draws.parameter(idx));
-        est[s][i] = m;
-        lo[s][i] = a;
-        hi[s][i] = b;
-      }
-    }
-    final group = <GroupEstimate>[];
-    for (final name in names) {
-      if (pooled.containsKey(name)) {
-        final t = model.parameters[names.indexOf(name)].transform;
-        final (m, a, b) = summarise(
-          draws.parameter(hm.indexOf(name, group: 'mu')),
-        );
-        group.add((
-          name: name,
-          kind: GroupRow.typical,
-          value: t.toConstrained(m),
-          lower: t.toConstrained(a),
-          upper: t.toConstrained(b),
-        ));
-        final (sm, sa, sb) = summarise(
-          draws.parameter(hm.indexOf(name, group: 'sigma')),
-        );
-        group.add((
-          name: name,
-          kind: GroupRow.spread,
-          value: sm,
-          lower: sa,
-          upper: sb,
-        ));
-      } else if (shared.contains(name)) {
-        final (m, a, b) = summarise(draws.parameter(hm.indexOf(name)));
-        group.add((
-          name: name,
-          kind: GroupRow.shared,
-          value: m,
-          lower: a,
-          upper: b,
-        ));
-      }
-    }
-    final ok = draws.nChains > 0 && fit.converged();
+    final ok = fit.draws.nChains > 0 && fit.converged();
     return done(
       'hierarchical NUTS',
-      group: group,
+      ParticipantEstimates.fromHierarchical(
+        hm,
+        fit,
+        subjects,
+        participants: ids,
+      ),
       converged: ok,
       divergences: fit.divergences,
       note: fit.divergences > 0

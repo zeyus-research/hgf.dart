@@ -323,33 +323,40 @@ p2,0.25,2,0,
           data: ExportData(inputs: u, responses: responses),
           dataFile: 'press.csv',
         );
-        final csv = spec.data!.toCsv(spec.plan, names: c.columnNames);
+        // The single-series columns (what the network-only exports read).
         expect(
-          csv.split('\n').first,
+          spec.data!.toCsv(spec.plan, names: c.columnNames).split('\n').first,
           'ball,mate_left,mate_right,mate_none,press',
         );
-        expect(PythonExport(spec).script(), contains('"mate_none"'));
+        // A document's scripts read its own layout: labels, participants.
+        final subject = Subject(inputs: u, responses: responses, id: 'p1');
+        final csv = c.toCsv([subject]);
+        expect(csv.header, ['participant', 't', 'ball', 'mate', 'press']);
         final dir = Directory('.dart_tool/document_test')
           ..createSync(recursive: true);
         File(
           '${dir.path}/press.dart',
         ).writeAsStringSync(DartExport(spec).script());
-        File('${dir.path}/press.csv').writeAsStringSync(csv);
+        File('${dir.path}/press.csv').writeAsStringSync(csv.toText());
         final run = await Process.run(Platform.resolvedExecutable, [
           'run',
           'press.dart',
         ], workingDirectory: dir.path);
         expect(run.exitCode, 0, reason: '${run.stdout}\n${run.stderr}');
-        final subject = Subject(inputs: u, responses: responses);
-        final map = fitMap(
-          model,
-          [subject],
-          restarts: 3,
-          random: math.Random(1),
-        );
+        final read = c.subjects(csv).single;
+        final map = fitMap(model, [read], restarts: 3, random: math.Random(1));
         expect(
           run.stdout as String,
-          contains(laplace(model, map).results.single.toString()),
+          contains(
+            ParticipantEstimates.fromLaplace(
+              laplace(model, map),
+              participants: ['p1'],
+            ).toString(),
+          ),
+        );
+        expect(
+          File('${dir.path}/press_outputs.csv').readAsLinesSync().first,
+          'participant,t,ball,mate,press,pe,surprise',
         );
       });
 

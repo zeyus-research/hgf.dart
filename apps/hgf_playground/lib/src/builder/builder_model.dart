@@ -1370,14 +1370,7 @@ class BuilderModel extends ChangeNotifier {
 }
 
 /// [data] as CSV text (cells with a comma, quote or newline quoted).
-String csvText(CsvData data) {
-  String q(String s) =>
-      s.contains(RegExp('[,"\n]')) ? '"${s.replaceAll('"', '""')}"' : s;
-  return [
-    data.header.map(q).join(','),
-    for (final r in data.rows) r.map(q).join(','),
-  ].join('\n');
-}
+String csvText(CsvData data) => data.toText();
 
 /// A short name for a node kind.
 String kindName(NodeKind kind) => switch (kind) {

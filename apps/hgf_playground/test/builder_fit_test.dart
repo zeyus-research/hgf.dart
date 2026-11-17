@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hgf/hgf.dart';
 import 'package:hgf_fit/document.dart';
+import 'package:hgf_fit/hgf_fit.dart' show GroupRow;
 import 'package:hgf_playground/src/builder/builder_fit.dart';
 import 'package:hgf_playground/src/builder/builder_model.dart';
 import 'package:hgf_playground/src/model/fit_config.dart';

@@ -1,11 +1,14 @@
 import 'package:hgf/hgf.dart';
 
 import '../codec.dart';
+import '../document/model_document.dart' show DocGroup;
 import '../parameter.dart';
 import '../expr_readout.dart';
 import 'export_spec.dart';
 import 'expr_code.dart';
 import 'plan.dart';
+
+part 'dart_document.dart';
 
 /// Generates Dart code that uses `package:hgf` (and `package:hgf_fit`).
 ///
@@ -13,6 +16,10 @@ import 'plan.dart';
 /// the spec has a model, the data (embedded, and a CSV reader), and a
 /// `main` that filters the data and runs the fit. [network] and [model]
 /// give just those expressions.
+///
+/// With [ExportSpec.layout] (a model document), [script] reads every
+/// participant of the document's CSV through `DataLayout`, fits them all
+/// (with the group level) and writes the estimates and the outputs per row.
 ///
 /// What can't be generated (custom couplings, custom priors, transforms
 /// and response models, `ResponseModel.fn`) becomes a stub that throws
@@ -432,6 +439,7 @@ final class DartExport {
 
   /// The whole script.
   String script() {
+    if (spec.layout != null) return _documentScript();
     final plan = spec.plan;
     final net = network(indent: '    ', terminator: ';');
     final model = spec.model == null ? null : this.model();

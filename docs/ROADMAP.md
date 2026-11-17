@@ -2327,10 +2327,11 @@ fitting, export) reads it.
    bindings per participant, a group level via `HierarchicalModel`),
    wired to the fit view and the exports. First part done 2026-11-17
    (see "Builder, slice 3" below): free parameters, the group level in
-   the document, fitting every participant from the builder. Left: the
-   exports of every participant and of the group level (Dart, then
-   pyhgf/PyMC), and relative bindings (team-mates' presses as inputs
-   beyond `mate()` transforms).
+   the document, fitting every participant from the builder; the exports
+   of every participant and of the group level, Dart and pyhgf/PyMC
+   (2026-11-17, see "Exports of every participant" below). Left:
+   relative bindings (team-mates' presses as inputs beyond `mate()`
+   transforms).
 7. [ ] Later: hgf_deep layers and a data-loading pipeline as nodes of
    the same kind; Julia export.
 
@@ -2635,13 +2636,73 @@ candidate search.
   `builder_fit_test.dart` (simulated participants, the four methods
   through the web host's wire format, preview at the estimates, stale
   results, the estimates CSV, the Fit panel's widgets at two widths).
-- Left: the exports (the builder's export still writes the previewed
-  participant alone, and says so), relative bindings, a hierarchical
+- Left: relative bindings, a hierarchical
   parameter recovery (simulate from the populations), per-participant
   convergence diagnostics in the panel, and editing hyperpriors other
-  than normal / half-normal.
+  than normal / half-normal. (The exports followed, below.)
 
- A
+#### Exports of every participant (2026-11-17): done
+
+- **A model document's scripts read its own CSV**: `ExportSpec.layout`
+  (a `DataLayout`, below) switches both generators to a document script
+  that reads every participant as the builder does (labels, one-hot
+  categories, observed-flag columns, a participant column, time or time-step
+  columns, the transforms with `lag`/`diff`/`mate`), fits them all, writes
+  `<data>_estimates.csv` (the builder's estimates CSV, group table
+  included) and, with named outputs, `<data>_outputs.csv` (the data with a
+  column per output, each participant filtered at their estimates: the EEG
+  regressors). The data is embedded (`ExportSpec.csv`) or read from a file
+  given on the command line (`dataFile` as the default).
+  `CompiledDocument.exportSpec` fills in the layout, the group and the
+  outputs; a model without free parameters exports without a fit.
+- **Dart:** `buildNetwork()`, `buildModel()`, `buildGroup(model)` (a
+  `HierarchicalModel` with the populations' hyperpriors), `networkAt(x)`,
+  the `layout` as a `DataLayout(...)` literal, `outputs(traj)`. MAP +
+  Laplace per participant, NUTS per participant, empirical Bayes or
+  hierarchical NUTS, each starting from the participants' MAP estimates as
+  the playground does: the scripts' results equal the in-process fits bit
+  for bit (estimates, both CSVs; `test/document_export_test.dart`, which
+  also analyses the scripts with `--fatal-infos`).
+- **Python (pyhgf + PyMC):** the reader and the transforms ported
+  (`parse_csv`, `participants`, a `Transforms` class with hgf.dart's NaN
+  and text semantics: the generated code gives the same columns and
+  subjects to 1e-12 on a reshuffled-teams table using every data function),
+  one PyMC model over all participants (individual parameters with
+  `dims="participant"`, pooled ones non-centred or centred around a
+  population on hgf_fit's unconstrained scale through the parameter's own
+  transform, shared ones once; one jitted, `wrap_jax`ped likelihood per
+  participant). MAP per participant is `find_MAP` plus Laplace intervals
+  from central differences of the gradient (no Jacobian, as hgf_fit):
+  hgf_fit's estimates and intervals to 5 digits. With a group level the
+  script samples the joint posterior by NUTS (also under MAP: PyMC has no
+  empirical Bayes, and the docstring says so); it agrees with hgf_fit's
+  hierarchical NUTS within Monte Carlo error. Outputs match hgf.dart to
+  1e-15 (`test/document_export_python_test.dart`, in
+  `melos run test:export-python`).
+- **Library:** `ParticipantEstimates` (hgf_fit: from Laplace, empirical
+  Bayes, NUTS or a hierarchical fit; `toCsv`, `toString`, `byParticipant`)
+  with `GroupRow`/`GroupEstimate` moved from the playground (its fit job and
+  estimates CSV now use it); `DataLayout`/`LayoutInput`
+  (`hgf_fit/document.dart`: `subjects`, `transform`, `participantRows`,
+  `withColumns`), which `CompiledDocument.subjects`/`withOutputs` now
+  delegate to; `CsvData.toText()` in hgf.
+- **Builder:** File → Export writes every participant: simulated ones
+  embedded, loaded data read from its file (by name, next to the script, or
+  a path on the command line).
+- **Found:** `pm.sample` with JAX inside deadlocks in PyMC's forked chain
+  processes (0 % CPU forever), so every exported script samples with
+  `cores=1` (the old single-subject one too). Without `jax.jit` around the
+  likelihood, PyMC's gradient retraces pyhgf every call (≫ 10 min for a
+  3-participant fit; 3 ms per gradient jitted). The parity venv's pyhgf
+  still crashes on a categorical node after a continuous one
+  ([P7](upstream/README.md#p7)); the Python tests put it first.
+- Left for later: generated data for inputs that read transforms (the
+  simulated CSV then holds the derived column, and the script's transform
+  would clash with it), Laplace intervals for pooled parameters under MAP
+  in Python (it samples instead), MAP restarts in the Python export (PyMC
+  starts from the initial values only).
+
+**Driving example: the user's 6-person hyperscanning experiment.** A
 ball balancing on a beam (an elevator): a participant lifts the left or
 the right side (never both), so the ball rises without falling off;
 levels with obstacles, and dropping the ball or hitting a fatal obstacle
@@ -2822,8 +2883,9 @@ data transforms) are done (2026-11-16), and the choice follow-ups
 two slices, the HGF graph canvas and the pipeline around it (data,
 transforms, response, outputs; 2026-11-17), and the first part of slice 3
 (free parameters, the group level, fitting every participant from the
-builder; 2026-11-17); next the exports of participants and the group
-level. Vector node kinds on the GPU and a
+builder; 2026-11-17), and the exports of every participant and the group
+level, Dart and pyhgf/PyMC (2026-11-17); next relative bindings, then
+hgf_deep pipeline nodes. Vector node kinds on the GPU and a
 faster dp candidate search can run alongside.
 
 ```sh

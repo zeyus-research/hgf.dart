@@ -42,6 +42,18 @@ final class CsvData {
   /// Whether a decimal comma is accepted.
   final bool decimalComma;
 
+  /// The rows as comma-separated text with the header first, quoting
+  /// cells that hold a comma, a quote or a line break ([CsvData.parse]
+  /// reads it back).
+  String toText() {
+    String q(String s) =>
+        s.contains(RegExp('[,"\n\r]')) ? '"${s.replaceAll('"', '""')}"' : s;
+    return [
+      header.map(q).join(','),
+      for (final r in rows) r.map(q).join(','),
+    ].join('\n');
+  }
+
   static const _missing = {'', 'na', 'nan', 'null', 'n/a', 'none', '.'};
 
   /// Whether row [r]'s cell in column [c] is missing.

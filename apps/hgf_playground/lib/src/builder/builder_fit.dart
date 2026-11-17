@@ -2,9 +2,9 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
-import 'package:hgf/hgf.dart' show CsvData;
 import 'package:hgf_fit/document.dart';
-import 'package:hgf_fit/hgf_fit.dart' show FitCancelled, FitCodec, Subject;
+import 'package:hgf_fit/hgf_fit.dart'
+    show FitCancelled, FitCodec, ParticipantEstimates, Subject;
 
 import '../model/fit_config.dart';
 import '../model/fit_engine.dart';
@@ -195,51 +195,14 @@ class BuilderFitting {
   String? estimatesCsv() {
     final r = result;
     if (r == null) return null;
-    final truth = builder.simulatedTruth;
-    final hasTruth = truth.isNotEmpty;
-    final header = [
-      'participant',
-      for (final n in r.names) ...[
-        n,
-        '${n}_lower',
-        '${n}_upper',
-        if (hasTruth) '${n}_true',
-      ],
-    ];
-    String cell(double v) => v.isFinite ? '$v' : '';
-    final rows = <List<String>>[
-      for (final (k, id) in r.participants.indexed)
-        [
-          id,
-          for (var i = 0; i < r.names.length; i++) ...[
-            cell(r.estimate[k][i]),
-            cell(r.lower[k][i]),
-            cell(r.upper[k][i]),
-            if (hasTruth) cell(truth[id]?[i] ?? double.nan),
-          ],
-        ],
-    ];
-    if (r.group.isNotEmpty) {
-      final g = <List<String>>[
-        ['parameter', 'value', 'lower', 'upper'],
-        for (final e in r.group)
-          [
-            switch (e.kind) {
-              GroupRow.typical => '${e.name}_typical',
-              GroupRow.spread => '${e.name}_spread',
-              GroupRow.shared => e.name,
-            },
-            cell(e.value),
-            cell(e.lower),
-            cell(e.upper),
-          ],
-      ];
-      // The group level as a second table below a blank line: the
-      // participants' table stays rectangular for readers of the first.
-      return '${csvText(CsvData(header, rows))}\n\n'
-          '${csvText(CsvData(g.first, g.sublist(1)))}';
-    }
-    return csvText(CsvData(header, rows));
+    return ParticipantEstimates(
+      names: r.names,
+      participants: r.participants,
+      estimate: r.estimate,
+      lower: r.lower,
+      upper: r.upper,
+      group: r.group,
+    ).toCsv(truth: builder.simulatedTruth);
   }
 
   /// The estimates per participant for the outputs (null: no usable

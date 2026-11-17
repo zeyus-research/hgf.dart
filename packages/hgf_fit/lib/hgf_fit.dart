@@ -47,6 +47,7 @@ export 'src/optim/nelder_mead.dart';
 export 'src/optim/optimizer.dart'
     show EvalRequest, OptimizeResult, Optimizer, ResultSlot, minimizeFunction;
 export 'src/parameter.dart';
+export 'src/participant_estimates.dart';
 export 'src/pass.dart' hide splitTasks;
 export 'src/prior.dart';
 export 'src/response_model.dart' hide bindResponsePartials;

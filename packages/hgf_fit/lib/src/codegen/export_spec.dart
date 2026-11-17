@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import '../document/data_layout.dart';
+import '../document/model_document.dart' show DocGroup;
 import 'plan.dart';
 
 /// What to export: a network or a fitting model, optionally with data and
@@ -16,12 +18,19 @@ final class ExportSpec {
     this.title,
     this.columnNames,
     this.derivedColumns = const {},
+    this.layout,
+    this.csv,
+    this.group,
+    this.outputs = const [],
   }) : network =
            network ??
            (model?['network'] as Map<String, Object?>?) ??
            (throw ArgumentError('Give a network or a model')) {
     if (fit != null && model == null) {
       throw ArgumentError('A fit needs a model');
+    }
+    if (group != null && !group!.isEmpty && fit == null) {
+      throw ArgumentError('A group level needs a fit');
     }
   }
 
@@ -54,8 +63,29 @@ final class ExportSpec {
   /// columns, so the CSV must hold them (`CompiledDocument.transform`).
   final Map<String, String> derivedColumns;
 
+  /// How a model document reads its CSV: with a layout, the scripts read
+  /// every participant by column name (labels, a participant column, a
+  /// time column, the transforms) instead of [columnNames]' one series,
+  /// fit them all (with the [group] level), and write the estimates and
+  /// [outputs] per row. [data] is then unused: [csv] is the embedded data.
+  final DataLayout? layout;
+
+  /// The data as CSV text, embedded in a [layout] script.
+  final String? csv;
+
+  /// The group level over participants (a [layout] script with a fit).
+  final DocGroup? group;
+
+  /// Trajectory outputs a [layout] script writes per row: a node's field
+  /// (pyhgf name) or `surprise`.
+  final List<ExportOutput> outputs;
+
   late final NetworkPlan plan = NetworkPlan.fromJson(network);
 }
+
+/// A named trajectory output: [node]'s [field] (a `NodeField`'s pyhgf
+/// name, or `surprise` for the node's surprise).
+typedef ExportOutput = ({String name, int node, String field});
 
 /// How the exported script fits.
 sealed class ExportFit {
