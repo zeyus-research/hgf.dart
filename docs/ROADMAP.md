@@ -2350,8 +2350,96 @@ fitting, export) reads it.
    export; continuous layers' couplings and per-layer volatility children
    in the inspector.
 
+9. [ ] **Builder: performance and usability** (reported 2026-11-18, see
+   "Builder: performance and usability" below). Done: dragging no longer
+   rebuilds the page, right-click menus on the web and with a moving
+   mouse, searchable pickers for long lists, the inspector as a sheet on
+   phones. Left: cross-origin isolation for the deployed build (skwasm's
+   render thread), the pipeline canvas on phones, a shared viewport for
+   the canvases.
+
 In parallel (not blocking): vector node kinds on the GPU, a faster dp
 candidate search.
+
+#### Builder: performance and usability (2026-11-18): first part done
+
+Four reports from use: dragging a node feels slow in a browser; the
+dropdowns get unwieldy with many nodes or parameters; right-click does
+nothing on desktop (long-press works), though the help says right-click;
+on phones, tapping a node shows its properties below the plots with no
+sign that anything opened.
+
+- **Dragging.** `moveNode`/`movePart` notified the whole `BuilderModel`,
+  so every pointer move rebuilt the page: app bar, inspector and preview.
+  Positions now notify `BuilderModel.layoutChanges`, which only the
+  canvases hear (with the model, through `Listenable.merge`). The
+  canvases also lay out each label once (`canvasText`, a cache cleared
+  when fonts load, as `hgf_widgets`' plots do), draw the dotted grid in
+  one `drawRawPoints` call instead of a circle per dot, keep each dashed
+  volatility edge's path (`EdgeGeometry.dashedPath`), sit in their own
+  `RepaintBoundary`, and the pipeline canvas computes its cards and wires
+  once per change instead of on every hit test.
+  Measured (`flutter build web --wasm -O4`, Chrome on an M-series Mac
+  under 4× CPU throttling, 120 pointer moves dragging the network card):
+  main-thread script time 2.74 s → 2.13 s. A drag now costs what a pan
+  of the empty background costs (2.0–2.4 s): what is left is Flutter's
+  per-frame rendering, not the builder. Served **cross-origin isolated**
+  (COOP/COEP), skwasm renders on a worker and the same drag takes
+  0.55 s of main-thread time, with pointer events handled twice as fast.
+  GitHub Pages cannot send those headers (see the follow-ups).
+- **Right-click** failed for two reasons. On the web the page let the
+  browser's `contextmenu` through: Chrome on macOS opens its menu on the
+  press and keeps the release, so Flutter never saw a secondary tap.
+  `NoBrowserContextMenu` turns the browser's menu off while the pointer
+  is over a canvas (text fields elsewhere keep it). And everywhere, a
+  mouse or trackpad that moved 2 px between press and release handed the
+  gesture arena to the canvas's pan (`ScaleGestureRecognizer` takes every
+  button), dropping the secondary tap. The canvases now open their menus
+  from raw pointer events (`RightClicks`) and ignore pans started with
+  the secondary button. The help texts say "right-click (or
+  long-press)" on both canvases.
+- **Long lists.** `Pick` (the inspectors' labelled dropdown) opens a
+  search dialog (`showSearchPicker`) past 8 items: words match anywhere,
+  `x12` matches `x₁₂`, Enter takes a single match, headings group the
+  items where given. So do "free a parameter" (+, grouped by node, the
+  couplings and the response), the preview's participant picker, and
+  the choice of implied nodes when wiring to a block, which used to cut
+  the menu at 40 (later nodes could not be wired by dragging).
+- **Phones** (narrower than 900 px): the inspector is a bottom sheet over
+  the canvas and the preview. It always shows its top (the selected
+  part's title), opens to just below the canvas when something new is
+  selected, can be dragged, and its handle opens or closes it. The
+  breadcrumbs and the preview's header overflowed below 434 px wide
+  (most phones); fixed, and the page test now renders every preset at
+  360 px too.
+- Shared by the canvases (`builder/ui/canvas_support.dart`): the text
+  cache, the grid, hit-test distances, menus at the pointer, snack
+  messages, the zoom buttons, the keyboard shortcuts, right clicks.
+- Tests (`test/builder_ui_test.dart`): moves notify the layout only; a
+  node drag rebuilds the page twice (the undo step and the selection),
+  not per move; right-click with a jittering mouse on both canvases;
+  search matching and a long `Pick`; the phone sheet opens below the
+  canvas and closes from its handle. 143 playground tests pass.
+
+Follow-ups:
+
+- [ ] **Cross-origin isolation on GitHub Pages**, for skwasm's render
+  thread (4× less main-thread time while dragging, above). Pages cannot
+  set headers; the usual fix is a service worker that adds COOP/COEP
+  (e.g. `coi-serviceworker`, or `COEP: credentialless`). Check first that
+  everything the page fetches cross-origin (fonts from gstatic, the fit
+  workers) still loads, and how the service worker's caching interacts
+  with new deployments. Also lets the fit workers use shared memory.
+- [ ] **The pipeline canvas on phones**: "fit to view" stops at 0.3×, so
+  on a 360 px screen the cards are tiny and the data card is cut off.
+  A top-to-bottom pipeline on narrow screens, or a smaller minimum zoom.
+- [ ] **One viewport for the canvases**: the network and pipeline
+  canvases still each keep their own pan, zoom, fit and gesture
+  dispatch (about 100 lines each); a mixin could take them.
+- [ ] Note for running the playground's tests on macOS: `flutter test`
+  needs the `hgf_gpu` user-define `bundle: false` (see
+  `packages/hgf_gpu/hook/build.dart`), else `install_name_tool` aborts
+  on the bundled wgpu-native.
 
 #### Deep training and wiring (2026-11-17): done
 

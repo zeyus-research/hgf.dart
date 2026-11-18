@@ -12,6 +12,7 @@ import '../doc_layout.dart' show ownerIdOf;
 import 'fit_panel.dart' show FitPanel, FreeToggle;
 import 'inspector.dart' show NumberField;
 import 'pipeline_canvas.dart' show readoutName;
+import 'search_picker.dart';
 import 'step_inspector.dart' show StepPanel;
 
 /// The inspector of the pipeline canvas: the part selected (data,
@@ -72,9 +73,9 @@ class PipelineHelpCard extends StatelessWidget {
         'make a transform of it. Drag the network\'s beliefs port onto the '
         'background to add an output (a node\'s field per time step, e.g. a '
         'prediction error for EEG). Double-click the network to edit it; '
-        'right-click for more. Without loaded data the preview simulates '
-        'each input and, with a response, the responses. Right-click the '
-        'background to add an HGF network or a deep network (an HGF '
+        'right-click (or long-press) for more. Without loaded data the '
+        'preview simulates each input and, with a response, the responses. '
+        'Right-click (or long-press) the background to add an HGF network or a deep network (an HGF '
         'neural network, pyhgf\'s DeepNetwork): drag columns onto its '
         'features and targets, double-click it to edit its layers.',
         style: Theme.of(context).textTheme.bodySmall,
@@ -1663,7 +1664,8 @@ class _OutputPanel extends StatelessWidget {
 // Fields
 // -----------------------------------------------------------------------------
 
-/// A dropdown with a label.
+/// A dropdown with a label; past [searchPickerAbove] items, a field that
+/// opens [showSearchPicker] (a search over the list) instead.
 class Pick<T> extends StatelessWidget {
   const Pick({
     super.key,
@@ -1672,6 +1674,7 @@ class Pick<T> extends StatelessWidget {
     required this.items,
     required this.onChanged,
     this.hint,
+    this.groupOf,
   });
 
   final String label;
@@ -1680,34 +1683,77 @@ class Pick<T> extends StatelessWidget {
   final ValueChanged<T?> onChanged;
   final String? hint;
 
+  /// A heading per item in the search picker (e.g. its node).
+  final String? Function(T)? groupOf;
+
+  InputDecoration get _decoration => InputDecoration(
+    labelText: label,
+    isDense: true,
+    contentPadding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+    border: const OutlineInputBorder(),
+  );
+
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: 8),
-    child: InputDecorator(
-      decoration: InputDecoration(
-        labelText: label,
-        isDense: true,
-        contentPadding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
-        border: const OutlineInputBorder(),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<T>(
-          value: items.containsKey(value) ? value : null,
-          hint: hint == null ? null : Text(hint!),
-          isDense: true,
-          isExpanded: true,
-          items: [
-            for (final MapEntry(:key, value: text) in items.entries)
-              DropdownMenuItem(
-                value: key,
-                child: Text(text, overflow: TextOverflow.ellipsis),
-              ),
-          ],
-          onChanged: onChanged,
+  Widget build(BuildContext context) {
+    if (items.length > searchPickerAbove) return _searchable(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: InputDecorator(
+        decoration: _decoration,
+        child: DropdownButtonHideUnderline(
+          child: DropdownButton<T>(
+            value: items.containsKey(value) ? value : null,
+            hint: hint == null ? null : Text(hint!),
+            isDense: true,
+            isExpanded: true,
+            items: [
+              for (final MapEntry(:key, value: text) in items.entries)
+                DropdownMenuItem(
+                  value: key,
+                  child: Text(text, overflow: TextOverflow.ellipsis),
+                ),
+            ],
+            onChanged: onChanged,
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
+
+  Widget _searchable(BuildContext context) {
+    final theme = Theme.of(context);
+    final current = items.containsKey(value) ? items[value as T] : null;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(4),
+        onTap: () async {
+          final pick = await showSearchPicker<T>(
+            context,
+            title: label,
+            items: items,
+            selected: value,
+            groupOf: groupOf,
+          );
+          if (pick case (final v,)) onChanged(v);
+        },
+        child: InputDecorator(
+          decoration: _decoration.copyWith(
+            suffixIcon: const Icon(Icons.search, size: 20),
+          ),
+          child: Text(
+            current ?? hint ?? '',
+            overflow: TextOverflow.ellipsis,
+            style: current == null
+                ? theme.textTheme.bodyLarge?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  )
+                : theme.textTheme.bodyLarge,
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// A column of the data (or a transform's), picked from the loaded data's

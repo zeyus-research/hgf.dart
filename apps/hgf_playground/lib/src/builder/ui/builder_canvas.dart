@@ -9,6 +9,8 @@ import 'package:material_ui/material_ui.dart';
 import '../../ui/panels.dart' show fmt;
 import '../builder_model.dart';
 import '../doc_layout.dart';
+import 'canvas_support.dart';
+import 'search_picker.dart';
 
 /// A port of a node: where edges of one type attach. Top ports take
 /// parents, bottom ports children (parents sit above their children).
@@ -119,6 +121,7 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
   /// Where the last pointer went down: the scale recogniser starts only
   /// after the touch slop, too late to hit a port.
   Offset? _downAt;
+  final _right = RightClicks();
 
   /// The last tap on the background (time and place), for double-clicks.
   (Duration, Offset)? _lastTap;
@@ -126,24 +129,27 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
 
   BuilderModel get m => widget.model;
 
+  /// The model and its positions (moves notify only the latter).
+  late Listenable _source = Listenable.merge([m, m.layoutChanges]);
+
   @override
   void initState() {
     super.initState();
-    m.addListener(_changed);
+    _source.addListener(_changed);
   }
 
   @override
   void didUpdateWidget(BuilderCanvas old) {
     super.didUpdateWidget(old);
     if (old.model != m) {
-      old.model.removeListener(_changed);
-      m.addListener(_changed);
+      _source.removeListener(_changed);
+      _source = Listenable.merge([m, m.layoutChanges])..addListener(_changed);
     }
   }
 
   @override
   void dispose() {
-    m.removeListener(_changed);
+    _source.removeListener(_changed);
     _focus.dispose();
     super.dispose();
   }
@@ -214,37 +220,18 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
 
   int? _edgeAt(Offset screen) {
     final p = _toCanvas(screen);
-    final reach = math.max(5.0, 8 / _scale);
     int? best;
-    var bestD = reach;
+    var bestD = math.max(5.0, 8 / _scale);
     for (final (i, e) in m.doc.edges.indexed) {
       final g = edgeGeometry(m, e);
       if (g == null) continue;
-      Offset? prev;
-      for (var k = 0; k <= 24; k++) {
-        final q = g.at(k / 24);
-        if (prev != null) {
-          final d = _segmentDistance(p, prev, q);
-          if (d < bestD) {
-            bestD = d;
-            best = i;
-          }
-        }
-        prev = q;
+      final d = curveDistance(p, g.at);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
       }
     }
     return best;
-  }
-
-  static double _segmentDistance(Offset p, Offset a, Offset b) {
-    final ab = b - a;
-    final len2 = ab.distanceSquared;
-    if (len2 == 0) return (p - a).distance;
-    final t = (((p - a).dx * ab.dx + (p - a).dy * ab.dy) / len2).clamp(
-      0.0,
-      1.0,
-    );
-    return (p - (a + ab * t)).distance;
   }
 
   // ---------------------------------------------------------------------------
@@ -253,6 +240,10 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
 
   void _onScaleStart(ScaleStartDetails d) {
     _focus.requestFocus();
+    if (_right.active) {
+      _drag = null; // a right click's drag: neither a pan nor a move
+      return;
+    }
     final at = d.pointerCount == 1
         ? (_downAt ?? d.localFocalPoint)
         : d.localFocalPoint;
@@ -326,7 +317,7 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
       } else if (ok.isNotEmpty) {
         _chooseEdge(ok, _toScreen(drag.at));
       } else {
-        _tell(candidates.first.problem!);
+        tellCanvas(context, candidates.first.problem!);
       }
     }
   }
@@ -364,39 +355,21 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
       return '${prettyId(address)} (${impliedNodeName(node, k)})';
     }
 
-    final pick = await showMenu<DocEdge>(
-      context: context,
-      position: _menuPosition(screen),
-      items: [
-        for (final c in ok.take(40))
-          PopupMenuItem(
-            value: c.edge,
-            child: Text(
-              '${describe(c.edge.parent)} → ${describe(c.edge.child)}',
-            ),
-          ),
-      ],
-    );
-    if (pick != null) m.addEdge(pick);
-  }
-
-  RelativeRect _menuPosition(Offset local) {
-    final box = context.findRenderObject()! as RenderBox;
-    final g = box.localToGlobal(local);
-    final overlay =
-        Overlay.of(context).context.findRenderObject()! as RenderBox;
-    return RelativeRect.fromRect(
-      Rect.fromLTWH(g.dx, g.dy, 1, 1),
-      Offset.zero & overlay.size,
-    );
-  }
-
-  void _tell(String message) {
-    ScaffoldMessenger.maybeOf(context)
-      ?..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
+    String label(DocEdge e) => '${describe(e.parent)} → ${describe(e.child)}';
+    if (ok.length > searchPickerAbove) {
+      final pick = await showSearchPicker<DocEdge>(
+        context,
+        title: 'Connect which nodes?',
+        items: {for (final c in ok) c.edge: label(c.edge)},
       );
+      if (pick case (final e,)) m.addEdge(e);
+      return;
+    }
+    final pick = await showMenuAt<DocEdge>(context, screen, [
+      for (final c in ok)
+        PopupMenuItem(value: c.edge, child: Text(label(c.edge))),
+    ]);
+    if (pick != null) m.addEdge(pick);
   }
 
   void _onTapUp(TapUpDetails d) {
@@ -491,11 +464,7 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
         );
       }
     }
-    final pick = await showMenu<VoidCallback>(
-      context: context,
-      position: _menuPosition(at),
-      items: items,
-    );
+    final pick = await showMenuAt(context, at, items);
     pick?.call();
   }
 
@@ -508,37 +477,14 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
     if (h != _hover) setState(() => _hover = h);
   }
 
-  KeyEventResult _onKey(FocusNode node, KeyEvent e) {
-    if (e is! KeyDownEvent && e is! KeyRepeatEvent) {
-      return KeyEventResult.ignored;
-    }
-    final k = e.logicalKey;
-    final hw = HardwareKeyboard.instance;
-    final mod = hw.isControlPressed || hw.isMetaPressed;
-    if (mod && k == LogicalKeyboardKey.keyZ) {
-      hw.isShiftPressed ? m.redo() : m.undo();
-      return KeyEventResult.handled;
-    }
-    if (mod && k == LogicalKeyboardKey.keyY) {
-      m.redo();
-      return KeyEventResult.handled;
-    }
-    if (mod) return KeyEventResult.ignored;
-    if (k == LogicalKeyboardKey.delete || k == LogicalKeyboardKey.backspace) {
-      m.deleteSelection();
-      return KeyEventResult.handled;
-    }
-    if (k == LogicalKeyboardKey.escape) {
-      setState(() => _drag = null);
-      m.select(null);
-      return KeyEventResult.handled;
-    }
-    if (k == LogicalKeyboardKey.keyF) {
-      setState(_fit);
-      return KeyEventResult.handled;
-    }
-    return KeyEventResult.ignored;
-  }
+  KeyEventResult _onKey(FocusNode node, KeyEvent e) =>
+      canvasKey(
+        m,
+        e,
+        onEscape: () => setState(() => _drag = null),
+        onFit: () => setState(_fit),
+      ) ??
+      KeyEventResult.ignored;
 
   @override
   Widget build(BuildContext context) {
@@ -568,39 +514,47 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
             child: Stack(
               children: [
                 Positioned.fill(
-                  child: Listener(
-                    onPointerDown: (e) => _downAt = e.localPosition,
-                    onPointerSignal: (e) {
-                      if (e is PointerScrollEvent) {
-                        _zoom(
-                          math.exp(-e.scrollDelta.dy / 400),
-                          e.localPosition,
-                        );
-                      }
-                    },
-                    child: MouseRegion(
-                      cursor: cursor,
-                      onHover: _onHover,
-                      onExit: (_) => setState(() => _hover = null),
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTapUp: _onTapUp,
-                        onSecondaryTapUp: (d) => _contextMenu(d.localPosition),
-                        onLongPressStart: (d) => _contextMenu(d.localPosition),
-                        onScaleStart: _onScaleStart,
-                        onScaleUpdate: _onScaleUpdate,
-                        onScaleEnd: _onScaleEnd,
-                        child: CustomPaint(
-                          size: Size.infinite,
-                          painter: _CanvasPainter(
-                            model: m,
-                            revision: m.revision,
-                            pan: _pan,
-                            scale: _scale,
-                            hover: _hover,
-                            wire: wire,
-                            scheme: scheme,
-                            text: theme.textTheme,
+                  child: NoBrowserContextMenu(
+                    child: Listener(
+                      onPointerDown: (e) {
+                        _downAt = e.localPosition;
+                        _right.down(e);
+                      },
+                      onPointerUp: (e) => _right.up(e, _contextMenu),
+                      onPointerCancel: (_) => _right.cancel(),
+                      onPointerSignal: (e) {
+                        if (e is PointerScrollEvent) {
+                          _zoom(
+                            math.exp(-e.scrollDelta.dy / 400),
+                            e.localPosition,
+                          );
+                        }
+                      },
+                      child: MouseRegion(
+                        cursor: cursor,
+                        onHover: _onHover,
+                        onExit: (_) => setState(() => _hover = null),
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTapUp: _onTapUp,
+                          onLongPressStart: (d) =>
+                              _contextMenu(d.localPosition),
+                          onScaleStart: _onScaleStart,
+                          onScaleUpdate: _onScaleUpdate,
+                          onScaleEnd: _onScaleEnd,
+                          child: RepaintBoundary(
+                            child: CustomPaint(
+                              size: Size.infinite,
+                              painter: _CanvasPainter(
+                                model: m,
+                                pan: _pan,
+                                scale: _scale,
+                                hover: _hover,
+                                wire: wire,
+                                scheme: scheme,
+                                text: theme.textTheme,
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -622,7 +576,7 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
                 Positioned(
                   right: 8,
                   bottom: 8,
-                  child: _ZoomButtons(
+                  child: CanvasZoomButtons(
                     onIn: () => _zoom(1.25, _size.center(Offset.zero)),
                     onOut: () => _zoom(0.8, _size.center(Offset.zero)),
                     onFit: () => setState(_fit),
@@ -631,7 +585,7 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
                 if (m.doc.nodes.isEmpty)
                   Center(
                     child: Text(
-                      'Double-click to add a node, or right-click for more',
+                      'Double-click to add a node, or right-click (long-press) for more',
                       style: theme.textTheme.bodyMedium?.copyWith(
                         color: scheme.onSurfaceVariant,
                       ),
@@ -662,6 +616,26 @@ class EdgeGeometry {
   Path get path => Path()
     ..moveTo(p0.dx, p0.dy)
     ..cubicTo(p1.dx, p1.dy, p2.dx, p2.dy, p3.dx, p3.dy);
+
+  /// [path] in dashes (7 on, 5 off), as one path; kept for the curves
+  /// drawn last, since measuring a curve every frame is slow on the web.
+  Path get dashedPath {
+    final key = (p0, p1, p2, p3);
+    if (_dashes[key] case final cached?) return cached;
+    final out = Path();
+    for (final metric in path.computeMetrics()) {
+      for (var d = 0.0; d < metric.length; d += 12) {
+        out.addPath(
+          metric.extractPath(d, math.min(d + 7, metric.length)),
+          Offset.zero,
+        );
+      }
+    }
+    if (_dashes.length > 256) _dashes.clear();
+    return _dashes[key] = out;
+  }
+
+  static final _dashes = <(Offset, Offset, Offset, Offset), Path>{};
 
   /// The direction the curve arrives at [p3].
   Offset get endTangent {
@@ -694,7 +668,6 @@ EdgeGeometry? edgeGeometry(BuilderModel m, DocEdge e) {
 class _CanvasPainter extends CustomPainter {
   _CanvasPainter({
     required this.model,
-    required this.revision,
     required this.pan,
     required this.scale,
     required this.hover,
@@ -704,7 +677,6 @@ class _CanvasPainter extends CustomPainter {
   });
 
   final BuilderModel model;
-  final int revision;
   final Offset pan;
   final double scale;
   final ({String? node, Port? port, int? edge})? hover;
@@ -744,20 +716,14 @@ class _CanvasPainter extends CustomPainter {
     canvas.restore();
   }
 
-  void _grid(Canvas canvas, Size size) {
-    final step = 40 * scale;
-    if (step < 12) return;
-    final paint = Paint()
-      ..color = scheme.outlineVariant.withValues(alpha: 0.35)
-      ..strokeWidth = 1;
-    final x0 = pan.dx % step, y0 = pan.dy % step;
-    final r = math.max(1.0, 1.2 * scale.clamp(0.5, 1.5));
-    for (var x = x0; x < size.width; x += step) {
-      for (var y = y0; y < size.height; y += step) {
-        canvas.drawCircle(Offset(x, y), r / 1.5, paint);
-      }
-    }
-  }
+  void _grid(Canvas canvas, Size size) => paintDotGrid(
+    canvas,
+    size,
+    pan,
+    scale,
+    scheme.outlineVariant.withValues(alpha: 0.35),
+    radius: math.max(1.0, 1.2 * scale.clamp(0.5, 1.5)) / 1.5,
+  );
 
   void _edge(Canvas canvas, int i, DocEdge e) {
     final g = edgeGeometry(model, e);
@@ -795,18 +761,8 @@ class _CanvasPainter extends CustomPainter {
     }
   }
 
-  void _dashed(Canvas canvas, EdgeGeometry g, Paint paint) {
-    for (final metric in g.path.computeMetrics()) {
-      var d = 0.0;
-      while (d < metric.length) {
-        canvas.drawPath(
-          metric.extractPath(d, math.min(d + 7, metric.length)),
-          paint,
-        );
-        d += 12;
-      }
-    }
-  }
+  void _dashed(Canvas canvas, EdgeGeometry g, Paint paint) =>
+      canvas.drawPath(g.dashedPath, paint);
 
   void _arrow(Canvas canvas, Offset tip, Offset u, Color color) {
     final n = Offset(-u.dy, u.dx);
@@ -960,13 +916,7 @@ class _CanvasPainter extends CustomPainter {
   }
 
   void _label(Canvas canvas, Offset at, String s, Color color) {
-    final tp = TextPainter(
-      text: TextSpan(
-        text: s,
-        style: text.labelSmall!.copyWith(color: color),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
+    final tp = canvasText(s, text.labelSmall!.copyWith(color: color));
     final rect = Rect.fromLTWH(
       at.dx - 2,
       at.dy - tp.height / 2 - 1,
@@ -988,12 +938,7 @@ class _CanvasPainter extends CustomPainter {
     double maxWidth = 160,
     bool leftAligned = false,
   }) {
-    final tp = TextPainter(
-      text: TextSpan(text: s, style: style),
-      textDirection: TextDirection.ltr,
-      maxLines: 1,
-      ellipsis: '…',
-    )..layout(maxWidth: maxWidth);
+    final tp = canvasText(s, style, maxWidth: maxWidth);
     tp.paint(canvas, c - Offset(leftAligned ? 0 : tp.width / 2, tp.height / 2));
   }
 
@@ -1095,43 +1040,4 @@ class _LinePainter extends CustomPainter {
   @override
   bool shouldRepaint(_LinePainter old) =>
       old.dashed != dashed || old.color != color;
-}
-
-class _ZoomButtons extends StatelessWidget {
-  const _ZoomButtons({
-    required this.onIn,
-    required this.onOut,
-    required this.onFit,
-  });
-
-  final VoidCallback onIn, onOut, onFit;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Material(
-      color: scheme.surfaceContainerHigh,
-      borderRadius: BorderRadius.circular(8),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          IconButton(
-            tooltip: 'Zoom out',
-            icon: const Icon(Icons.remove, size: 18),
-            onPressed: onOut,
-          ),
-          IconButton(
-            tooltip: 'Fit to view (F)',
-            icon: const Icon(Icons.fit_screen_outlined, size: 18),
-            onPressed: onFit,
-          ),
-          IconButton(
-            tooltip: 'Zoom in',
-            icon: const Icon(Icons.add, size: 18),
-            onPressed: onIn,
-          ),
-        ],
-      ),
-    );
-  }
 }

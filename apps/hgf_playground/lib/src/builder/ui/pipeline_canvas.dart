@@ -6,6 +6,7 @@ import 'package:hgf_fit/document.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../builder_model.dart';
+import 'canvas_support.dart';
 
 /// The width of a pipeline card, the height of its header and of a row.
 const double cardWidth = 196, cardHeader = 40, cardRow = 22;
@@ -517,35 +518,46 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
   Size _size = Size.zero;
   _Drag? _drag;
   Offset? _downAt;
+  final _right = RightClicks();
   (Duration, Offset)? _lastTap;
   String? _hoverPart;
   static final _clock = Stopwatch()..start();
 
   BuilderModel get m => widget.model;
 
+  /// The model and its positions (moves notify only the latter).
+  late Listenable _source = Listenable.merge([m, m.layoutChanges]);
+
   @override
   void initState() {
     super.initState();
-    m.addListener(_changed);
+    _source.addListener(_changed);
   }
 
   @override
   void didUpdateWidget(PipelineCanvas old) {
     super.didUpdateWidget(old);
     if (old.model != m) {
-      old.model.removeListener(_changed);
-      m.addListener(_changed);
+      _source.removeListener(_changed);
+      _source = Listenable.merge([m, m.layoutChanges])..addListener(_changed);
+      _geometry = null;
     }
   }
 
   @override
   void dispose() {
-    m.removeListener(_changed);
+    _source.removeListener(_changed);
     _focus.dispose();
     super.dispose();
   }
 
-  void _changed() => setState(() {});
+  void _changed() => setState(() => _geometry = null);
+
+  /// The cards and wires, until the model or a position changes: the hit
+  /// tests of every pointer event read them.
+  ({List<PipelineCard> cards, List<PipelineWire> wires})? _geometry;
+  ({List<PipelineCard> cards, List<PipelineWire> wires}) get _geo =>
+      _geometry ??= pipelineGeometry(m);
 
   Offset _toCanvas(Offset screen) => (screen - _pan) / _scale;
 
@@ -575,7 +587,7 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
   // Hit tests
   // ---------------------------------------------------------------------------
 
-  List<PipelineCard> get _cards => pipelineGeometry(m).cards;
+  List<PipelineCard> get _cards => _geo.cards;
 
   PipelineCard? _cardAt(Offset screen) {
     final p = _toCanvas(screen);
@@ -621,35 +633,16 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
 
   String? _wireAtPart(Offset screen) {
     final p = _toCanvas(screen);
-    final reach = math.max(5.0, 8 / _scale);
     String? best;
-    var bestD = reach;
-    for (final w in pipelineGeometry(m).wires) {
-      Offset? prev;
-      for (var k = 0; k <= 24; k++) {
-        final q = _wireAt(w.from, w.to, k / 24);
-        if (prev != null) {
-          final d = _segmentDistance(p, prev, q);
-          if (d < bestD) {
-            bestD = d;
-            best = w.part;
-          }
-        }
-        prev = q;
+    var bestD = math.max(5.0, 8 / _scale);
+    for (final w in _geo.wires) {
+      final d = curveDistance(p, (t) => _wireAt(w.from, w.to, t));
+      if (d < bestD) {
+        bestD = d;
+        best = w.part;
       }
     }
     return best;
-  }
-
-  static double _segmentDistance(Offset p, Offset a, Offset b) {
-    final ab = b - a;
-    final len2 = ab.distanceSquared;
-    if (len2 == 0) return (p - a).distance;
-    final t = (((p - a).dx * ab.dx + (p - a).dy * ab.dy) / len2).clamp(
-      0.0,
-      1.0,
-    );
-    return (p - (a + ab * t)).distance;
   }
 
   // ---------------------------------------------------------------------------
@@ -658,6 +651,10 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
 
   void _onScaleStart(ScaleStartDetails d) {
     _focus.requestFocus();
+    if (_right.active) {
+      _drag = null; // a right click's drag: neither a pan nor a move
+      return;
+    }
     final at = d.pointerCount == 1
         ? (_downAt ?? d.localFocalPoint)
         : d.localFocalPoint;
@@ -763,7 +760,7 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
     }
     if (card == null) {
       if (m.deepColumns.contains(column)) {
-        if (drag.tip != null) _tell(drag.tip!);
+        if (drag.tip != null) tellCanvas(context, drag.tip!);
         return;
       }
       m.addTransform(column: column, at: drag.at - const Offset(0, 20));
@@ -791,15 +788,7 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
         return;
       }
     }
-    if (drag.tip != null && !drag.ok) _tell(drag.tip!);
-  }
-
-  void _tell(String message) {
-    ScaffoldMessenger.maybeOf(context)
-      ?..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
-      );
+    if (drag.tip != null && !drag.ok) tellCanvas(context, drag.tip!);
   }
 
   void _onTapUp(TapUpDetails d) {
@@ -854,20 +843,8 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
     if (kind != null) m.addStep(kind, index: index);
   }
 
-  Future<T?> _popup<T>(Offset at, List<PopupMenuEntry<T>> items) {
-    final box = context.findRenderObject()! as RenderBox;
-    final g = box.localToGlobal(at);
-    final overlay =
-        Overlay.of(context).context.findRenderObject()! as RenderBox;
-    return showMenu<T>(
-      context: context,
-      position: RelativeRect.fromRect(
-        Rect.fromLTWH(g.dx, g.dy, 1, 1),
-        Offset.zero & overlay.size,
-      ),
-      items: items,
-    );
-  }
+  Future<T?> _popup<T>(Offset at, List<PopupMenuEntry<T>> items) =>
+      showMenuAt(context, at, items);
 
   Future<void> _contextMenu(Offset at) async {
     _focus.requestFocus();
@@ -990,34 +967,16 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent e) {
-    if (e is! KeyDownEvent && e is! KeyRepeatEvent) {
-      return KeyEventResult.ignored;
+    if (canvasKey(
+          m,
+          e,
+          onEscape: () => setState(() => _drag = null),
+          onFit: () => setState(() => _fit(_cards)),
+        )
+        case final handled?) {
+      return handled;
     }
     final k = e.logicalKey;
-    final hw = HardwareKeyboard.instance;
-    final mod = hw.isControlPressed || hw.isMetaPressed;
-    if (mod && k == LogicalKeyboardKey.keyZ) {
-      hw.isShiftPressed ? m.redo() : m.undo();
-      return KeyEventResult.handled;
-    }
-    if (mod && k == LogicalKeyboardKey.keyY) {
-      m.redo();
-      return KeyEventResult.handled;
-    }
-    if (mod) return KeyEventResult.ignored;
-    if (k == LogicalKeyboardKey.delete || k == LogicalKeyboardKey.backspace) {
-      m.deleteSelection();
-      return KeyEventResult.handled;
-    }
-    if (k == LogicalKeyboardKey.escape) {
-      setState(() => _drag = null);
-      m.select(null);
-      return KeyEventResult.handled;
-    }
-    if (k == LogicalKeyboardKey.keyF) {
-      setState(() => _fit(_cards));
-      return KeyEventResult.handled;
-    }
     if (k == LogicalKeyboardKey.enter && m.selectedPart == DocPart.network) {
       m.showView(BuilderView.network);
       return KeyEventResult.handled;
@@ -1037,7 +996,7 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
     return LayoutBuilder(
       builder: (context, box) {
         _size = box.biggest;
-        final geometry = pipelineGeometry(m);
+        final geometry = _geo;
         if (_fitted != m.opened) {
           _fitted = m.opened;
           _fit(geometry.cards);
@@ -1050,48 +1009,57 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
             child: Stack(
               children: [
                 Positioned.fill(
-                  child: Listener(
-                    onPointerDown: (e) => _downAt = e.localPosition,
-                    onPointerSignal: (e) {
-                      if (e is PointerScrollEvent) {
-                        _zoom(
-                          math.exp(-e.scrollDelta.dy / 400),
-                          e.localPosition,
-                        );
-                      }
-                    },
-                    child: MouseRegion(
-                      cursor: wire != null
-                          ? SystemMouseCursors.precise
-                          : _hoverPart != null
-                          ? SystemMouseCursors.move
-                          : SystemMouseCursors.basic,
-                      onHover: (e) {
-                        final p = _outPortAt(e.localPosition) != null
-                            ? null
-                            : _cardAt(e.localPosition)?.part;
-                        if (p != _hoverPart) setState(() => _hoverPart = p);
+                  child: NoBrowserContextMenu(
+                    child: Listener(
+                      onPointerDown: (e) {
+                        _downAt = e.localPosition;
+                        _right.down(e);
                       },
-                      onExit: (_) => setState(() => _hoverPart = null),
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTapUp: _onTapUp,
-                        onSecondaryTapUp: (d) => _contextMenu(d.localPosition),
-                        onLongPressStart: (d) => _contextMenu(d.localPosition),
-                        onScaleStart: _onScaleStart,
-                        onScaleUpdate: _onScaleUpdate,
-                        onScaleEnd: _onScaleEnd,
-                        child: CustomPaint(
-                          size: Size.infinite,
-                          painter: _PipelinePainter(
-                            model: m,
-                            cards: geometry.cards,
-                            wires: geometry.wires,
-                            pan: _pan,
-                            scale: _scale,
-                            wire: wire,
-                            scheme: scheme,
-                            text: theme.textTheme,
+                      onPointerUp: (e) => _right.up(e, _contextMenu),
+                      onPointerCancel: (_) => _right.cancel(),
+                      onPointerSignal: (e) {
+                        if (e is PointerScrollEvent) {
+                          _zoom(
+                            math.exp(-e.scrollDelta.dy / 400),
+                            e.localPosition,
+                          );
+                        }
+                      },
+                      child: MouseRegion(
+                        cursor: wire != null
+                            ? SystemMouseCursors.precise
+                            : _hoverPart != null
+                            ? SystemMouseCursors.move
+                            : SystemMouseCursors.basic,
+                        onHover: (e) {
+                          final p = _outPortAt(e.localPosition) != null
+                              ? null
+                              : _cardAt(e.localPosition)?.part;
+                          if (p != _hoverPart) setState(() => _hoverPart = p);
+                        },
+                        onExit: (_) => setState(() => _hoverPart = null),
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTapUp: _onTapUp,
+                          onLongPressStart: (d) =>
+                              _contextMenu(d.localPosition),
+                          onScaleStart: _onScaleStart,
+                          onScaleUpdate: _onScaleUpdate,
+                          onScaleEnd: _onScaleEnd,
+                          child: RepaintBoundary(
+                            child: CustomPaint(
+                              size: Size.infinite,
+                              painter: _PipelinePainter(
+                                model: m,
+                                cards: geometry.cards,
+                                wires: geometry.wires,
+                                pan: _pan,
+                                scale: _scale,
+                                wire: wire,
+                                scheme: scheme,
+                                text: theme.textTheme,
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -1129,31 +1097,10 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
                 Positioned(
                   right: 8,
                   bottom: 8,
-                  child: Material(
-                    color: scheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(8),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          tooltip: 'Zoom out',
-                          icon: const Icon(Icons.remove, size: 18),
-                          onPressed: () =>
-                              _zoom(0.8, _size.center(Offset.zero)),
-                        ),
-                        IconButton(
-                          tooltip: 'Fit to view (F)',
-                          icon: const Icon(Icons.fit_screen_outlined, size: 18),
-                          onPressed: () => setState(() => _fit(geometry.cards)),
-                        ),
-                        IconButton(
-                          tooltip: 'Zoom in',
-                          icon: const Icon(Icons.add, size: 18),
-                          onPressed: () =>
-                              _zoom(1.25, _size.center(Offset.zero)),
-                        ),
-                      ],
-                    ),
+                  child: CanvasZoomButtons(
+                    onIn: () => _zoom(1.25, _size.center(Offset.zero)),
+                    onOut: () => _zoom(0.8, _size.center(Offset.zero)),
+                    onFit: () => setState(() => _fit(geometry.cards)),
                   ),
                 ),
               ],
@@ -1210,16 +1157,13 @@ class _PipelinePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final step = 40 * scale;
-    if (step >= 12) {
-      final dot = Paint()
-        ..color = scheme.outlineVariant.withValues(alpha: 0.35);
-      for (var x = pan.dx % step; x < size.width; x += step) {
-        for (var y = pan.dy % step; y < size.height; y += step) {
-          canvas.drawCircle(Offset(x, y), 0.8, dot);
-        }
-      }
-    }
+    paintDotGrid(
+      canvas,
+      size,
+      pan,
+      scale,
+      scheme.outlineVariant.withValues(alpha: 0.35),
+    );
     canvas
       ..save()
       ..translate(pan.dx, pan.dy)
@@ -1370,12 +1314,7 @@ class _PipelinePainter extends CustomPainter {
     double maxWidth = cardWidth - 20,
     bool right = false,
   }) {
-    final tp = TextPainter(
-      text: TextSpan(text: s, style: style),
-      textDirection: TextDirection.ltr,
-      maxLines: 1,
-      ellipsis: '…',
-    )..layout(maxWidth: maxWidth);
+    final tp = canvasText(s, style, maxWidth: maxWidth);
     tp.paint(canvas, right ? at - Offset(tp.width, 0) : at);
   }
 

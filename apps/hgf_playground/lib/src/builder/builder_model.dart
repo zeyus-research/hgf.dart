@@ -516,11 +516,19 @@ class BuilderModel extends ChangeNotifier {
     notifyListeners();
   }
 
+  final _layout = _Layout();
+
+  /// Notified when a node or a card moves ([moveNode], [movePart]): only
+  /// the canvases draw positions, so a drag repaints them without
+  /// rebuilding the inspector and the preview on every pointer move. The
+  /// canvases listen to this and to the model.
+  Listenable get layoutChanges => _layout;
+
   /// Move node [id] to [to] (no undo step: call [checkpoint] when the drag
-  /// starts).
+  /// starts). Notifies [layoutChanges] only.
   void moveNode(String id, Offset to) {
     _positions = {..._positions, id: to};
-    notifyListeners();
+    _layout.changed();
   }
 
   /// Lay the network out again (an undo step).
@@ -708,10 +716,10 @@ class BuilderModel extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   /// Move pipeline part [part] to [to] (no undo step: call [checkpoint]
-  /// when the drag starts).
+  /// when the drag starts). Notifies [layoutChanges] only.
   void movePart(String part, Offset to) {
     _pipeline = {..._pipeline, part: to};
-    notifyListeners();
+    _layout.changed();
   }
 
   /// Lay the pipeline out again (an undo step).
@@ -1449,6 +1457,7 @@ class BuilderModel extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _layout.dispose();
     super.dispose();
   }
 
@@ -2203,4 +2212,9 @@ String prettyId(String address) {
   const sub = '₀₁₂₃₄₅₆₇₈₉';
   final digits = m[2]!.split('').map((d) => sub[int.parse(d)]).join();
   return '${m[1]}$digits${m[3] ?? ''}';
+}
+
+/// [BuilderModel.layoutChanges].
+class _Layout extends ChangeNotifier {
+  void changed() => notifyListeners();
 }

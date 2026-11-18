@@ -1,11 +1,11 @@
 import 'dart:math' as math;
 
-import 'package:flutter/services.dart';
 import 'package:hgf_deep/hgf_deep.dart' show LayerKind;
 import 'package:hgf_fit/document.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../builder_model.dart';
+import 'canvas_support.dart';
 
 /// At most this many nodes are drawn per layer (the rest as "+n").
 const int _maxDots = 24;
@@ -92,32 +92,8 @@ class _DeepCanvasState extends State<DeepCanvas> {
     super.dispose();
   }
 
-  KeyEventResult _onKey(FocusNode node, KeyEvent e) {
-    if (e is! KeyDownEvent && e is! KeyRepeatEvent) {
-      return KeyEventResult.ignored;
-    }
-    final k = e.logicalKey;
-    final hw = HardwareKeyboard.instance;
-    final mod = hw.isControlPressed || hw.isMetaPressed;
-    if (mod && k == LogicalKeyboardKey.keyZ) {
-      hw.isShiftPressed ? m.redo() : m.undo();
-      return KeyEventResult.handled;
-    }
-    if (mod && k == LogicalKeyboardKey.keyY) {
-      m.redo();
-      return KeyEventResult.handled;
-    }
-    if (mod) return KeyEventResult.ignored;
-    if (k == LogicalKeyboardKey.delete || k == LogicalKeyboardKey.backspace) {
-      m.deleteSelection();
-      return KeyEventResult.handled;
-    }
-    if (k == LogicalKeyboardKey.escape) {
-      m.select(null);
-      return KeyEventResult.handled;
-    }
-    return KeyEventResult.ignored;
-  }
+  KeyEventResult _onKey(FocusNode node, KeyEvent e) =>
+      canvasKey(m, e) ?? KeyEventResult.ignored;
 
   @override
   Widget build(BuildContext context) {
@@ -231,15 +207,8 @@ class _DeepPainter extends CustomPainter {
       ? scheme.secondary
       : scheme.primary;
 
-  void _text(Canvas c, Offset at, String s, TextStyle style, {double? max}) {
-    final tp = TextPainter(
-      text: TextSpan(text: s, style: style),
-      textDirection: TextDirection.ltr,
-      maxLines: 1,
-      ellipsis: '…',
-    )..layout(maxWidth: max ?? double.infinity);
-    tp.paint(c, at);
-  }
+  void _text(Canvas c, Offset at, String s, TextStyle style, {double? max}) =>
+      canvasText(s, style, maxWidth: max ?? double.infinity).paint(c, at);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -304,15 +273,11 @@ class _DeepPainter extends CustomPainter {
         max: bar.width * 0.45,
       );
       final summary = layerSummary(deep, i);
-      final sp = TextPainter(
-        text: TextSpan(
-          text: summary,
-          style: text.labelSmall!.copyWith(color: scheme.onSurfaceVariant),
-        ),
-        textDirection: TextDirection.ltr,
-        maxLines: 1,
-        ellipsis: '…',
-      )..layout(maxWidth: bar.width * 0.55 - 12);
+      final sp = canvasText(
+        summary,
+        text.labelSmall!.copyWith(color: scheme.onSurfaceVariant),
+        maxWidth: bar.width * 0.55 - 12,
+      );
       sp.paint(canvas, Offset(bar.right - 12 - sp.width, bar.top + 8));
       final kind = deep.layers[i].kind;
       final fill = Paint()..color = accent;

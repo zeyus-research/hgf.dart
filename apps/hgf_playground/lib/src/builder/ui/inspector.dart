@@ -55,18 +55,27 @@ DocNode withId(DocNode n, String id) => switch (n) {
 /// network's settings and a palette when nothing is; and the checks'
 /// issues.
 class BuilderInspector extends StatelessWidget {
-  const BuilderInspector({super.key, required this.model, this.shrinkWrap});
+  const BuilderInspector({
+    super.key,
+    required this.model,
+    this.controller,
+    this.leading,
+  });
 
   final BuilderModel model;
 
-  /// Lay out as a column (inside another scroll view) instead of a list.
-  final bool? shrinkWrap;
+  /// The list's scroll controller (a bottom sheet's, on phones).
+  final ScrollController? controller;
+
+  /// Shown above the panels, scrolling with them (a sheet's drag handle).
+  final Widget? leading;
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: model,
     builder: (context, _) {
       final children = [
+        ?leading,
         if (model.view == BuilderView.pipeline)
           PipelinePanel(
             key: ValueKey('part ${model.selectedPart}'),
@@ -113,13 +122,13 @@ class BuilderInspector extends StatelessWidget {
         else
           const _HelpCard(),
       ];
-      if (shrinkWrap ?? false) {
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: children,
-        );
-      }
-      return ListView(padding: const EdgeInsets.all(12), children: children);
+      return ListView(
+        controller: controller,
+        padding: leading == null
+            ? const EdgeInsets.all(12)
+            : const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        children: children,
+      );
     },
   );
 }

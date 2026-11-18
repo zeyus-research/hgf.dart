@@ -279,7 +279,7 @@ void main() {
   });
 
   group('BuilderPage', () {
-    for (final width in [1300.0, 480.0]) {
+    for (final width in [1300.0, 480.0, 360.0]) {
       testWidgets('renders every preset ${width.toInt()} wide', (tester) async {
         tester.view
           ..physicalSize = Size(width, 900)

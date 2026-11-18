@@ -25,6 +25,7 @@ import '../builder_model.dart';
 import '../doc_layout.dart' show ownerIdOf;
 import 'inspector.dart' show NumberField;
 import 'pipeline_inspector.dart' show CommitField, Pick;
+import 'search_picker.dart';
 
 const _codec = FitCodec();
 
@@ -87,8 +88,14 @@ class FreeToggle extends StatelessWidget {
   }
 }
 
-/// A parameter the model could free: its target, a label and its value.
-typedef _Candidate = ({DocTarget target, String label, double current});
+/// A parameter the model could free: its target, a label, its value and
+/// what it belongs to (a node, the couplings, the response).
+typedef _Candidate = ({
+  DocTarget target,
+  String label,
+  double current,
+  String group,
+});
 
 /// What [m]'s document can free and doesn't: the node parameters the
 /// network's sliders show, the edges' strengths and the response model's
@@ -105,6 +112,7 @@ List<_Candidate> _candidates(BuilderModel m) {
         target: nodeTarget(n.id, d.field),
         label: '${d.symbol} ${prettyId(n.id)} · ${d.name}',
         current: m.initial(n.id, d.field),
+        group: prettyId(n.label ?? n.id),
       ));
     }
   }
@@ -115,6 +123,7 @@ List<_Candidate> _candidates(BuilderModel m) {
           '${e.type == EdgeType.value ? 'value' : 'volatility'} coupling '
           '${prettyId(e.parent)} → ${prettyId(e.child)}',
       current: e.strength,
+      group: 'Couplings',
     ));
   }
   for (final MapEntry(:key, :value) in m.responseParameters.entries) {
@@ -122,6 +131,7 @@ List<_Candidate> _candidates(BuilderModel m) {
       target: responseTarget(key),
       label: 'response · $key',
       current: value,
+      group: 'Response',
     ));
   }
   return [
@@ -152,16 +162,33 @@ class _ParametersCard extends StatelessWidget {
     final candidates = _candidates(model);
     return SectionCard(
       title: 'Free parameters',
-      action: PopupMenuButton<_Candidate>(
-        tooltip: 'Free a parameter',
-        icon: const Icon(Icons.add, size: 20),
-        enabled: candidates.isNotEmpty,
-        onSelected: (c) => model.setFree(c.target, true, current: c.current),
-        itemBuilder: (context) => [
-          for (final c in candidates)
-            PopupMenuItem(value: c, child: Text(c.label)),
-        ],
-      ),
+      action: candidates.length > searchPickerAbove
+          ? IconButton(
+              tooltip: 'Free a parameter',
+              icon: const Icon(Icons.add, size: 20),
+              onPressed: () async {
+                final pick = await showSearchPicker<_Candidate>(
+                  context,
+                  title: 'Free a parameter',
+                  items: {for (final c in candidates) c: c.label},
+                  groupOf: (c) => c.group,
+                );
+                if (pick case (final c,)) {
+                  model.setFree(c.target, true, current: c.current);
+                }
+              },
+            )
+          : PopupMenuButton<_Candidate>(
+              tooltip: 'Free a parameter',
+              icon: const Icon(Icons.add, size: 20),
+              enabled: candidates.isNotEmpty,
+              onSelected: (c) =>
+                  model.setFree(c.target, true, current: c.current),
+              itemBuilder: (context) => [
+                for (final c in candidates)
+                  PopupMenuItem(value: c, child: Text(c.label)),
+              ],
+            ),
       children: [
         if (doc.parameters.isEmpty)
           Text(

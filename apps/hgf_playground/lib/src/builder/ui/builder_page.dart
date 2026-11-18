@@ -16,6 +16,7 @@ import 'deep_inspector.dart' show exportDeep;
 import 'deep_preview.dart';
 import 'inspector.dart';
 import 'pipeline_canvas.dart';
+import 'search_picker.dart';
 
 /// The model builder: the HGF graph on a canvas, an inspector for what is
 /// selected, and a live preview (the network built from the document and
@@ -31,6 +32,62 @@ class BuilderPage extends StatefulWidget {
 
 class _BuilderPageState extends State<BuilderPage> {
   BuilderModel get m => widget.model;
+
+  /// The inspector's sheet on phones ([_narrow]).
+  final _sheet = DraggableScrollableController();
+
+  /// The sheet's sizes (fractions of the body): a peek at what is
+  /// selected, and open to just below the canvas.
+  double _peekSize = 0.12, _openSize = 0.45;
+  BuilderSelection? _selection;
+
+  @override
+  void initState() {
+    super.initState();
+    _selection = m.selection;
+    m.addListener(_selectionChanged);
+  }
+
+  @override
+  void didUpdateWidget(BuilderPage old) {
+    super.didUpdateWidget(old);
+    if (old.model != m) {
+      old.model.removeListener(_selectionChanged);
+      m.addListener(_selectionChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    m.removeListener(_selectionChanged);
+    _sheet.dispose();
+    super.dispose();
+  }
+
+  /// Something new was selected: open the sheet (if it is showing and
+  /// below half way) so that its properties are in view.
+  void _selectionChanged() {
+    final s = m.selection;
+    if (s == _selection) return;
+    _selection = s;
+    if (s == null || !_sheet.isAttached || _sheet.size >= _openSize - 0.01) {
+      return;
+    }
+    _sheet.animateTo(
+      _openSize,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  void _toggleSheet() {
+    if (!_sheet.isAttached) return;
+    _sheet.animateTo(
+      _sheet.size > _peekSize + 0.02 ? _peekSize : _openSize,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    );
+  }
 
   Future<void> _open() async {
     final messenger = ScaffoldMessenger.of(context);
@@ -250,8 +307,11 @@ class _BuilderPageState extends State<BuilderPage> {
     ],
   );
 
+  /// Phones: the canvas and the preview scroll; the inspector is a sheet
+  /// over them that peeks at what is selected and opens (to just below the
+  /// canvas) when something new is.
   Widget _narrow(BuildContext context) {
-    const h = 130.0;
+    const h = 130.0, canvasHeight = 420.0, peekHeight = 76.0;
     final net = m.network;
     final shownDeep = BuilderPreview.shownDeep(m);
     final panels = shownDeep != null
@@ -260,23 +320,91 @@ class _BuilderPageState extends State<BuilderPage> {
                   ? 1
                   : HgfTrajectoryView.panelCount(net)) +
               BuilderPreview.extraPanels(m);
-    return ListView(
-      padding: const EdgeInsets.all(12),
-      children: [
-        SizedBox(height: 420, child: _canvas()),
-        const SizedBox(height: 8),
-        _PreviewBar(model: m),
-        SizedBox(
-          height: panels * h,
-          child: BuilderPreview(model: m, panelHeight: h),
-        ),
-        const SizedBox(height: 12),
-        BuilderInspector(model: m, shrinkWrap: true),
-      ],
+    final scheme = Theme.of(context).colorScheme;
+    return LayoutBuilder(
+      builder: (context, box) {
+        final height = math.max(box.maxHeight, 1.0);
+        _peekSize = (peekHeight / height).clamp(0.05, 0.3);
+        _openSize = ((height - canvasHeight - 20) / height).clamp(
+          _peekSize + 0.1,
+          0.8,
+        );
+        return Stack(
+          children: [
+            ListView(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, peekHeight + 12),
+              children: [
+                SizedBox(height: canvasHeight, child: _canvas()),
+                const SizedBox(height: 8),
+                _PreviewBar(model: m),
+                SizedBox(
+                  height: panels * h,
+                  child: BuilderPreview(model: m, panelHeight: h),
+                ),
+              ],
+            ),
+            DraggableScrollableSheet(
+              controller: _sheet,
+              initialChildSize: _peekSize,
+              minChildSize: _peekSize,
+              maxChildSize: 0.92,
+              snap: true,
+              snapSizes: [_openSize],
+              builder: (context, scroll) => Material(
+                elevation: 6,
+                color: scheme.surfaceContainerLow,
+                surfaceTintColor: scheme.surfaceTint,
+                shape: const RoundedRectangleBorder(
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: BuilderInspector(
+                  model: m,
+                  controller: scroll,
+                  leading: _SheetHandle(onTap: _toggleSheet),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
   static NetworkDocument _emptyDocument() => NetworkDocument(nodes: const []);
+}
+
+/// The inspector sheet's handle: drag it (or the panel) to resize, tap it
+/// to open or close.
+class _SheetHandle extends StatelessWidget {
+  const _SheetHandle({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: 'Properties: open or close',
+    child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Center(
+          child: Container(
+            width: 36,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurfaceVariant.withValues(alpha: 0.45),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 /// Where the canvas is: the pipeline, or the network inside it.
@@ -295,6 +423,8 @@ class _Breadcrumbs extends StatelessWidget {
     final showNetwork =
         view == BuilderView.network ||
         (view == BuilderView.pipeline && model.document.hasNetwork);
+    // Phones: no room for the hint beside the crumbs.
+    final hint = MediaQuery.sizeOf(context).width >= 600;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Row(
@@ -308,39 +438,45 @@ class _Breadcrumbs extends StatelessWidget {
           ),
           if (showNetwork || deep != null) ...[
             const Icon(Icons.chevron_right, size: 18),
-            TextButton.icon(
-              onPressed: view == BuilderView.pipeline
-                  ? () => model.showView(BuilderView.network)
-                  : null,
-              icon: Icon(
-                hasIssue
-                    ? Icons.error_outline
-                    : deep != null
-                    ? Icons.layers_outlined
-                    : Icons.account_tree_outlined,
-                size: 18,
-                color: hasIssue ? theme.colorScheme.error : null,
+            Flexible(
+              child: TextButton.icon(
+                onPressed: view == BuilderView.pipeline
+                    ? () => model.showView(BuilderView.network)
+                    : null,
+                icon: Icon(
+                  hasIssue
+                      ? Icons.error_outline
+                      : deep != null
+                      ? Icons.layers_outlined
+                      : Icons.account_tree_outlined,
+                  size: 18,
+                  color: hasIssue ? theme.colorScheme.error : null,
+                ),
+                label: Text(
+                  deep?.label ?? 'HGF network',
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-              label: Text(deep?.label ?? 'HGF network'),
             ),
           ],
           const Spacer(),
-          Flexible(
-            child: Text(
-              switch (view) {
-                BuilderView.network =>
-                  'Parents above children; drag from a port to connect',
-                BuilderView.deep =>
-                  'Features on top, targets below; + inserts a layer',
-                BuilderView.pipeline =>
-                  'Data → transforms → models → response and outputs',
-              },
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+          if (hint)
+            Flexible(
+              child: Text(
+                switch (view) {
+                  BuilderView.network =>
+                    'Parents above children; drag from a port to connect',
+                  BuilderView.deep =>
+                    'Features on top, targets below; + inserts a layer',
+                  BuilderView.pipeline =>
+                    'Data → transforms → models → response and outputs',
+                },
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                overflow: TextOverflow.ellipsis,
               ),
-              overflow: TextOverflow.ellipsis,
             ),
-          ),
           const SizedBox(width: 8),
         ],
       ),
@@ -361,28 +497,59 @@ class _PreviewBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final ms = (model.previewMicros / 1000).toStringAsFixed(1);
-    return Row(
+    // Phones: the description on a line of its own, under the controls.
+    final narrow = MediaQuery.sizeOf(context).width < 600;
+    final description = Text(
+      model.network == null
+          ? ''
+          : model.csv != null
+          ? '${model.csvName ?? 'Loaded data'}'
+                '${model.participants.isEmpty ? '' : ', participant ${model.participants[model.participant.clamp(0, model.participants.length - 1)]}'}'
+                '; checked, built and filtered in $ms ms'
+          : 'Simulated data per input (reversals for binary, random '
+                'walks for continuous)'
+                '${model.subject?.responses != null ? ' and responses' : ''}'
+                '; checked, built and filtered in '
+                '$ms ms${model.trials < model.data.nTrials ? '; ${model.trials} trials (dp-state nodes are slow)' : ''}',
+      style: theme.textTheme.bodySmall,
+      overflow: TextOverflow.ellipsis,
+      maxLines: narrow ? 2 : 1,
+    );
+    final controls = Row(
       children: [
-        Text('Preview', style: theme.textTheme.titleSmall),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Text(
-            model.network == null
-                ? ''
-                : model.csv != null
-                ? '${model.csvName ?? 'Loaded data'}'
-                      '${model.participants.isEmpty ? '' : ', participant ${model.participants[model.participant.clamp(0, model.participants.length - 1)]}'}'
-                      '; checked, built and filtered in $ms ms'
-                : 'Simulated data per input (reversals for binary, random '
-                      'walks for continuous)'
-                      '${model.subject?.responses != null ? ' and responses' : ''}'
-                      '; checked, built and filtered in '
-                      '$ms ms${model.trials < model.data.nTrials ? '; ${model.trials} trials (dp-state nodes are slow)' : ''}',
-            style: theme.textTheme.bodySmall,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-        if (model.participants.length > 1)
+        if (narrow)
+          Expanded(
+            child: Text(
+              'Preview',
+              style: theme.textTheme.titleSmall,
+              overflow: TextOverflow.ellipsis,
+            ),
+          )
+        else ...[
+          Text('Preview', style: theme.textTheme.titleSmall),
+          const SizedBox(width: 12),
+          Expanded(child: description),
+        ],
+        if (model.participants.length > searchPickerAbove)
+          TextButton.icon(
+            icon: const Icon(Icons.person_search_outlined, size: 18),
+            label: Text(
+              model.participants[model.participant.clamp(
+                0,
+                model.participants.length - 1,
+              )],
+            ),
+            onPressed: () async {
+              final pick = await showSearchPicker<int>(
+                context,
+                title: 'Participant',
+                items: {for (final (k, p) in model.participants.indexed) k: p},
+                selected: model.participant,
+              );
+              if (pick case (final k,)) model.showParticipant(k);
+            },
+          )
+        else if (model.participants.length > 1)
           DropdownButton<int>(
             value: model.participant.clamp(0, model.participants.length - 1),
             isDense: true,
@@ -418,6 +585,11 @@ class _PreviewBar extends StatelessWidget {
             onPressed: model.reseed,
           ),
       ],
+    );
+    if (!narrow) return controls;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [controls, description],
     );
   }
 }
