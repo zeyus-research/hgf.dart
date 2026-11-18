@@ -1,12 +1,12 @@
 import 'dart:math' as math;
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:hgf_fit/document.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../builder_model.dart';
 import 'canvas_support.dart';
+import 'canvas_viewport.dart';
 
 /// The width of a pipeline card, the height of its header and of a row.
 const double cardWidth = 196, cardHeader = 40, cardRow = 22;
@@ -485,12 +485,6 @@ class PipelineCanvas extends StatefulWidget {
 
 sealed class _Drag {}
 
-final class _PanDrag extends _Drag {
-  _PanDrag(this.pan, this.scale, this.focal);
-  final Offset pan, focal;
-  final double scale;
-}
-
 final class _CardDrag extends _Drag {
   _CardDrag(this.part, this.grab);
   final String part;
@@ -510,18 +504,10 @@ final class _WireDrag extends _Drag {
   bool ok = true;
 }
 
-class _PipelineCanvasState extends State<PipelineCanvas> {
-  final _focus = FocusNode(debugLabel: 'pipeline canvas');
-  Offset _pan = Offset.zero;
-  double _scale = 1;
-  int _fitted = -1;
-  Size _size = Size.zero;
+class _PipelineCanvasState extends State<PipelineCanvas>
+    with CanvasViewport<PipelineCanvas> {
   _Drag? _drag;
-  Offset? _downAt;
-  final _right = RightClicks();
-  (Duration, Offset)? _lastTap;
   String? _hoverPart;
-  static final _clock = Stopwatch()..start();
 
   BuilderModel get m => widget.model;
 
@@ -547,7 +533,6 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
   @override
   void dispose() {
     _source.removeListener(_changed);
-    _focus.dispose();
     super.dispose();
   }
 
@@ -559,29 +544,29 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
   ({List<PipelineCard> cards, List<PipelineWire> wires}) get _geo =>
       _geometry ??= pipelineGeometry(m);
 
-  Offset _toCanvas(Offset screen) => (screen - _pan) / _scale;
-
-  void _fit(List<PipelineCard> cards) {
-    if (_size.isEmpty || cards.isEmpty) return;
+  @override
+  Rect? get contentBounds {
+    final cards = _cards;
+    if (cards.isEmpty) return null;
     var r = cards.first.rect;
     for (final c in cards.skip(1)) {
       r = r.expandToInclude(c.rect);
     }
-    final box = r.inflate(40);
-    _scale = math
-        .min(_size.width / box.width, _size.height / box.height)
-        .clamp(0.3, 1.2);
-    _pan = _size.center(Offset.zero) - box.center * _scale;
+    return r;
   }
 
-  void _zoom(double factor, Offset focal) {
-    final s = (_scale * factor).clamp(0.2, 3.0);
-    final c = _toCanvas(focal);
-    setState(() {
-      _scale = s;
-      _pan = focal - c * s;
-    });
-  }
+  /// On a phone the fit stops at a zoom the cards can be read at, and
+  /// shows the start of the pipeline (pan to follow it).
+  @override
+  ViewFit get viewFit => const ViewFit(
+    margin: 40,
+    maxScale: 1.2,
+    narrowMinScale: 0.65,
+    showStart: true,
+  );
+
+  @override
+  int get openedVersion => m.opened;
 
   // ---------------------------------------------------------------------------
   // Hit tests
@@ -590,7 +575,7 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
   List<PipelineCard> get _cards => _geo.cards;
 
   PipelineCard? _cardAt(Offset screen) {
-    final p = _toCanvas(screen);
+    final p = toCanvas(screen);
     for (final c in _cards.reversed) {
       if (c.rect.inflate(2).contains(p)) return c;
     }
@@ -600,8 +585,8 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
   /// An output port near [screen]: a column (data row or transform) or the
   /// network's beliefs.
   ({Offset at, String? column})? _outPortAt(Offset screen) {
-    final p = _toCanvas(screen);
-    final reach = math.max(9.0, 12 / _scale);
+    final p = toCanvas(screen);
+    final reach = math.max(9.0, 12 / scale);
     ({Offset at, String? column})? best;
     var bestD = reach * reach;
     void consider(Offset at, String? column) {
@@ -625,16 +610,16 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
 
   /// The row of [card] under [screen], if any.
   int? _rowAt(PipelineCard card, Offset screen) {
-    final p = _toCanvas(screen) - card.at;
+    final p = toCanvas(screen) - card.at;
     if (p.dy < cardHeader) return null;
     final k = ((p.dy - cardHeader) / cardRow).floor();
     return k >= 0 && k < card.rows.length ? k : null;
   }
 
   String? _wireAtPart(Offset screen) {
-    final p = _toCanvas(screen);
+    final p = toCanvas(screen);
     String? best;
-    var bestD = math.max(5.0, 8 / _scale);
+    var bestD = math.max(5.0, 8 / scale);
     for (final w in _geo.wires) {
       final d = curveDistance(p, (t) => _wireAt(w.from, w.to, t));
       if (d < bestD) {
@@ -649,44 +634,29 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
   // Gestures
   // ---------------------------------------------------------------------------
 
-  void _onScaleStart(ScaleStartDetails d) {
-    _focus.requestFocus();
-    if (_right.active) {
-      _drag = null; // a right click's drag: neither a pan nor a move
-      return;
+  @override
+  bool startDrag(Offset at) {
+    if (_outPortAt(at) case final p?) {
+      setState(() => _drag = _WireDrag(p.at, p.column, toCanvas(at)));
+      return true;
     }
-    final at = d.pointerCount == 1
-        ? (_downAt ?? d.localFocalPoint)
-        : d.localFocalPoint;
-    if (d.pointerCount == 1) {
-      if (_outPortAt(at) case final p?) {
-        setState(() => _drag = _WireDrag(p.at, p.column, _toCanvas(at)));
-        return;
-      }
-      if (_cardAt(at) case final c?) {
-        m.checkpoint();
-        m.select(PartSelection(c.part));
-        _drag = _CardDrag(c.part, _toCanvas(at) - c.at);
-        return;
-      }
+    if (_cardAt(at) case final c?) {
+      m.checkpoint();
+      m.select(PartSelection(c.part));
+      _drag = _CardDrag(c.part, toCanvas(at) - c.at);
+      return true;
     }
-    _drag = _PanDrag(_pan, _scale, at);
+    _drag = null;
+    return false;
   }
 
-  void _onScaleUpdate(ScaleUpdateDetails d) {
-    final at = d.localFocalPoint;
+  @override
+  void updateDrag(Offset at) {
     switch (_drag) {
-      case _PanDrag(:final pan, :final scale, :final focal):
-        final s = (scale * d.scale).clamp(0.2, 3.0);
-        final c = (focal - pan) / scale;
-        setState(() {
-          _scale = s;
-          _pan = at - c * s;
-        });
       case _CardDrag(:final part, :final grab):
-        m.movePart(part, _toCanvas(at) - grab);
+        m.movePart(part, toCanvas(at) - grab);
       case final _WireDrag w:
-        w.at = _toCanvas(at);
+        w.at = toCanvas(at);
         final (tip, ok) = _dropTip(w, at);
         w
           ..tip = tip
@@ -746,12 +716,13 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
     return ('Nothing to connect here', false);
   }
 
-  void _onScaleEnd(ScaleEndDetails d) {
+  @override
+  void endDrag() {
     final drag = _drag;
     _drag = null;
     if (drag is! _WireDrag) return;
     setState(() {});
-    final screen = drag.at * _scale + _pan;
+    final screen = toScreen(drag.at);
     final card = _cardAt(screen);
     final column = drag.column;
     if (column == null) {
@@ -791,24 +762,15 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
     if (drag.tip != null && !drag.ok) tellCanvas(context, drag.tip!);
   }
 
-  void _onTapUp(TapUpDetails d) {
-    _focus.requestFocus();
-    final at = d.localPosition;
-    final now = _clock.elapsed;
-    final double = switch (_lastTap) {
-      (final t, final p) =>
-        now - t < kDoubleTapTimeout && (p - at).distance < kDoubleTapSlop,
-      null => false,
-    };
-    _lastTap = (now, at);
+  @override
+  void onTap(Offset at) {
+    final double = doubleTap(at);
     if (_cardAt(at) case final c?) {
       if (double && c.part == DocPart.network) {
-        _lastTap = null;
         m.showView(BuilderView.network);
         return;
       }
       if (double && c.part.startsWith('deep:')) {
-        _lastTap = null;
         m.showDeep(c.part.substring('deep:'.length));
         return;
       }
@@ -825,8 +787,7 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
       m.select(PartSelection(part));
     } else {
       if (double) {
-        _lastTap = null;
-        m.addTransform(at: _toCanvas(at));
+        m.addTransform(at: toCanvas(at));
         return;
       }
       m.select(null);
@@ -846,11 +807,11 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
   Future<T?> _popup<T>(Offset at, List<PopupMenuEntry<T>> items) =>
       showMenuAt(context, at, items);
 
-  Future<void> _contextMenu(Offset at) async {
-    _focus.requestFocus();
+  @override
+  Future<void> openMenu(Offset at) async {
     final card = _cardAt(at);
     final items = <PopupMenuEntry<VoidCallback>>[];
-    final c = _toCanvas(at);
+    final c = toCanvas(at);
     if (card != null) {
       m.select(PartSelection(card.part));
       if (card.part == DocPart.network) {
@@ -971,7 +932,7 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
           m,
           e,
           onEscape: () => setState(() => _drag = null),
-          onFit: () => setState(() => _fit(_cards)),
+          onFit: () => setState(fitView),
         )
         case final handled?) {
       return handled;
@@ -993,121 +954,58 @@ class _PipelineCanvasState extends State<PipelineCanvas> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return LayoutBuilder(
-      builder: (context, box) {
-        _size = box.biggest;
-        final geometry = _geo;
-        if (_fitted != m.opened) {
-          _fitted = m.opened;
-          _fit(geometry.cards);
-        }
-        final wire = _drag is _WireDrag ? _drag! as _WireDrag : null;
-        return Focus(
-          focusNode: _focus,
-          onKeyEvent: _onKey,
-          child: ClipRect(
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: NoBrowserContextMenu(
-                    child: Listener(
-                      onPointerDown: (e) {
-                        _downAt = e.localPosition;
-                        _right.down(e);
-                      },
-                      onPointerUp: (e) => _right.up(e, _contextMenu),
-                      onPointerCancel: (_) => _right.cancel(),
-                      onPointerSignal: (e) {
-                        if (e is PointerScrollEvent) {
-                          _zoom(
-                            math.exp(-e.scrollDelta.dy / 400),
-                            e.localPosition,
-                          );
-                        }
-                      },
-                      child: MouseRegion(
-                        cursor: wire != null
-                            ? SystemMouseCursors.precise
-                            : _hoverPart != null
-                            ? SystemMouseCursors.move
-                            : SystemMouseCursors.basic,
-                        onHover: (e) {
-                          final p = _outPortAt(e.localPosition) != null
-                              ? null
-                              : _cardAt(e.localPosition)?.part;
-                          if (p != _hoverPart) setState(() => _hoverPart = p);
-                        },
-                        onExit: (_) => setState(() => _hoverPart = null),
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTapUp: _onTapUp,
-                          onLongPressStart: (d) =>
-                              _contextMenu(d.localPosition),
-                          onScaleStart: _onScaleStart,
-                          onScaleUpdate: _onScaleUpdate,
-                          onScaleEnd: _onScaleEnd,
-                          child: RepaintBoundary(
-                            child: CustomPaint(
-                              size: Size.infinite,
-                              painter: _PipelinePainter(
-                                model: m,
-                                cards: geometry.cards,
-                                wires: geometry.wires,
-                                pan: _pan,
-                                scale: _scale,
-                                wire: wire,
-                                scheme: scheme,
-                                text: theme.textTheme,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
+    final geometry = _geo;
+    final wire = _drag is _WireDrag ? _drag! as _WireDrag : null;
+    return viewport(
+      onKey: _onKey,
+      cursor: wire != null
+          ? SystemMouseCursors.precise
+          : _hoverPart != null
+          ? SystemMouseCursors.move
+          : SystemMouseCursors.basic,
+      onHover: (at) {
+        final p = _outPortAt(at) != null ? null : _cardAt(at)?.part;
+        if (p != _hoverPart) setState(() => _hoverPart = p);
+      },
+      onExit: () => setState(() => _hoverPart = null),
+      painter: () => _PipelinePainter(
+        model: m,
+        cards: geometry.cards,
+        wires: geometry.wires,
+        pan: pan,
+        scale: scale,
+        wire: wire,
+        scheme: scheme,
+        text: theme.textTheme,
+      ),
+      overlays: () => [
+        if (wire?.tip case final tip?)
+          Positioned(
+            left: toScreen(wire!.at).dx + 14,
+            top: toScreen(wire.at).dy + 10,
+            child: IgnorePointer(
+              child: Material(
+                elevation: 2,
+                borderRadius: BorderRadius.circular(6),
+                color: wire.ok ? scheme.inverseSurface : scheme.errorContainer,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 5,
+                  ),
+                  child: Text(
+                    tip,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: wire.ok
+                          ? scheme.onInverseSurface
+                          : scheme.onErrorContainer,
                     ),
                   ),
                 ),
-                if (wire?.tip case final tip?)
-                  Positioned(
-                    left: (wire!.at * _scale + _pan).dx + 14,
-                    top: (wire.at * _scale + _pan).dy + 10,
-                    child: IgnorePointer(
-                      child: Material(
-                        elevation: 2,
-                        borderRadius: BorderRadius.circular(6),
-                        color: wire.ok
-                            ? scheme.inverseSurface
-                            : scheme.errorContainer,
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 5,
-                          ),
-                          child: Text(
-                            tip,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: wire.ok
-                                  ? scheme.onInverseSurface
-                                  : scheme.onErrorContainer,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                Positioned(
-                  right: 8,
-                  bottom: 8,
-                  child: CanvasZoomButtons(
-                    onIn: () => _zoom(1.25, _size.center(Offset.zero)),
-                    onOut: () => _zoom(0.8, _size.center(Offset.zero)),
-                    onFit: () => setState(() => _fit(geometry.cards)),
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
-        );
-      },
+      ],
     );
   }
 }

@@ -33,6 +33,12 @@ An interactive playground for Hierarchical Gaussian Filters, built on the
 - The *reset* button puts the current preset back as it ships:
   parameters, couplings, update scheme and data settings.
 - Light and dark themes, following the system unless you pick one.
+- Cross-origin isolated on any static host: hosts that cannot send
+  COOP/COEP (GitHub Pages) get them from `web/coi_sw.js`, a service worker
+  that the custom `web/flutter_bootstrap.js` registers (the first visit
+  reloads once, before the engine loads). Isolated, skwasm renders on its
+  own thread and the fit workers can share memory. `?coi=0` opts out;
+  `melos run check:playground-coi` checks it without server headers.
 
 ```sh
 tool/build_worker.sh                          # the fit host and worker, into web/ (once)

@@ -2350,18 +2350,18 @@ fitting, export) reads it.
    export; continuous layers' couplings and per-layer volatility children
    in the inspector.
 
-9. [ ] **Builder: performance and usability** (reported 2026-11-18, see
-   "Builder: performance and usability" below). Done: dragging no longer
-   rebuilds the page, right-click menus on the web and with a moving
-   mouse, searchable pickers for long lists, the inspector as a sheet on
-   phones. Left: cross-origin isolation for the deployed build (skwasm's
-   render thread), the pipeline canvas on phones, a shared viewport for
-   the canvases.
+9. [x] **Builder: performance and usability** (reported 2026-11-18, done
+   2026-11-18, see "Builder: performance and usability" below): dragging
+   no longer rebuilds the page, right-click menus on the web and with a
+   moving mouse, searchable pickers for long lists, the inspector as a
+   sheet on phones, cross-origin isolation for the deployed build
+   (skwasm's render thread, through a service worker), a readable
+   pipeline on phones, and one viewport mixin for the canvases.
 
 In parallel (not blocking): vector node kinds on the GPU, a faster dp
 candidate search.
 
-#### Builder: performance and usability (2026-11-18): first part done
+#### Builder: performance and usability (2026-11-18): done
 
 Four reports from use: dragging a node feels slow in a browser; the
 dropdowns get unwieldy with many nodes or parameters; right-click does
@@ -2423,19 +2423,63 @@ sign that anything opened.
 
 Follow-ups:
 
-- [ ] **Cross-origin isolation on GitHub Pages**, for skwasm's render
-  thread (4× less main-thread time while dragging, above). Pages cannot
-  set headers; the usual fix is a service worker that adds COOP/COEP
-  (e.g. `coi-serviceworker`, or `COEP: credentialless`). Check first that
-  everything the page fetches cross-origin (fonts from gstatic, the fit
-  workers) still loads, and how the service worker's caching interacts
-  with new deployments. Also lets the fit workers use shared memory.
-- [ ] **The pipeline canvas on phones**: "fit to view" stops at 0.3×, so
-  on a 360 px screen the cards are tiny and the data card is cut off.
-  A top-to-bottom pipeline on narrow screens, or a smaller minimum zoom.
-- [ ] **One viewport for the canvases**: the network and pipeline
-  canvases still each keep their own pan, zoom, fit and gesture
-  dispatch (about 100 lines each); a mixin could take them.
+- [x] **Cross-origin isolation on GitHub Pages** (2026-11-18), for
+  skwasm's render thread (4× less main-thread time while dragging,
+  above). Pages cannot set headers, so `web/coi_sw.js` (our own, about
+  40 lines) adds COOP `same-origin`, COEP `require-corp` and CORP to every
+  same-origin response in its scope. It caches nothing, so new
+  deployments arrive as before. Cross-origin requests (the engine and
+  fonts from gstatic) are left alone; they send CORS headers and load
+  under `require-corp`. A custom `web/flutter_bootstrap.js` registers it,
+  waits for it to activate and reloads once *before* the engine loads, so
+  nothing downloads twice. It also drops Flutter's `serviceWorkerSettings`:
+  Flutter's deprecated `flutter_service_worker.js` only unregisters itself,
+  and registering it would replace ours at the same scope. If a reload
+  still leaves the page unisolated, it gives up for the session
+  (a `sessionStorage` flag, so no reload loop). `?coi=0` opts out.
+  Checked (`melos run check:playground-coi`, headless Chrome, plain static
+  server; also by hand under a `/hgf.dart/` base path like Pages): the
+  first visit reloads once and is isolated with skwasm's render worker,
+  the second does not reload, MAP and NUTS fits run on 4 Wasm workers
+  (through the fit host and from the page), and `?coi=0` in a fresh
+  profile loads unisolated with skwasm single-threaded. Not checked:
+  Safari and Firefox (both honour COOP/COEP from a service worker as far
+  as we know; if not, the guard leaves the page as it was before).
+- [x] **The pipeline canvas on phones** (2026-11-18): "fit to view" stopped
+  at 0.3×, so on a 360 px screen the cards were unreadable and the data
+  and fit cards were cut off. Chosen (over a top-to-bottom layout on
+  phones, which would give saved positions a second meaning, and over an
+  even smaller zoom): on canvases narrower than 600 px the pipeline's fit
+  stops at 0.65×, where the cards can be read, and where the content
+  overflows it shows the *start* (the data card, left) instead of the
+  centre. Pan or pinch to follow the rest. Wide canvases fit as before.
+  The automatic layout also lost its gaps: a column per stage the
+  document *has* (data; transforms and deep networks; the network; the
+  response and outputs; the fit), so the binary preset is data 0, network
+  280, fit 560 instead of 0, 560, 1120 (on desktop it now fits at full
+  size). When an edit adds or removes a column, cards on automatic
+  positions are pinned where they were drawn, so nothing jumps.
+  *Auto layout* packs them again.
+- [x] **One viewport for the canvases** (2026-11-18): `CanvasViewport`
+  (`builder/ui/canvas_viewport.dart`), a mixin on the canvases' `State`,
+  holds pan and zoom, fit to view (`ViewFit`: margin, zoom range, the
+  narrow-canvas minimum, show the start), fit again on a new document,
+  the scroll wheel, pinch, right clicks and long presses, the zoom
+  buttons, double taps, and the scale gesture's dispatch between a pan and
+  the canvas's own drag (`startDrag`/`updateDrag`/`endDrag`). The
+  network and pipeline canvases keep only their hit tests, drags, menus
+  and painters (227 lines fewer between them). The move fixed two latent
+  bugs. A fit on an empty first layout was marked as done and never ran.
+  And the painter must be built *after* the fit, so `viewport` takes
+  builders for the painter and overlays (the first frame painted the
+  unfitted view until something else rebuilt; a widget test's
+  `pumpAndSettle` hid this, a browser did not).
+  Tests (`test/canvas_viewport_test.dart`, a probe canvas): the fits
+  (centred, the phone minimum with the start shown, wide, no `showStart`,
+  again on a new document, the fitted view on the first frame), drags on a
+  thing vs the background, taps and double taps, scroll zoom about the
+  pointer, a jittering right click; the compact layout and pinning,
+  through auto layout and undo. 152 playground tests pass.
 - [ ] Note for running the playground's tests on macOS: `flutter test`
   needs the `hgf_gpu` user-define `bundle: false` (see
   `packages/hgf_gpu/hook/build.dart`), else `install_name_tool` aborts

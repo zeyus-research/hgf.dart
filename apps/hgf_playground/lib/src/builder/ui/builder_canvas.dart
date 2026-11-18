@@ -1,7 +1,5 @@
 import 'dart:math' as math;
 
-import 'package:flutter/gestures.dart';
-import 'package:flutter/services.dart';
 import 'package:hgf/hgf.dart';
 import 'package:hgf_fit/document.dart';
 import 'package:material_ui/material_ui.dart';
@@ -10,6 +8,7 @@ import '../../ui/panels.dart' show fmt;
 import '../builder_model.dart';
 import '../doc_layout.dart';
 import 'canvas_support.dart';
+import 'canvas_viewport.dart';
 import 'search_picker.dart';
 
 /// A port of a node: where edges of one type attach. Top ports take
@@ -79,12 +78,6 @@ class BuilderCanvas extends StatefulWidget {
 
 sealed class _Drag {}
 
-final class _PanDrag extends _Drag {
-  _PanDrag(this.pan, this.scale, this.focal);
-  final Offset pan, focal;
-  final double scale;
-}
-
 final class _NodeDrag extends _Drag {
   _NodeDrag(this.id, this.grab);
   final String id;
@@ -110,21 +103,9 @@ final class _WireDrag extends _Drag {
   bool choose = false;
 }
 
-class _BuilderCanvasState extends State<BuilderCanvas> {
-  final _focus = FocusNode(debugLabel: 'builder canvas');
-  Offset _pan = Offset.zero;
-  double _scale = 1;
-  int _fitted = -1;
-  Size _size = Size.zero;
+class _BuilderCanvasState extends State<BuilderCanvas>
+    with CanvasViewport<BuilderCanvas> {
   _Drag? _drag;
-
-  /// Where the last pointer went down: the scale recogniser starts only
-  /// after the touch slop, too late to hit a port.
-  Offset? _downAt;
-  final _right = RightClicks();
-
-  /// The last tap on the background (time and place), for double-clicks.
-  (Duration, Offset)? _lastTap;
   ({String? node, Port? port, int? edge})? _hover;
 
   BuilderModel get m => widget.model;
@@ -150,46 +131,27 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
   @override
   void dispose() {
     _source.removeListener(_changed);
-    _focus.dispose();
     super.dispose();
   }
 
   void _changed() => setState(() {});
 
-  Offset _toCanvas(Offset screen) => (screen - _pan) / _scale;
-  Offset _toScreen(Offset canvas) => canvas * _scale + _pan;
+  @override
+  Rect? get contentBounds => boundsOf(m.positions.values);
 
-  void _fit() {
-    if (_size.isEmpty) return;
-    final b = boundsOf(m.positions.values);
-    if (b == null) {
-      _pan = _size.center(Offset.zero);
-      _scale = 1;
-      return;
-    }
-    final box = b.inflate(70);
-    _scale = math
-        .min(_size.width / box.width, _size.height / box.height)
-        .clamp(0.3, 1.4);
-    _pan = _size.center(Offset.zero) - box.center * _scale;
-  }
+  @override
+  ViewFit get viewFit => const ViewFit(margin: 70, maxScale: 1.4);
 
-  void _zoom(double factor, Offset focal) {
-    final s = (_scale * factor).clamp(0.2, 3.0);
-    final c = _toCanvas(focal);
-    setState(() {
-      _scale = s;
-      _pan = focal - c * s;
-    });
-  }
+  @override
+  int get openedVersion => m.opened;
 
   // ---------------------------------------------------------------------------
   // Hit tests (screen coordinates in, canvas coordinates inside)
   // ---------------------------------------------------------------------------
 
   ({String id, Port port})? _portAt(Offset screen) {
-    final p = _toCanvas(screen);
-    final reach = math.max(9.0, 12 / _scale);
+    final p = toCanvas(screen);
+    final reach = math.max(9.0, 12 / scale);
     ({String id, Port port})? best;
     var bestD = reach * reach;
     for (final n in m.doc.nodes) {
@@ -207,7 +169,7 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
   }
 
   String? _nodeAt(Offset screen, {String? except}) {
-    final p = _toCanvas(screen);
+    final p = toCanvas(screen);
     for (final n in m.doc.nodes.reversed) {
       if (n.id == except) continue;
       final c = m.positions[n.id];
@@ -219,9 +181,9 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
   }
 
   int? _edgeAt(Offset screen) {
-    final p = _toCanvas(screen);
+    final p = toCanvas(screen);
     int? best;
-    var bestD = math.max(5.0, 8 / _scale);
+    var bestD = math.max(5.0, 8 / scale);
     for (final (i, e) in m.doc.edges.indexed) {
       final g = edgeGeometry(m, e);
       if (g == null) continue;
@@ -238,47 +200,30 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
   // Gestures
   // ---------------------------------------------------------------------------
 
-  void _onScaleStart(ScaleStartDetails d) {
-    _focus.requestFocus();
-    if (_right.active) {
-      _drag = null; // a right click's drag: neither a pan nor a move
-      return;
+  @override
+  bool startDrag(Offset at) {
+    if (_portAt(at) case final p?) {
+      setState(() => _drag = _WireDrag(p.id, p.port, toCanvas(at)));
+      return true;
     }
-    final at = d.pointerCount == 1
-        ? (_downAt ?? d.localFocalPoint)
-        : d.localFocalPoint;
-    if (d.pointerCount == 1) {
-      if (_portAt(at) case final p?) {
-        setState(() => _drag = _WireDrag(p.id, p.port, _toCanvas(at)));
-        return;
-      }
-      if (_nodeAt(at) case final id?) {
-        m.checkpoint();
-        m.select(NodeSelection(id));
-        _drag = _NodeDrag(id, _toCanvas(at) - m.positions[id]!);
-        return;
-      }
+    if (_nodeAt(at) case final id?) {
+      m.checkpoint();
+      m.select(NodeSelection(id));
+      _drag = _NodeDrag(id, toCanvas(at) - m.positions[id]!);
+      return true;
     }
-    _drag = _PanDrag(_pan, _scale, at);
+    _drag = null;
+    return false;
   }
 
-  void _onScaleUpdate(ScaleUpdateDetails d) {
-    final at = d.localFocalPoint;
+  @override
+  void updateDrag(Offset at) {
     switch (_drag) {
-      case _PanDrag(:final pan, :final scale, :final focal):
-        final s = (scale * d.scale).clamp(0.2, 3.0);
-        // Keep the canvas point under the starting focal point under the
-        // fingers.
-        final c = (focal - pan) / scale;
-        setState(() {
-          _scale = s;
-          _pan = at - c * s;
-        });
       case final _NodeDrag drag:
         drag.moved = true;
-        m.moveNode(drag.id, _toCanvas(at) - drag.grab);
+        m.moveNode(drag.id, toCanvas(at) - drag.grab);
       case final _WireDrag w:
-        w.at = _toCanvas(at);
+        w.at = toCanvas(at);
         final target = _nodeAt(at, except: w.id);
         if (target != w.target) {
           w.target = target;
@@ -300,7 +245,8 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
     }
   }
 
-  void _onScaleEnd(ScaleEndDetails d) {
+  @override
+  void endDrag() {
     final drag = _drag;
     _drag = null;
     if (drag is _WireDrag) {
@@ -315,7 +261,7 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
       if (ok.length == 1 && !_isBlock(drag.id) && !_isBlock(target)) {
         m.addEdge(ok.single.edge);
       } else if (ok.isNotEmpty) {
-        _chooseEdge(ok, _toScreen(drag.at));
+        _chooseEdge(ok, toScreen(drag.at));
       } else {
         tellCanvas(context, candidates.first.problem!);
       }
@@ -372,35 +318,24 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
     if (pick != null) m.addEdge(pick);
   }
 
-  void _onTapUp(TapUpDetails d) {
-    _focus.requestFocus();
-    final at = d.localPosition;
+  @override
+  void onTap(Offset at) {
     if (_nodeAt(at) case final id?) {
-      _lastTap = null;
+      forgetTap();
       m.select(NodeSelection(id));
     } else if (_edgeAt(at) case final i?) {
-      _lastTap = null;
+      forgetTap();
       m.select(EdgeSelection(i));
+    } else if (doubleTap(at)) {
+      // A double-click on the background adds a node.
+      m.addNode(NodeKind.continuousState, at: toCanvas(at));
     } else {
-      // A double-click on the background adds a node (detected here: a
-      // double-tap recogniser would hold every tap back).
-      final now = _clock.elapsed;
-      if (_lastTap case (final t, final p)
-          when now - t < kDoubleTapTimeout &&
-              (p - at).distance < kDoubleTapSlop) {
-        _lastTap = null;
-        m.addNode(NodeKind.continuousState, at: _toCanvas(at));
-        return;
-      }
-      _lastTap = (now, at);
       m.select(null);
     }
   }
 
-  static final _clock = Stopwatch()..start();
-
-  Future<void> _contextMenu(Offset at) async {
-    _focus.requestFocus();
+  @override
+  Future<void> openMenu(Offset at) async {
     final node = _nodeAt(at);
     final edge = node == null ? _edgeAt(at) : null;
     final items = <PopupMenuEntry<VoidCallback>>[];
@@ -454,7 +389,7 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
           ),
         );
     } else {
-      final c = _toCanvas(at);
+      final c = toCanvas(at);
       for (final kind in NodeKind.values) {
         items.add(
           PopupMenuItem(
@@ -468,8 +403,7 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
     pick?.call();
   }
 
-  void _onHover(PointerHoverEvent e) {
-    final at = e.localPosition;
+  void _onHover(Offset at) {
     final port = _portAt(at);
     final node = port == null ? _nodeAt(at) : null;
     final edge = port == null && node == null ? _edgeAt(at) : null;
@@ -482,7 +416,7 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
         m,
         e,
         onEscape: () => setState(() => _drag = null),
-        onFit: () => setState(_fit),
+        onFit: () => setState(fitView),
       ) ??
       KeyEventResult.ignored;
 
@@ -490,112 +424,53 @@ class _BuilderCanvasState extends State<BuilderCanvas> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return LayoutBuilder(
-      builder: (context, box) {
-        _size = box.biggest;
-        if (_fitted != m.opened) {
-          _fitted = m.opened;
-          _fit();
-        }
-        final wire = _drag is _WireDrag ? _drag! as _WireDrag : null;
-        final cursor = wire != null
-            ? SystemMouseCursors.precise
-            : _hover?.port != null
-            ? SystemMouseCursors.precise
-            : _hover?.node != null
-            ? SystemMouseCursors.move
-            : _hover?.edge != null
-            ? SystemMouseCursors.click
-            : SystemMouseCursors.basic;
-        return Focus(
-          focusNode: _focus,
-          onKeyEvent: _onKey,
-          child: ClipRect(
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: NoBrowserContextMenu(
-                    child: Listener(
-                      onPointerDown: (e) {
-                        _downAt = e.localPosition;
-                        _right.down(e);
-                      },
-                      onPointerUp: (e) => _right.up(e, _contextMenu),
-                      onPointerCancel: (_) => _right.cancel(),
-                      onPointerSignal: (e) {
-                        if (e is PointerScrollEvent) {
-                          _zoom(
-                            math.exp(-e.scrollDelta.dy / 400),
-                            e.localPosition,
-                          );
-                        }
-                      },
-                      child: MouseRegion(
-                        cursor: cursor,
-                        onHover: _onHover,
-                        onExit: (_) => setState(() => _hover = null),
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTapUp: _onTapUp,
-                          onLongPressStart: (d) =>
-                              _contextMenu(d.localPosition),
-                          onScaleStart: _onScaleStart,
-                          onScaleUpdate: _onScaleUpdate,
-                          onScaleEnd: _onScaleEnd,
-                          child: RepaintBoundary(
-                            child: CustomPaint(
-                              size: Size.infinite,
-                              painter: _CanvasPainter(
-                                model: m,
-                                pan: _pan,
-                                scale: _scale,
-                                hover: _hover,
-                                wire: wire,
-                                scheme: scheme,
-                                text: theme.textTheme,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                if (wire?.check case final c? when wire!.target != null)
-                  Positioned(
-                    left: _toScreen(wire.at).dx + 14,
-                    top: _toScreen(wire.at).dy + 10,
-                    child: _WireTip(
-                      text: wire.choose
-                          ? 'Release to choose which node'
-                          : c.problem ?? 'Release to connect',
-                      ok: c.problem == null,
-                    ),
-                  ),
-                Positioned(left: 8, bottom: 8, child: _Legend(scheme: scheme)),
-                Positioned(
-                  right: 8,
-                  bottom: 8,
-                  child: CanvasZoomButtons(
-                    onIn: () => _zoom(1.25, _size.center(Offset.zero)),
-                    onOut: () => _zoom(0.8, _size.center(Offset.zero)),
-                    onFit: () => setState(_fit),
-                  ),
-                ),
-                if (m.doc.nodes.isEmpty)
-                  Center(
-                    child: Text(
-                      'Double-click to add a node, or right-click (long-press) for more',
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-              ],
+    final wire = _drag is _WireDrag ? _drag! as _WireDrag : null;
+    final cursor = wire != null
+        ? SystemMouseCursors.precise
+        : _hover?.port != null
+        ? SystemMouseCursors.precise
+        : _hover?.node != null
+        ? SystemMouseCursors.move
+        : _hover?.edge != null
+        ? SystemMouseCursors.click
+        : SystemMouseCursors.basic;
+    return viewport(
+      onKey: _onKey,
+      cursor: cursor,
+      onHover: _onHover,
+      onExit: () => setState(() => _hover = null),
+      painter: () => _CanvasPainter(
+        model: m,
+        pan: pan,
+        scale: scale,
+        hover: _hover,
+        wire: wire,
+        scheme: scheme,
+        text: theme.textTheme,
+      ),
+      overlays: () => [
+        if (wire?.check case final c? when wire!.target != null)
+          Positioned(
+            left: toScreen(wire.at).dx + 14,
+            top: toScreen(wire.at).dy + 10,
+            child: _WireTip(
+              text: wire.choose
+                  ? 'Release to choose which node'
+                  : c.problem ?? 'Release to connect',
+              ok: c.problem == null,
             ),
           ),
-        );
-      },
+        Positioned(left: 8, bottom: 8, child: _Legend(scheme: scheme)),
+        if (m.doc.nodes.isEmpty)
+          Center(
+            child: Text(
+              'Double-click to add a node, or right-click (long-press) for more',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

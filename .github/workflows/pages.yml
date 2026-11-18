@@ -41,6 +41,8 @@ jobs:
       # The Web Worker that fits run on (Wasm and JS), copied in with web/.
       - name: Build the fit worker
         run: apps/hgf_playground/tool/build_worker.sh
+      # Pages sends no COOP/COEP: web/coi_sw.js (registered by the custom
+      # web/flutter_bootstrap.js) adds them, so skwasm gets its render thread.
       - name: Build (Wasm, -O4)
         working-directory: apps/hgf_playground
         run: >-

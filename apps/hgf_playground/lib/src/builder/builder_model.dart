@@ -153,19 +153,27 @@ class BuilderModel extends ChangeNotifier {
     if (_model.hasNetwork) DocPart.fit,
   ];
 
+  /// The automatic layout: a column per stage that the document has (data;
+  /// transforms and deep networks; the HGF network; the response and
+  /// outputs; the fit), 280 apart, so a missing stage leaves no gap.
   Offset _autoPipeline(String part, int k) {
-    if (part == DocPart.data) return const Offset(0, 0);
+    if (part == DocPart.data) return Offset.zero;
     if (part.startsWith('step:')) {
       // A chain into the data card, from the left.
       final i = int.parse(part.substring('step:'.length));
       return Offset(-240.0 * (_model.data.steps.length - i), 0);
     }
-    if (part == DocPart.network) return const Offset(560, 0);
+    final (:between, :network, :readouts) = _stages(_model);
+    final hgf = 1 + (between ? 1 : 0);
+    final readout = hgf + (network ? 1 : 0);
+    final fit = readout + (readouts ? 1 : 0);
+    Offset at(int column, double y) => Offset(280.0 * column, y);
+    if (part == DocPart.network) return at(hgf, 0);
     if (part.startsWith('transform:')) {
       final i = _model.transforms.indexWhere(
         (t) => DocPart.transform(t.name) == part,
       );
-      return Offset(280, i * 90.0);
+      return at(1, i * 90.0);
     }
     if (part.startsWith('deep:')) {
       final i = _model.deep.indexWhere((d) => DocPart.deep(d.id) == part);
@@ -174,13 +182,22 @@ class BuilderModel extends ChangeNotifier {
       final top = _model.transforms.isEmpty
           ? 0.0
           : _model.transforms.length * 90.0 + 20;
-      return Offset(280, top + i * 220.0);
+      return at(1, top + i * 220.0);
     }
-    if (part == DocPart.response) return const Offset(840, 0);
-    if (part == DocPart.fit) return const Offset(1120, 0);
+    if (part == DocPart.response) return at(readout, 0);
+    if (part == DocPart.fit) return at(fit, 0);
     final i = _model.outputs.indexWhere((o) => DocPart.output(o.name) == part);
-    return Offset(840, (_model.response == null ? 0 : 130) + i * 80.0);
+    return at(readout, (_model.response == null ? 0 : 130) + i * 80.0);
   }
+
+  /// Which of the automatic layout's middle columns [d] has.
+  static ({bool between, bool network, bool readouts}) _stages(
+    ModelDocument d,
+  ) => (
+    between: d.transforms.isNotEmpty || d.deep.isNotEmpty,
+    network: d.hasNetwork,
+    readouts: d.response != null || d.outputs.isNotEmpty,
+  );
 
   /// What the document is called (a preset's name, a file's).
   String name = 'Untitled';
@@ -491,9 +508,20 @@ class BuilderModel extends ChangeNotifier {
       if (_undo.length > _maxHistory) _undo.removeAt(0);
       _redo.clear();
     }
+    // A column of the automatic layout appears or goes: the cards there
+    // stay where they were drawn (the steps chain into the data card).
+    final pinned = _stages(_model) != _stages(next) ? pipelinePositions : null;
     _model = next;
     if (positions != null) _positions = positions;
     if (pipeline != null) _pipeline = pipeline;
+    if (pinned != null) {
+      final parts = pipelineParts.toSet();
+      _pipeline = {
+        for (final MapEntry(:key, :value) in pinned.entries)
+          if (parts.contains(key) && !key.startsWith('step:')) key: value,
+        ..._pipeline,
+      };
+    }
     if (coalesced) {
       _requestRefresh();
     } else {
