@@ -115,8 +115,8 @@ void main() {
       final rsDiff = (fixture['rshgf_max_rel_diff'] as num?)?.toDouble() ?? 0;
       final jaxTol = rsDiff > relTol ? 2 * rsDiff : relTol;
 
-      // The `*_mgf_correction` fixtures come from pyhgf JAX patched with the
-      // proposed eHGF fix (Network.ehgfMgfCorrection), not released pyhgf.
+      // A few fixtures come from pyhgf JAX patched with a proposed fix (the
+      // fixture's `reference` says which), not released pyhgf.
       final reference = fixture['reference'] as String? ?? 'pyhgf JAX';
 
       test('trajectories match $reference (float64, rel tol '

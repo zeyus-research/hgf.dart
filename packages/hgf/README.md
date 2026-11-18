@@ -196,25 +196,13 @@ to match pyhgf until the fixes reach it (the parity tests do).
   noise. With the fix a bias parent adds none, as the equivalent tonic
   drift on the input would.
 
-### Opt-in divergence: `ehgfMgfCorrection`
-
-`Network(volatilityUpdates: VolatilityUpdates.eHGF, ehgfMgfCorrection: true)`
-(spec key `"ehgf_mgf_correction": true`) **changes the relaxed eHGF update
-away from pyhgf 0.3.2**. It is off by default, and without it the engine
-matches pyhgf.
+### The relaxed eHGF update and its MGF terms
 
 The eHGF precision update re-predicts each volatility child's volatility
-from the parent's new mean, `t·exp(κ μ_b + ω̃)`. The relaxed prediction of
-that child also had the terms `Σ_p κ_p² / (2 π̂_p)` (one per volatility
-parent) in the exponent, and pyhgf's re-prediction leaves them out. The
-increment is then floored at zero on almost every trial, so volatility
-parents never gain precision. A 3-level continuous HGF diverges as a
-result: NaN from trial 44 on pyhgf's USD/CHF example, in JAX and rshgf
-alike. The flag adds the missing terms. It changes nothing under mean-field
-updates (whose prediction has no such terms) or for the standard and
-unbounded updates.
-
-The `*_mgf_correction` parity fixtures are generated from pyhgf's JAX
-backend patched with the same change (`tool/parity/gen_fixtures.py`), and
-Dart matches them to 1e-9. `dart run example/ehgf_mgf_correction.dart`
-compares both versions on USD/CHF.
+from the parent's new mean. Under relaxed updates that re-prediction
+includes the terms `Σ_p κ_p² / (2 π̂_p)` (one per volatility parent of the
+child), as the relaxed prediction step does. pyhgf added them in #480
+(after 0.3.3); before that, hgf.dart had them as the opt-in
+`ehgfMgfCorrection`, which is gone now that the engine matches pyhgf with
+them. Without the terms a 3-level continuous HGF diverged (NaN from trial
+44 on pyhgf's USD/CHF example).

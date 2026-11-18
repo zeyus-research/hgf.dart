@@ -555,7 +555,7 @@ class Fitting extends ChangeNotifier {
   // What the candidates, responses and result were made for.
   String? _presetId;
   VolatilityUpdates? _updates;
-  bool? _meanField, _mgf;
+  bool? _meanField;
   Float64List? _data;
 
   void _onPlayground() {
@@ -569,7 +569,6 @@ class Fitting extends ChangeNotifier {
     if (_presetId == pg.preset.id &&
         _updates == pg.volatilityUpdates &&
         _meanField == pg.meanField &&
-        _mgf == pg.ehgfMgfCorrection &&
         identical(_data, pg.observations)) {
       return false;
     }
@@ -593,7 +592,6 @@ class Fitting extends ChangeNotifier {
     _data = pg.observations;
     _updates = pg.volatilityUpdates;
     _meanField = pg.meanField;
-    _mgf = pg.ehgfMgfCorrection;
     if (_presetId != pg.preset.id) {
       _presetId = pg.preset.id;
       _buildCandidates();

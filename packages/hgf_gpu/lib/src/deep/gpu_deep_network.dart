@@ -16,12 +16,12 @@ import 'deep_kernels.dart';
 /// [trainEpoch] queues a whole epoch and reads back once.
 ///
 /// Results match the f64 CPU engine to f32 accuracy (`test/deep_gpu_test`).
-/// The sequential `fit` stays on the CPU.
+/// The sequential `fit` runs on [GpuDeepEnsemble].
 final class GpuDeepNetwork {
   GpuDeepNetwork._(this.backend, this.kernels)
     : _params = backend.storage(kernels.paramFloats * 4),
       _state = backend.storage(kernels.stateFloats * 4),
-      _uniform = backend.uniform(48);
+      _uniform = backend.uniform(DeepKernels.uniformWords * 4);
 
   /// Builds the kernels for [net]'s shape and settings, for batches of up
   /// to [capacity] samples, and uploads its weights and beliefs.
@@ -55,6 +55,11 @@ final class GpuDeepNetwork {
 
   Adam? _adam;
   int _adamCount = 0;
+
+  /// Which layers carry a weight belief (as `DeepNetwork`'s
+  /// `weightsPrecisionDelta`): from [upload], and every weight layer once
+  /// the weight-belief rule has run.
+  late List<bool> _beliefs;
 
   /// Largest batch one step takes.
   int get capacity => kernels.capacity;
@@ -92,14 +97,20 @@ final class GpuDeepNetwork {
       host.setAll(k.priorOffset(l), layer.priorPrecision);
       final w = layer.weights;
       if (w != null) host.setAll(k.weightsOffset(l), w.data);
+      final delta = layer.weightsPrecisionDelta;
+      if (delta != null) host.setAll(k.deltaOffset(l), delta);
     }
+    _beliefs = [
+      for (final layer in net.debugLayers) layer.weightsPrecisionDelta != null,
+    ];
     backend.write(_params, host);
     _adam = null;
     _adamCount = 0;
   }
 
-  /// Copies the weights and the carried beliefs (precision, and the
-  /// volatility level's mean and precision) into [net].
+  /// Copies the weights, the carried beliefs (precision, and the
+  /// volatility level's mean and precision) and the weight beliefs into
+  /// [net].
   Future<void> download(DeepNetwork net) async {
     final k = kernels;
     final p = await backend.read(_params, bytes: k.paramFloats * 4);
@@ -131,6 +142,15 @@ final class GpuDeepNetwork {
       }
     }
     net.setWeights(weights);
+    for (var l = 0; l < k.nLayers; l++) {
+      if (!_beliefs[l]) continue;
+      net.installWeightBelief(layers: [l]);
+      final dst = net.weightPrecisionDeltas[l]!.data;
+      final o = k.deltaOffset(l);
+      for (var i = 0; i < dst.length; i++) {
+        dst[i] = p[o + i];
+      }
+    }
   }
 
   GpuBuffer _ensure(GpuBuffer? buffer, int have, int floats) {
@@ -181,7 +201,7 @@ final class GpuDeepNetwork {
     }
   }
 
-  final _u = Uint32List(12);
+  final _u = Uint32List(DeepKernels.uniformWords);
   late final _uf = Float32List.view(_u.buffer);
 
   void _writeUniform({
@@ -190,14 +210,32 @@ final class GpuDeepNetwork {
     LearningKind learningKind = LearningKind.precisionWeighted,
     double timeStep = 1.0,
     Optimiser? optimiser,
+    SynapticUncertainty? synaptic,
+    double? weightSum,
   }) {
-    _rejectSynaptic(learningKind);
     _u
       ..[0] = b
       ..[1] = start
-      ..[2] = learningKind == LearningKind.standard ? 0 : 1
+      ..[2] =
+          (learningKind == LearningKind.standard
+              ? 0
+              : DeepKernels.flagPrecisionWeighted) |
+          (weightSum == null ? 0 : DeepKernels.flagSampleWeights)
       ..[3] = 0x7fc00000;
-    _uf[4] = timeStep;
+    _uf
+      ..[4] = timeStep
+      // A weighted batch's means are weighted sums (the weights are
+      // normalised); the weights' sum is 1, or 0 for an all-zero mask.
+      ..[12] = weightSum == null ? b.toDouble() : 1.0
+      ..[13] = weightSum ?? 1.0;
+    if (synaptic != null) {
+      _uf
+        ..[5] = synaptic.learningRate
+        ..[14] = synaptic.priorPrecision
+        ..[15] = synaptic.window
+        ..[16] = synaptic.priorMean
+        ..[17] = synaptic.incrementScale;
+    }
     switch (optimiser) {
       case Sgd(:final learningRate):
         _uf[5] = learningRate;
@@ -253,6 +291,7 @@ final class GpuDeepNetwork {
   List<DeepKernelSource> _stepPlan({
     required bool errors,
     required Optimiser? optimiser,
+    required bool synaptic,
     required bool updatePrecisions,
   }) {
     final kind = switch (optimiser) {
@@ -261,13 +300,54 @@ final class GpuDeepNetwork {
       null => null,
     };
     return _plans.putIfAbsent(
-      'step $errors $kind $updatePrecisions',
+      'step $errors $kind $synaptic $updatePrecisions',
       () => kernels.batchUpdate(
         errors: errors,
         optimiser: kind,
+        synaptic: synaptic,
         updatePrecisions: updatePrecisions,
       ),
     );
+  }
+
+  /// Checks a learning request as `DeepNetwork` does; the weight-belief
+  /// rule gives every weight layer a belief (starting at zero, as
+  /// `installWeightBelief`).
+  void _resolveLearning(
+    LearningKind kind,
+    SynapticUncertainty? synaptic,
+    Optimiser? optimiser,
+  ) {
+    checkLearningRequest(kernels.settings, kind, synaptic, optimiser);
+    if (synaptic == null) return;
+    for (var l = 0; l < kernels.nLayers; l++) {
+      if (kernels.layers[l].weights != null) _beliefs[l] = true;
+    }
+  }
+
+  /// Uploads [sampleWeight] normalised to sum to 1 (all zero if they sum
+  /// to 0) and returns their sum, or `null` without weights.
+  double? _uploadSampleWeights(List<double>? sampleWeight, int b) {
+    if (sampleWeight == null) return null;
+    if (sampleWeight.length != b) {
+      throw ArgumentError(
+        'sampleWeight has ${sampleWeight.length} entries for $b samples.',
+      );
+    }
+    var total = 0.0;
+    for (final v in sampleWeight) {
+      total += v;
+    }
+    final denom = total > 0 ? total : 1.0;
+    final host = backend.hostFloats(b);
+    var sum = 0.0;
+    for (var s = 0; s < b; s++) {
+      final w = sampleWeight[s] / denom;
+      host[s] = w;
+      sum += w;
+    }
+    backend.write(_state, host, offset: kernels.sampleWeightsOffset * 4);
+    return sum;
   }
 
   /// Compiles every kernel of [plan] (once) before queueing any of it.
@@ -294,13 +374,19 @@ final class GpuDeepNetwork {
   ///
   /// The GPU keeps its own Adam moments: they start from zero the first
   /// time an `Adam` is passed and continue while the same one is.
+  ///
+  /// [LearningKind.synapticUncertainty] takes [synapticUncertainty] instead
+  /// of an optimiser, as on the CPU. [sampleWeight] (one non-negative
+  /// weight per row) makes every batch mean a weighted mean.
   Future<Matrix?> batchUpdate(
     Matrix x,
     Matrix y, {
     Optimiser? optimiser,
     LearningKind learningKind = LearningKind.precisionWeighted,
+    SynapticUncertainty? synapticUncertainty,
     double timeStep = 1.0,
     bool updatePrecisions = true,
+    List<double>? sampleWeight,
     bool readErrors = true,
   }) async {
     _checkShapes(x, y);
@@ -308,14 +394,17 @@ final class GpuDeepNetwork {
     if (b < 1 || b > capacity) {
       throw ArgumentError('Batch of $b samples; capacity is $capacity.');
     }
+    _resolveLearning(learningKind, synapticUncertainty, optimiser);
     final plan = _stepPlan(
       errors: readErrors,
       optimiser: optimiser,
+      synaptic: synapticUncertainty != null,
       updatePrecisions: updatePrecisions,
     );
     final pipelines = await _compile(plan);
     _uploadMatrix(x, isX: true);
     _uploadMatrix(y, isX: false);
+    final weightSum = _uploadSampleWeights(sampleWeight, b);
     if (readErrors) _ensureOut(b * kernels.topSize);
     _prepareOptimiser(optimiser);
     _writeUniform(
@@ -324,6 +413,8 @@ final class GpuDeepNetwork {
       learningKind: learningKind,
       timeStep: timeStep,
       optimiser: optimiser,
+      synaptic: synapticUncertainty,
+      weightSum: weightSum,
     );
     _queue(plan, pipelines, b);
     if (!readErrors) return null;
@@ -342,6 +433,7 @@ final class GpuDeepNetwork {
     required int batchSize,
     Optimiser? optimiser,
     LearningKind learningKind = LearningKind.precisionWeighted,
+    SynapticUncertainty? synapticUncertainty,
     double timeStep = 1.0,
     bool updatePrecisions = true,
     bool readErrors = false,
@@ -354,9 +446,11 @@ final class GpuDeepNetwork {
         'must be in 1..$capacity',
       );
     }
+    _resolveLearning(learningKind, synapticUncertainty, optimiser);
     final plan = _stepPlan(
       errors: readErrors,
       optimiser: optimiser,
+      synaptic: synapticUncertainty != null,
       updatePrecisions: updatePrecisions,
     );
     final pipelines = await _compile(plan);
@@ -372,6 +466,7 @@ final class GpuDeepNetwork {
         learningKind: learningKind,
         timeStep: timeStep,
         optimiser: optimiser,
+        synaptic: synapticUncertainty,
       );
       _queue(plan, pipelines, b);
     }
@@ -414,16 +509,5 @@ final class GpuDeepNetwork {
     for (final b in [_params, _state, _uniform, _x, _y, _out]) {
       if (b != null) backend.release(b);
     }
-  }
-}
-
-/// [LearningKind.synapticUncertainty] (the weight-belief rule) has no GPU
-/// kernel yet.
-void _rejectSynaptic(LearningKind kind) {
-  if (kind == LearningKind.synapticUncertainty) {
-    throw UnsupportedError(
-      'LearningKind.synapticUncertainty has no GPU kernel yet: use the CPU '
-      'DeepNetwork.',
-    );
   }
 }

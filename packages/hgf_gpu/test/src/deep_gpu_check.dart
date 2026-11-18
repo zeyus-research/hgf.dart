@@ -5,7 +5,8 @@ import 'package:hgf_deep/hgf_deep.dart';
 import 'package:hgf_gpu/hgf_gpu.dart';
 
 // The fixture reader of hgf_deep's own parity tests.
-import '../../../hgf_deep/test/src/deep_check.dart' show buildNetwork, matrix;
+import '../../../hgf_deep/test/src/deep_check.dart'
+    show buildNetwork, matrix, series, synapticOf;
 
 /// f32 against f64, relative to max(1, |expected|).
 const double tolerance = 2e-4;
@@ -19,6 +20,9 @@ const allowedLost = {
   // 130 and 137 (the P18 runaway); eHGF's re-prediction exp(ω + μ_vol)
   // overflows f32, so that node's batch-mean precision_vol is NaN.
   'mean_field_eHGF': {'op 1 (batch_update) precision_vol 1': 1},
+  // The same after op 0's fit has run layer 2's node 0 away: samples 3 and
+  // 9 of op 1 send its volatility mean from 8 to 232 and 98.
+  'input_layer_eHGF': {'op 1 (batch_update) precision_vol 2': 1},
 };
 
 /// The [results] of fixture [name] beyond [tolerance] or [allowedLost].
@@ -86,14 +90,39 @@ String? outsideF32(DeepNetwork net, {bool beliefs = true}) {
   return null;
 }
 
-/// A network with [src]'s weights and beliefs (same fixture).
+/// A network with [src]'s weights, weight beliefs and beliefs (same
+/// fixture).
 DeepNetwork cloneFrom(Map<String, Object?> fixture, DeepNetwork src) {
   final net = buildNetwork(fixture);
   net.setWeights([for (final w in src.weights.skip(1)) w!.copy()]);
+  final deltas = src.weightPrecisionDeltas;
   for (var l = 0; l < src.nLayers; l++) {
     net.state(l).setFrom(src.state(l));
+    final d = deltas[l];
+    if (d == null) continue;
+    net.installWeightBelief(layers: [l]);
+    net.weightPrecisionDeltas[l]!.data.setAll(0, d.data);
   }
   return net;
+}
+
+/// The weight beliefs of [actual] against [expected] (a layer without one
+/// on either side counts as all lost).
+List<(String, double, int)> compareDeltas(
+  DeepNetwork expected,
+  DeepNetwork actual,
+) {
+  final e = expected.weightPrecisionDeltas, a = actual.weightPrecisionDeltas;
+  return [
+    for (var l = 0; l < e.length; l++)
+      if (e[l] != null)
+        a[l] == null
+            ? ('weight belief $l', 0.0, e[l]!.data.length)
+            : () {
+                final c = compare(e[l]!.data, a[l]!.data);
+                return ('weight belief $l', c.err, c.lost);
+              }(),
+  ];
 }
 
 Optimiser? freshOptimiser(Object? spec) {
@@ -127,28 +156,23 @@ Future<List<(String, double, int)>> compareNetworks(
       out.add(('${f.pyhgfName} $l', c.err, c.lost));
     }
   }
-  return out;
+  return [...out, ...compareDeltas(cpu, scratch)];
 }
 
 /// Whether the GPU kernels cover every feature [fixture] uses: not
-/// `update_input_layer`, the weight-belief rule (`synaptic_uncertainty`),
-/// weighted batches or the gradient-health probe (CPU only so far).
+/// continuous layers (CPU filters, `DeepNetwork.inputData`) or the
+/// gradient-health probe (CPU only).
 bool gpuDeepSupported(Map<String, Object?> fixture) {
-  final settings = fixture['settings'] as Map<String, Object?>;
-  if (settings['update_input_layer'] == true) return false;
-  // Continuous networks are CPU filters (DeepNetwork.inputData).
   final layers = fixture['layers'] as List<Object?>;
   if (layers.any((l) => (l as Map)['kind'] == 'continuous')) return false;
-  for (final o in fixture['ops'] as List<Object?>) {
-    final op = o as Map<String, Object?>;
-    if (op['op'] == 'health' ||
-        op['learning_kind'] == 'synaptic_uncertainty' ||
-        op['sample_weight'] != null) {
-      return false;
-    }
-  }
-  return true;
+  return !(fixture['ops'] as List<Object?>).any(
+    (o) => (o as Map<String, Object?>)['op'] == 'health',
+  );
 }
+
+/// The op's sample weights, or `null`.
+List<double>? sampleWeightOf(Map<String, Object?> op) =>
+    op['sample_weight'] == null ? null : series(op['sample_weight']);
 
 /// Replays [fixture]'s operations on the CPU; before each `batch_update`
 /// and `predict`, the GPU takes the CPU's current state and runs the same
@@ -196,6 +220,7 @@ Future<List<(String, double, int)>> checkFixture(
                     () => freshOptimiser(spec)!,
                   ),
             learningKind: learningKind,
+            synapticUncertainty: synapticOf(op),
             weightUpdate: op['weight_update'] as bool? ?? true,
             timeStep: timeStep,
             updatePrecisions: op['update_precisions'] as bool? ?? true,
@@ -214,16 +239,20 @@ Future<List<(String, double, int)>> checkFixture(
             y,
             optimiser: freshOptimiser(op['optimiser']),
             learningKind: learningKind,
+            synapticUncertainty: synapticOf(op),
             timeStep: timeStep,
             updatePrecisions: updatePrecisions,
+            sampleWeight: sampleWeightOf(op),
           );
           final gpuErr = await gpu.batchUpdate(
             x,
             y,
             optimiser: freshOptimiser(op['optimiser']),
             learningKind: learningKind,
+            synapticUncertainty: synapticOf(op),
             timeStep: timeStep,
             updatePrecisions: updatePrecisions,
+            sampleWeight: sampleWeightOf(op),
           );
           final c = compare(cpuErr.data, gpuErr!.data);
           results.add(('$tag input errors', c.err, c.lost));
@@ -269,8 +298,10 @@ void _replay(
             () => freshOptimiser(spec)!,
           ),
     learningKind: learningKind,
+    synapticUncertainty: synapticOf(op),
     timeStep: timeStep,
     updatePrecisions: op['update_precisions'] as bool? ?? true,
+    sampleWeight: sampleWeightOf(op),
   );
 }
 
@@ -351,13 +382,14 @@ Future<List<(String, double, int)>> checkFitOps(
           final gpu = await GpuDeepEnsemble.create(backend, [
             cloneFrom(fixture, cpu),
             cloneFrom(fixture, cpu),
-          ]);
+          ], weightBeliefs: synapticOf(op) != null ? true : null);
           try {
             final cpuPred = ref.fit(
               x,
               y,
               optimiser: freshOptimiser(spec),
               learningKind: learningKind,
+              synapticUncertainty: synapticOf(op),
               weightUpdate: weightUpdate,
               timeStep: timeStep,
               updatePrecisions: updatePrecisions,
@@ -369,6 +401,7 @@ Future<List<(String, double, int)>> checkFitOps(
               [y],
               optimiser: freshOptimiser(spec),
               learningKind: learningKind,
+              synapticUncertainty: synapticOf(op),
               weightUpdate: weightUpdate,
               timeStep: timeStep,
               updatePrecisions: updatePrecisions,
@@ -411,6 +444,7 @@ Future<List<(String, double, int)>> checkFitOps(
                   () => freshOptimiser(spec)!,
                 ),
           learningKind: learningKind,
+          synapticUncertainty: synapticOf(op),
           weightUpdate: weightUpdate,
           timeStep: timeStep,
           updatePrecisions: updatePrecisions,
@@ -453,7 +487,7 @@ List<(String, double, int)> compareStates(
       out.add(('${f.pyhgfName} $l', c.err, c.lost));
     }
   }
-  return out;
+  return [...out, ...compareDeltas(expected, actual)];
 }
 
 /// The first recorded row whose beliefs hold a finite value beyond f32's

@@ -386,7 +386,6 @@ final class NetworkDocument {
   NetworkDocument({
     this.volatilityUpdates = VolatilityUpdates.unbounded,
     this.meanFieldUpdates = false,
-    this.ehgfMgfCorrection = false,
     NetworkFixes? fixes,
     this.maxPosteriorPrecision = 1e10,
     this.precisionClippingValue = 1e-6,
@@ -409,7 +408,7 @@ final class NetworkDocument {
   }
 
   final VolatilityUpdates volatilityUpdates;
-  final bool meanFieldUpdates, ehgfMgfCorrection;
+  final bool meanFieldUpdates;
   final NetworkFixes fixes;
   final double maxPosteriorPrecision, precisionClippingValue;
   final List<DocNode> nodes;
@@ -552,7 +551,6 @@ final class NetworkDocument {
     return NetworkDocument(
       volatilityUpdates: plan.volatilityUpdates,
       meanFieldUpdates: plan.meanFieldUpdates,
-      ehgfMgfCorrection: plan.ehgfMgfCorrection,
       fixes: plan.fixes,
       maxPosteriorPrecision: plan.maxPosteriorPrecision,
       precisionClippingValue: plan.precisionClippingValue,
@@ -568,7 +566,6 @@ final class NetworkDocument {
           (json['volatility_updates'] as String?) ?? 'unbounded',
         ),
         meanFieldUpdates: (json['mean_field_updates'] as bool?) ?? false,
-        ehgfMgfCorrection: (json['ehgf_mgf_correction'] as bool?) ?? false,
         fixes: switch (json['fixes']) {
           final Map<String, Object?> f => NetworkFixes.fromJson(f),
           _ => null,
@@ -596,7 +593,6 @@ final class NetworkDocument {
   Map<String, Object?> toJson() => {
     'volatility_updates': volatilityUpdates.pyhgfName,
     'mean_field_updates': meanFieldUpdates,
-    'ehgf_mgf_correction': ehgfMgfCorrection,
     'fixes': fixes.toJson(),
     'max_posterior_precision': jsonDouble(maxPosteriorPrecision),
     'precision_clipping_value': jsonDouble(precisionClippingValue),
@@ -751,7 +747,6 @@ final class NetworkDocument {
     final network = Network(
       volatilityUpdates: volatilityUpdates,
       meanFieldUpdates: meanFieldUpdates,
-      ehgfMgfCorrection: ehgfMgfCorrection,
       fixes: fixes,
       maxPosteriorPrecision: maxPosteriorPrecision,
       precisionClippingValue: precisionClippingValue,

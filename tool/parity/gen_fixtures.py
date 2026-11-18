@@ -45,9 +45,6 @@ from pyhgf.response import (  # noqa: E402
     total_gaussian_surprise,
 )
 from pyhgf.rshgf import Network as RsNetwork  # noqa: E402
-from pyhgf.updates.posterior.continuous import (  # noqa: E402
-    posterior_update_precision_continuous_node as _precision_mod,
-)
 import pyhgf.utils.get_update_sequence  # noqa: E402,F401
 
 # The module (pyhgf.utils re-exports a function under the same name).
@@ -335,12 +332,10 @@ def multi_structure(volatility_updates: str) -> dict:
     }
 
 
-def mgf_correction_specs() -> dict[str, dict]:
-    """Relaxed eHGF with the MGF correction: the 3-level HGF (which diverges
-    without it), the same with a second volatility parent of strength 0.5 on
-    node 1 (the sum over parents and κ²), and mean-field (where it is a
-    no-op)."""
-    three = continuous_3level("eHGF")
+def ehgf_mgf_specs() -> dict[str, dict]:
+    """The relaxed eHGF's MGF terms (pyhgf #480, P1): the 3-level HGF with a
+    second volatility parent of strength 0.5 on node 1 (the sum over parents
+    and κ²), and mean-field (which has no such terms)."""
     two_parents = continuous_3level("eHGF")
     two_parents["nodes"].append(
         {
@@ -351,14 +346,10 @@ def mgf_correction_specs() -> dict[str, dict]:
     )
     mean_field = continuous_3level("eHGF")
     mean_field["network"]["mean_field_updates"] = True
-    out = {
-        "continuous_3level_eHGF_mgf_correction": three,
-        "continuous_3level_eHGF_two_volatility_parents_mgf_correction": two_parents,
-        "continuous_3level_mean_field_eHGF_mgf_correction": mean_field,
+    return {
+        "continuous_3level_eHGF_two_volatility_parents": two_parents,
+        "continuous_3level_mean_field_eHGF": mean_field,
     }
-    for spec in out.values():
-        spec["network"]["ehgf_mgf_correction"] = True
-    return out
 
 
 def coupling_strengths() -> dict:
@@ -556,77 +547,6 @@ def build_jax(spec: dict) -> Network:
 
 
 # ---------------------------------------------------------------------------
-# Proposed upstream fix: the eHGF MGF correction (hgf.dart's
-# `Network.ehgfMgfCorrection`, spec key "ehgf_mgf_correction")
-# ---------------------------------------------------------------------------
-#
-# pyhgf's relaxed eHGF re-predicts a volatility child's volatility as
-# t·exp(κ μ_b + ω̃) and leaves out the Σ_p κ_p²/(2 π̂_p) terms that the relaxed
-# prediction of that child included. The fixtures with this key are pyhgf's
-# JAX backend with the patch below applied: they are a reference for the
-# proposed change, not for pyhgf as released.
-
-
-def _ehgf_increment_mgf_corrected(attributes, edges, node_idx, volatility_child_idx, volatility_coupling):
-    """``_ehgf_volatility_precision_increment`` with the MGF terms in ω̃."""
-    m = _precision_mod
-    mean = attributes[node_idx]["mean"]
-    tonic_volatility = m._effective_tonic_volatility(attributes, edges, node_idx, volatility_child_idx)
-    for parent_idx, coupling in zip(
-        edges[volatility_child_idx].volatility_parents,
-        attributes[volatility_child_idx]["volatility_coupling_parents"],
-    ):
-        tonic_volatility += coupling**2 / (2.0 * attributes[parent_idx]["expected_precision"])
-    previous_variance = attributes[volatility_child_idx]["temp"]["current_variance"] + m._value_coupling_variance(
-        attributes, volatility_child_idx
-    )
-    predicted_volatility = attributes[-1]["time_step"] * jnp.exp(volatility_coupling * mean + tonic_volatility)
-    expected_precision = 1.0 / (previous_variance + predicted_volatility)
-    effective_precision = predicted_volatility * expected_precision
-    volatility_error_weight = (predicted_volatility - previous_variance) * expected_precision
-    volatility_prediction_error = (
-        1.0 / attributes[volatility_child_idx]["precision"]
-        + (attributes[volatility_child_idx]["mean"] - attributes[volatility_child_idx]["expected_mean"]) ** 2
-    ) * expected_precision - 1.0
-    increment = jnp.maximum(
-        0.0,
-        0.5
-        * volatility_coupling**2
-        * effective_precision
-        * (effective_precision + volatility_error_weight * volatility_prediction_error),
-    )
-    return increment * attributes[volatility_child_idx]["observed"]
-
-
-@partial(jit, static_argnames=("edges", "node_idx"))
-def _precision_update_ehgf_mgf_corrected(attributes, edges, node_idx):
-    """``precision_update_ehgf`` (relaxed only) with the corrected increment.
-
-    The mean-field eHGF update is left alone: its prediction has no MGF terms.
-    """
-    m = _precision_mod
-    pwpe = m._value_coupling_pwpe(attributes, edges, node_idx, m._relaxed_child_factors)
-    pwpe += m._volatility_coupling_pwpe(attributes, edges, node_idx, _ehgf_increment_mgf_corrected)
-    return m._finalize_precision(attributes[node_idx]["expected_precision"], pwpe)
-
-
-class _MgfCorrection:
-    """Swap pyhgf's relaxed eHGF precision update for the corrected one (and
-    clear JAX's caches on both sides, so no trace of the other version is
-    reused)."""
-
-    def __enter__(self):
-        self._orig = _precision_mod.precision_update_ehgf
-        _precision_mod.precision_update_ehgf = _precision_update_ehgf_mgf_corrected
-        jax.clear_caches()
-
-    def __exit__(self, *exc):
-        _precision_mod.precision_update_ehgf = self._orig
-        jax.clear_caches()
-        return False
-
-
-# ---------------------------------------------------------------------------
 # Proposed upstream fix: dp-state nodes skip missing observations (P14)
 # ---------------------------------------------------------------------------
 #
@@ -670,13 +590,7 @@ def _dp_skip_missing(spec: dict) -> bool:
     return bool(spec["network"].get("dp_skip_missing", False))
 
 
-def _mgf_corrected(spec: dict) -> bool:
-    return bool(spec["network"].get("ehgf_mgf_correction", False))
-
-
 def rs_supported(spec: dict, observed=None) -> bool:
-    if _mgf_corrected(spec):
-        return False  # rshgf is unpatched
     for node in spec["nodes"]:
         if node["kind"] == "ef-state" and (
             node.get("params") or node.get("n_nodes", 1) > 1 or observed is not None
@@ -988,8 +902,8 @@ def scenarios() -> list[dict]:
             "inputs": y,
         }
     )
-    # The proposed eHGF MGF correction (see _ehgf_increment_mgf_corrected).
-    for name, spec in mgf_correction_specs().items():
+    # The relaxed eHGF's MGF terms (pyhgf #480).
+    for name, spec in ehgf_mgf_specs().items():
         out.append({"name": name, "spec": spec, "inputs": y})
     out.append({"name": "binary_2level", "spec": binary_hgf(2), "inputs": u})
     for mode in ("unbounded", "eHGF", "standard"):
@@ -1174,10 +1088,7 @@ def run(scenario: dict, commit: str) -> dict:
         jax_kwargs["time_steps"] = np.asarray(time_steps)
     if observed is not None:
         jax_kwargs["observed"] = np.asarray(observed).astype(int)
-    if _mgf_corrected(spec):
-        with _MgfCorrection():
-            jnet.input_data(**jax_kwargs)
-    elif _dp_skip_missing(spec):
+    if _dp_skip_missing(spec):
         with _DpSkipMissing():
             jnet.input_data(**jax_kwargs)
     else:
@@ -1189,9 +1100,7 @@ def run(scenario: dict, commit: str) -> dict:
         "pyhgf_commit": commit,
         "pyhgf_version": pyhgf.__version__,
         "reference": (
-            "pyhgf JAX with the proposed eHGF MGF correction (not released pyhgf)"
-            if _mgf_corrected(spec)
-            else "pyhgf JAX with dp-state nodes skipping missing observations (not released pyhgf)"
+            "pyhgf JAX with dp-state nodes skipping missing observations (not released pyhgf)"
             if _dp_skip_missing(spec)
             else "pyhgf JAX"
         ),

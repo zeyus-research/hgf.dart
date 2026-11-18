@@ -1,4 +1,4 @@
-// Reads a fixture file (dart:io) in the ehgfMgfCorrection tests.
+// Reads a fixture file (dart:io) in the relaxed eHGF tests.
 @TestOn('vm')
 library;
 
@@ -554,8 +554,9 @@ void main() {
     });
   });
 
-  group('ehgfMgfCorrection (diverges from pyhgf)', () {
-    // The 3-level HGF on USD/CHF, from the parity fixture.
+  group('relaxed eHGF with the MGF terms (pyhgf #480)', () {
+    // The 3-level HGF on USD/CHF, from the parity fixture. Before #480 the
+    // relaxed eHGF went NaN at trial 44 here (P1).
     final fixture =
         jsonDecode(
               File(
@@ -568,72 +569,22 @@ void main() {
         ((row as List<Object?>)[0] as num).toDouble(),
     ]);
 
-    Network threeLevel(
-      VolatilityUpdates v, {
-      bool meanField = false,
-      bool correction = false,
-    }) => NetworkSpec.fromJson({
-      ...fixture['spec'] as Map<String, Object?>,
-      'network': {
-        'volatility_updates': v.pyhgfName,
-        'mean_field_updates': meanField,
-        'ehgf_mgf_correction': correction,
-      },
-    }).build();
-
-    int? firstNonFinite(Trajectories traj) {
+    test('stays finite, and the volatility parent gains precision', () {
+      final net = NetworkSpec.fromJson(
+        fixture['spec'] as Map<String, Object?>,
+      ).build();
+      final traj = net.inputData(usdchf)!;
+      var gains = 0;
       for (var t = 0; t < traj.nTime; t++) {
         for (var i = 0; i < traj.nNodes; i++) {
-          if (!traj.at(i, NodeField.mean, t).isFinite) return t;
+          expect(traj.at(i, NodeField.mean, t).isFinite, isTrue);
         }
-      }
-      return null;
-    }
-
-    test('off by default, and read from the spec', () {
-      expect(Network().ehgfMgfCorrection, isFalse);
-      expect(
-        threeLevel(VolatilityUpdates.eHGF, correction: true).ehgfMgfCorrection,
-        isTrue,
-      );
-    });
-
-    test('keeps the relaxed 3-level eHGF finite where pyhgf diverges', () {
-      final stock = threeLevel(VolatilityUpdates.eHGF).inputData(usdchf)!;
-      expect(firstNonFinite(stock), 44); // as in pyhgf (JAX and rshgf)
-      final fixed = threeLevel(
-        VolatilityUpdates.eHGF,
-        correction: true,
-      ).inputData(usdchf)!;
-      expect(firstNonFinite(fixed), isNull);
-      // The volatility parent now gains precision from its child.
-      var gains = 0;
-      for (var t = 0; t < fixed.nTime; t++) {
-        if (fixed.at(2, NodeField.precision, t) >
-            fixed.at(2, NodeField.expectedPrecision, t)) {
+        if (traj.at(2, NodeField.precision, t) >
+            traj.at(2, NodeField.expectedPrecision, t)) {
           gains++;
         }
       }
-      expect(gains, greaterThan(0.9 * fixed.nTime));
-    });
-
-    test('is a no-op for mean-field eHGF, standard and unbounded', () {
-      for (final (v, mf) in [
-        (VolatilityUpdates.eHGF, true),
-        (VolatilityUpdates.standard, false),
-        (VolatilityUpdates.unbounded, false),
-        (VolatilityUpdates.unbounded, true),
-      ]) {
-        final a = threeLevel(v, meanField: mf).inputData(usdchf)!;
-        final b = threeLevel(
-          v,
-          meanField: mf,
-          correction: true,
-        ).inputData(usdchf)!;
-        for (final f in a.fields) {
-          expect(b.raw(f), a.raw(f), reason: '$v meanField=$mf ${f.name}');
-        }
-      }
+      expect(gains, greaterThan(0.9 * traj.nTime));
     });
   });
 }

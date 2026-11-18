@@ -305,7 +305,6 @@ final class NetworkPlan {
   NetworkPlan._({
     required this.volatilityUpdates,
     required this.meanFieldUpdates,
-    required this.ehgfMgfCorrection,
     required this.fixes,
     required this.maxPosteriorPrecision,
     required this.precisionClippingValue,
@@ -329,7 +328,7 @@ final class NetworkPlan {
   }) => _plan(json, categoricalArguments: categoricalArguments, efXis: efXis);
 
   final VolatilityUpdates volatilityUpdates;
-  final bool meanFieldUpdates, ehgfMgfCorrection;
+  final bool meanFieldUpdates;
 
   /// The network's [NetworkFixes].
   final NetworkFixes fixes;
@@ -373,7 +372,6 @@ final class NetworkPlan {
     final network = Network(
       volatilityUpdates: volatilityUpdates,
       meanFieldUpdates: meanFieldUpdates,
-      ehgfMgfCorrection: ehgfMgfCorrection,
       fixes: fixes,
       maxPosteriorPrecision: maxPosteriorPrecision,
       precisionClippingValue: precisionClippingValue,
@@ -564,7 +562,6 @@ NetworkPlan _plan(
       json['volatility_updates'] as String,
     ),
     meanFieldUpdates: json['mean_field_updates'] as bool,
-    ehgfMgfCorrection: json['ehgf_mgf_correction'] as bool,
     fixes: source.fixes,
     maxPosteriorPrecision: _decode(json['max_posterior_precision']),
     precisionClippingValue: _decode(json['precision_clipping_value']),
@@ -572,7 +569,6 @@ NetworkPlan _plan(
   NetworkPlan make(List<BuildCall> calls) => NetworkPlan._(
     volatilityUpdates: settings.volatilityUpdates,
     meanFieldUpdates: settings.meanFieldUpdates,
-    ehgfMgfCorrection: settings.ehgfMgfCorrection,
     fixes: settings.fixes,
     maxPosteriorPrecision: settings.maxPosteriorPrecision,
     precisionClippingValue: settings.precisionClippingValue,

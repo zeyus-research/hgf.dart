@@ -115,7 +115,6 @@ class Network {
   Network({
     this.volatilityUpdates = VolatilityUpdates.unbounded,
     this.meanFieldUpdates = false,
-    this.ehgfMgfCorrection = false,
     this.maxPosteriorPrecision = 1e10,
     this.precisionClippingValue = 1e-6,
     NetworkFixes? fixes,
@@ -156,28 +155,6 @@ class Network {
   /// Use the mean-field value-coupling updates instead of the relaxed (rHGF)
   /// ones.
   final bool meanFieldUpdates;
-
-  /// **Diverges from pyhgf (off by default).** Adds the moment-generating
-  /// function terms of the relaxed prediction to the eHGF volatility
-  /// re-prediction, which pyhgf (JAX and rshgf, as of 0.3.2) leaves out.
-  ///
-  /// The eHGF precision update re-predicts each volatility child's
-  /// volatility from the parent's new posterior mean μ_b:
-  /// `ν = t·exp(κ μ_b + ω̃)`, with `ω̃ = ω + Σ_{p≠b} κ_p μ̂_p`. The relaxed
-  /// prediction of that child used
-  /// `Ω = t·exp(ω + Σ_p κ_p μ̂_p + Σ_p κ_p² / (2 π̂_p))`. Without the
-  /// `κ²/(2π̂)` terms, ν at μ_b = μ̂_b is smaller than Ω, so the
-  /// re-predicted precision isn't the child's predicted precision (as the
-  /// pyhgf docstring says it is). The increment is then floored at zero on
-  /// most trials, the volatility parents never gain precision, and 3-level
-  /// continuous HGFs diverge (NaN after 44 trials on the USD/CHF example).
-  /// With this flag, ω̃ also gets `Σ_p κ_p² / (2 π̂_p)` over all of the child's
-  /// volatility parents, so ν equals Ω at μ_b = μ̂_b.
-  ///
-  /// Only affects [VolatilityUpdates.eHGF] with relaxed updates (the
-  /// mean-field prediction has no such terms). Checked against pyhgf's JAX
-  /// backend patched with the same change (`*_mgf_correction` fixtures).
-  final bool ehgfMgfCorrection;
 
   /// The corrections of pyhgf bugs this network applies.
   final NetworkFixes fixes;

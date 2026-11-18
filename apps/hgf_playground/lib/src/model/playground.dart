@@ -65,10 +65,6 @@ class Playground extends ChangeNotifier {
   bool _meanField = false;
   bool get meanField => _meanField;
 
-  /// [Network.ehgfMgfCorrection]: only changes relaxed eHGF updates.
-  bool _ehgfMgfCorrection = false;
-  bool get ehgfMgfCorrection => _ehgfMgfCorrection;
-
   late Network network;
   late NetworkLayout layout;
   Trajectories? trajectories;
@@ -166,7 +162,6 @@ class Playground extends ChangeNotifier {
     _volatilityUpdates =
         _preset.volatilityUpdates ?? VolatilityUpdates.unbounded;
     _meanField = false;
-    _ehgfMgfCorrection = false;
     agentBeta = _preset.task?.beta ?? 4;
     final d = DataSettings();
     data
@@ -205,16 +200,6 @@ class Playground extends ChangeNotifier {
     _rerun();
   }
 
-  /// Turns [Network.ehgfMgfCorrection] on or off.
-  void setEhgfMgfCorrection(bool v) {
-    if (v == _ehgfMgfCorrection) return;
-    player = null;
-    _ehgfMgfCorrection = v;
-    _choicesStale = task != null;
-    _rebuild();
-    _rerun();
-  }
-
   void select(int? node) {
     selected = node == selected ? null : node;
     notifyListeners();
@@ -224,7 +209,6 @@ class Playground extends ChangeNotifier {
     network = _preset.build(
       volatilityUpdates: _volatilityUpdates,
       meanField: _meanField,
-      ehgfMgfCorrection: _ehgfMgfCorrection,
     );
     network.build();
     _paramEdits.forEach((node, edits) {

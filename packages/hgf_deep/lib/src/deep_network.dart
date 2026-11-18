@@ -664,42 +664,15 @@ final class DeepNetwork {
     return this;
   }
 
-  /// Check a learning request (pyhgf's `_resolve_learning`): the
-  /// weight-belief rule takes its settings instead of an optimiser.
-  /// Installs the weight belief when [kind] asks for it.
+  /// Check a learning request ([checkLearningRequest]) and install the
+  /// weight belief when [kind] asks for it.
   void _resolveLearning(
     LearningKind kind,
     SynapticUncertainty? synaptic,
     Optimiser? optimiser,
   ) {
-    if (kind != LearningKind.synapticUncertainty) {
-      if (synaptic != null) {
-        throw ArgumentError(
-          'synapticUncertainty settings are only used by '
-          'LearningKind.synapticUncertainty, not by ${kind.name}.',
-        );
-      }
-      return;
-    }
-    if (settings.meanFieldUpdates) {
-      throw ArgumentError(
-        'LearningKind.synapticUncertainty is derived from the relaxed '
-        'updates and is not available with meanFieldUpdates.',
-      );
-    }
-    if (synaptic == null) {
-      throw ArgumentError(
-        'LearningKind.synapticUncertainty needs its settings: pass '
-        'synapticUncertainty: SynapticUncertainty(window: N).',
-      );
-    }
-    if (optimiser != null) {
-      throw ArgumentError(
-        'LearningKind.synapticUncertainty takes its step size from the '
-        'weight belief: pass no optimiser.',
-      );
-    }
-    installWeightBelief();
+    checkLearningRequest(settings, kind, synaptic, optimiser);
+    if (kind == LearningKind.synapticUncertainty) installWeightBelief();
   }
 
   /// Draw every dense weight matrix from [strategy] (one-to-one layers keep
@@ -1404,5 +1377,45 @@ final class _Learner {
     } else {
       applySynapticUncertainty(layers, g, importance!, synaptic!);
     }
+  }
+}
+
+/// Check a learning request (pyhgf's `_resolve_learning`): the weight-belief
+/// rule ([LearningKind.synapticUncertainty]) takes its settings instead of
+/// an optimiser and needs relaxed updates; the other kinds take no such
+/// settings. Throws an [ArgumentError] otherwise. `DeepNetwork` and its GPU
+/// counterparts check every learning call with it.
+void checkLearningRequest(
+  DeepSettings settings,
+  LearningKind kind,
+  SynapticUncertainty? synaptic,
+  Optimiser? optimiser,
+) {
+  if (kind != LearningKind.synapticUncertainty) {
+    if (synaptic != null) {
+      throw ArgumentError(
+        'synapticUncertainty settings are only used by '
+        'LearningKind.synapticUncertainty, not by ${kind.name}.',
+      );
+    }
+    return;
+  }
+  if (settings.meanFieldUpdates) {
+    throw ArgumentError(
+      'LearningKind.synapticUncertainty is derived from the relaxed '
+      'updates and is not available with meanFieldUpdates.',
+    );
+  }
+  if (synaptic == null) {
+    throw ArgumentError(
+      'LearningKind.synapticUncertainty needs its settings: pass '
+      'synapticUncertainty: SynapticUncertainty(window: N).',
+    );
+  }
+  if (optimiser != null) {
+    throw ArgumentError(
+      'LearningKind.synapticUncertainty takes its step size from the '
+      'weight belief: pass no optimiser.',
+    );
   }
 }

@@ -1,5 +1,25 @@
 ## Unreleased
 
+- hgf_deep's newer learning options on the GPU, in `GpuDeepNetwork`
+  (`batchUpdate`, `trainEpoch`) and `GpuDeepEnsemble.fit`: the weight-belief
+  rule (`LearningKind.synapticUncertainty` with `synapticUncertainty:`; the
+  evidence carried up the layers, the curvature as a second GEMM
+  accumulator, the belief step fused into the gradient kernel; weight beliefs
+  upload and download with the network), `DeepSettings.updateInputLayer`
+  (the root prediction and the top layer's precision-only posterior), and
+  `batchUpdate(sampleWeight:)`. All 16 fixtures that use them now run on
+  the GPU too (f32, ~1e-7 batched, ~1e-5 sequential). An ensemble needs
+  `create(weightBeliefs: true)` for the rule, so other ensembles' parameters
+  don't grow. The learning request is checked by hgf_deep's
+  `checkLearningRequest`, as on the CPU.
+- GEMM tiles halve their depth until they fit WebGPU's default 16 KiB of
+  workgroup storage (two-accumulator tiles over wide batches could exceed
+  it).
+- macOS: the build hook makes room in wgpu-native's Mach-O header for the
+  absolute install name that `dart test`/`dart run` (Dart 3.14) and
+  `flutter test` write (`hook/macho_headroom.dart`: drops
+  `LC_SOURCE_VERSION` and an empty `LC_DATA_IN_CODE`, then re-signs ad
+  hoc), so the user-define `bundle: false` is no longer needed there.
 - pyhgf #478's time-step changes in the kernels, through the IR.
 - Noise parents of input nodes (pyhgf #477) in the kernels, through the
   IR; the WGSL `lambertW0` no longer overflows (pyhgf #475).

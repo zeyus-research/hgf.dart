@@ -182,7 +182,6 @@ final class BatchNetwork {
       _ts = _TangentScratch(blockSize < b ? blockSize : b, net._u.capacity, k),
       _activeDirs = Int32List(k),
       meanFieldUpdates = net.meanFieldUpdates,
-      ehgfMgfCorrection = net.ehgfMgfCorrection,
       fixes = net.fixes,
       maxPosteriorPrecision = net.maxPosteriorPrecision,
       precisionClippingValue = net.precisionClippingValue {
@@ -344,9 +343,6 @@ final class BatchNetwork {
 
   /// As [Network.meanFieldUpdates].
   final bool meanFieldUpdates;
-
-  /// As [Network.ehgfMgfCorrection].
-  final bool ehgfMgfCorrection;
 
   /// As [Network.fixes].
   final NetworkFixes fixes;

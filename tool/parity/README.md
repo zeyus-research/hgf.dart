@@ -53,16 +53,7 @@ containing:
 - `pyhgf_commit`, the pyhgf version the fixture came from.
 - `reference`: what produced `trajectories`.
 
-**Patched references.** The `*_mgf_correction` scenarios set
-`"ehgf_mgf_correction": true` (hgf.dart's `Network.ehgfMgfCorrection`). For
-them the generator swaps pyhgf's relaxed `precision_update_ehgf` for a
-version whose volatility re-prediction includes the relaxed prediction's
-`Σ κ²/(2π̂)` terms (`_precision_update_ehgf_mgf_corrected`). It then
-clears JAX's caches before and after, and skips rshgf, which is unpatched.
-These fixtures check the proposed upstream fix, not released pyhgf, and
-their `reference` field says so.
-
-The same goes for `dp_missing` (`"dp_skip_missing": true`): there the
+**Patched references.** `dp_missing` (`"dp_skip_missing": true`): there the
 generator wraps pyhgf's `dirichlet_node_prediction_error` so that an
 unobserved trial only sets the clusters' `observed` to 0, which is what
 hgf.dart does (pyhgf clusters missing observations, upstream P14).

@@ -29,8 +29,7 @@ part 'python_document.dart';
 /// parameters) and writes the estimates and the outputs per row.
 ///
 /// hgf.dart extensions pyhgf doesn't have are flagged in comments: the
-/// eHGF MGF correction, the dp-state surprise, a non-default maximum
-/// posterior precision. Custom couplings, priors and response models
+/// dp-state surprise, a non-default maximum posterior precision. Custom couplings, priors and response models
 /// become stubs that raise `NotImplementedError`.
 final class PythonExport {
   PythonExport(this.spec);
@@ -81,13 +80,6 @@ final class PythonExport {
         'volatility_updates="${plan.volatilityUpdates.pyhgfName}"',
       if (plan.meanFieldUpdates) 'mean_field_updates=True',
     ];
-    if (plan.ehgfMgfCorrection) {
-      _warnings.add(
-        'The network uses hgf.dart\'s eHGF MGF correction '
-        '(ehgfMgfCorrection), which pyhgf leaves out: its eHGF updates '
-        'differ.',
-      );
-    }
     if (plan.fixes.constantNoiseVariance && _biasIntoNoiseChild()) {
       _warnings.add(
         'An input with a noise parent has a bias (constant-state) value '

@@ -165,7 +165,8 @@ extension on Network {
   }
 
   /// Σ_p κ_p² / (2 π̂_p) over the volatility parents of [c]: the MGF terms of
-  /// the relaxed prediction's volatility (see [Network.ehgfMgfCorrection]).
+  /// the relaxed prediction's volatility, which the relaxed eHGF update
+  /// re-predicts with (pyhgf #480).
   /// Read during the posterior sweep, when every `π̂_p` is still the
   /// prediction.
   @pragma('vm:unsafe:no-bounds-checks')
@@ -237,7 +238,7 @@ extension on Network {
           continue;
         }
         var tonic = _effectiveTonicVolatility(i, c);
-        if (!meanField && ehgfMgfCorrection) tonic += _mgfTerms(c);
+        if (!meanField) tonic += _mgfTerms(c);
         wpe += _ehgfVolatilityIncrement(c, _volcK[e], mean, tonic, t);
       }
     }

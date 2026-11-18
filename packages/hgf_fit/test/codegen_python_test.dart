@@ -79,9 +79,7 @@ void main() {
       final cases = [
         // pyhgf resets inputs' tonic volatility (see the next test).
         for (final fx in fixtureNetworks(perturbInputs: false))
-          if ((fx.spec['network'] as Map?)?['ehgf_mgf_correction'] != true &&
-              (fx.spec['network'] as Map?)?['dp_skip_missing'] != true)
-            fx,
+          if ((fx.spec['network'] as Map?)?['dp_skip_missing'] != true) fx,
       ];
       final harness = StringBuffer()
         ..writeln('import importlib.util, json, sys')

@@ -1202,7 +1202,7 @@ final class _Pass {
     final volm = let('volm', volatilityMeanWpe(i, epi));
     w(i, NodeField.mean, r(i, NodeField.expectedMean) + vm + volm);
     final hasObs = letCond('hasObs', anyObserved(i));
-    final mgf = !meanField && net.ehgfMgfCorrection;
+    final mgf = !meanField;
     final children = net.volatilityChildrenOf(i);
     final incs = <Ex>[
       for (var q = 0; q < children.length; q++)

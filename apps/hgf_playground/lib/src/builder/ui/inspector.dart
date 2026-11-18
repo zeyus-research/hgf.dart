@@ -197,14 +197,6 @@ class _NetworkPanel extends StatelessWidget {
           value: doc.meanFieldUpdates,
           onChanged: (v) => model.setSettings(meanFieldUpdates: v),
         ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          dense: true,
-          title: const Text('eHGF MGF correction'),
-          subtitle: const Text('Only changes relaxed eHGF updates'),
-          value: doc.ehgfMgfCorrection,
-          onChanged: (v) => model.setSettings(ehgfMgfCorrection: v),
-        ),
       ],
     );
   }

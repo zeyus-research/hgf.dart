@@ -20,7 +20,7 @@ but did not fix it.
 
 | id | where | issue | severity | reported |
 |---|---|---|---|---|
-| [P1](#p1) | pyhgf JAX + rshgf | relaxed eHGF diverges (missing MGF terms) | **high**: NaN | [ ] |
+| [P1](#p1) | pyhgf JAX + rshgf | relaxed eHGF diverges (missing MGF terms) | **high**: NaN | fixed in #480 |
 | [P2](#p2) | pyhgf JAX + rshgf | `lambert_w0` NaN for z ≳ 2.7e151 | medium | fixed in #475 |
 | [P3](#p3) | pyhgf JAX | update-sequence move loop mutates the list it iterates | low | [ ] |
 | [P4](#p4) | pyhgf JAX | a parent of two ef-state nodes crashes the scheduler | medium: crash | [ ] |
@@ -59,6 +59,7 @@ but did not fix it.
 ### P1
 
 **Relaxed eHGF diverges on 3-level continuous HGFs** (JAX and rshgf).
+**Fixed upstream in #480** (`4db3b093`, both backends).
 Repro: [`pyhgf/ehgf_relaxed_divergence.py`](pyhgf/ehgf_relaxed_divergence.py).
 
 ```
@@ -77,14 +78,14 @@ at 0 on most trials (~95%), the volatility parent never gains precision, and
 the network goes NaN (trial 44 on the USD/CHF example).
 
 **Fix:** add `Σ_p κ_p²/(2 π̂_p)` over all of the child's volatility parents to
-`ω̃`, in relaxed mode only (mean-field has no such terms). The patch is
-`_ehgf_increment_mgf_corrected` in
-[`tool/parity/gen_fixtures.py`](../../tool/parity/gen_fixtures.py), in the
-shape of an upstream PR; rshgf needs the same change.
-**hgf.dart:** opt-in `Network.ehgfMgfCorrection` (off by default, for
-parity), checked against the patched JAX (`*_mgf_correction` fixtures); demo
-`packages/hgf/example/ehgf_mgf_correction.dart`. If upstream adopts the
-fix, flip the default and regenerate the fixtures.
+`ω̃`, in relaxed mode only (mean-field has no such terms). Adopted upstream
+in #480, nodal and vectorised (continuous `DeepNetwork` layers), JAX and
+rshgf; the repro now prints no NaN for any row.
+**hgf.dart:** had it as the opt-in `Network.ehgfMgfCorrection` until
+upstream adopted it; now the relaxed eHGF always includes the terms (in
+`Network`, `BatchNetwork` and its tangents, the trial IR and hgf_deep's
+continuous layers), the flag is gone, and the fixtures were regenerated at
+`4db3b093`.
 
 ### P2
 
@@ -611,7 +612,7 @@ documents read an empty CSV cell as 0 and unobserved, never NaN.
 
 ## rshgf
 
-P1 applies to rshgf too (and P2 did, until #475).
+P1 and P2 applied to rshgf too, until #480 and #475.
 
 ### R1
 

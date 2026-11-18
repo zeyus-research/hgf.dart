@@ -1245,7 +1245,7 @@ extension on BatchNetwork {
     // mean.
     _bObservedChildren(i, lo, m, flags);
     _tValuePrecisionWpe(i, lo, m, meanField, t, wpe, dWpe);
-    final mgf = !meanField && ehgfMgfCorrection;
+    final mgf = !meanField;
     final volpK = _volpK, dVolpK = _dVolpK, volcK = _volcK, dVolcK = _dVolcK;
     final expectedPrecision = _expectedPrecision, dEP = _dExpectedPrecision;
     final cond = _conditionalExpectedPrecision;

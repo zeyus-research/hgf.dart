@@ -219,21 +219,6 @@ class NetworkCard extends StatelessWidget {
                 : null,
           ),
         ),
-        if (pg.volatilityUpdates == VolatilityUpdates.eHGF && !pg.meanField)
-          Tooltip(
-            message:
-                'hgf.dart extension, off in pyhgf: adds the relaxed '
-                'prediction\'s κ²/(2π̂) terms to the eHGF volatility '
-                're-prediction. Without them, 3-level continuous HGFs '
-                'can diverge.',
-            child: SwitchListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              title: const Text('eHGF MGF correction'),
-              value: pg.ehgfMgfCorrection,
-              onChanged: hasVolatility ? pg.setEhgfMgfCorrection : null,
-            ),
-          ),
       ],
     );
   }

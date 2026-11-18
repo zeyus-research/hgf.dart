@@ -53,6 +53,11 @@ enum VolatilityUpdates {
   standard('standard'),
 
   /// The enhanced HGF: mean first, then a precision update floored at zero.
+  ///
+  /// The precision update re-predicts each volatility child from the new
+  /// mean with the formula of the prediction step, so under relaxed updates
+  /// it includes the MGF terms Σ_p κ_p² / (2 π̂_p) of the child's volatility
+  /// parents (pyhgf #480; without them 3-level HGFs diverged).
   eHGF('eHGF'),
 
   /// The unbounded approximation (pyhgf's default; Mathys et al., 2026).

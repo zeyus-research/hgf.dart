@@ -131,6 +131,80 @@ void main() {
       expect(bad, isEmpty, reason: bad.join('\n'));
     });
 
+    test('split-K weight-belief rule with sample weights and '
+        'updateInputLayer: batch 300 of capacity 512', () async {
+      DeepNetwork build() {
+        final net = DeepNetwork(
+          coupling: CouplingFn.tanh,
+          updateInputLayer: true,
+          feedforwardUncertainty: true,
+        );
+        for (final s in [3, 8, 6]) {
+          net.addLayer(s);
+        }
+        final rng = math.Random(11);
+        net.setWeights([
+          for (final (c, p) in [(3, 8), (8, 6)])
+            randn(c, p + 1, rng, 1 / math.sqrt(p)),
+        ]);
+        return net;
+      }
+
+      final cpu = build();
+      final gpu = await GpuDeepNetwork.create(backend!, cpu, capacity: 512);
+      final rule = SynapticUncertainty(window: 50, priorVariance: 0.5);
+      final names = [
+        for (final k in gpu.kernels.batchUpdate(
+          errors: true,
+          synaptic: true,
+          updatePrecisions: true,
+        ))
+          k.name,
+      ];
+      expect(
+        names.where((n) => n.contains('apply (weight belief)')),
+        hasLength(2),
+        reason: 'both layers should split',
+      );
+      expect(names, contains('posterior layer 2 (precision only)'));
+      final rng = math.Random(5);
+      final x = randn(300, 6, rng), y = randn(300, 3, rng);
+      final weights = [
+        for (var s = 0; s < 300; s++) s % 7 == 0 ? 0.0 : 1 + s % 3.0,
+      ];
+      final results = <(String, double, int)>[];
+      for (var step = 0; step < 3; step++) {
+        final cpuErr = cpu.batchUpdate(
+          x,
+          y,
+          learningKind: LearningKind.synapticUncertainty,
+          synapticUncertainty: rule,
+          sampleWeight: weights,
+        );
+        final gpuErr = await gpu.batchUpdate(
+          x,
+          y,
+          learningKind: LearningKind.synapticUncertainty,
+          synapticUncertainty: rule,
+          sampleWeight: weights,
+        );
+        final e = compare(cpuErr.data, gpuErr!.data);
+        results.add(('step $step input errors', e.err, e.lost));
+      }
+      results.addAll(await compareNetworks(gpu, cpu, build()));
+      gpu.dispose();
+      expect(
+        results.map((r) => r.$1),
+        containsAll(['weight belief 1', 'weight belief 2']),
+      );
+      final bad = [
+        for (final r in results)
+          if (r.$2 > tolerance || r.$3 > 0)
+            '${r.$1}: ${r.$2.toStringAsExponential(2)}, ${r.$3} lost',
+      ];
+      expect(bad, isEmpty, reason: bad.join('\n'));
+    });
+
     for (final update in DeepVolatilityUpdate.values) {
       test('10 Adam steps over partial tiles, ${update.name}', () async {
         final cpu = randomNetwork([5, 37, 70, 6], 7, update: update);

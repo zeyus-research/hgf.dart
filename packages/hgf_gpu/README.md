@@ -64,18 +64,23 @@ Status: see Phase 7 in `docs/ROADMAP.md`.
   with fitted parameters (`GaussianReadout`, `BinarySoftmaxReadout`).
 - Precision: f32. Totals match f64 to ~1e-6 relative and gradients to ~1e-5.
 - Not yet: vector node kinds, custom couplings or response models.
-- Deep networks: `batchUpdate`, `trainEpoch` (SGD, Adam) and `predict`,
-  every layer kind, volatility update and setting `hgf_deep` has; f32,
+- Deep networks: `batchUpdate`, `trainEpoch` (SGD, Adam, or the
+  weight-belief rule `LearningKind.synapticUncertainty`) and `predict`,
+  every layer kind, volatility update and setting `hgf_deep` has
+  (`updateInputLayer` and weighted batches, `sampleWeight:`, included); f32,
   matching f64 to ~1e-6. Sequential `fit` for ensembles
-  (`GpuDeepEnsemble`), matching f64 `fit` to ~1e-5 until the f64 run itself
-  leaves f32's range (pyhgf's runaway, P18); no trajectory recording.
+  (`GpuDeepEnsemble`; `create(weightBeliefs: true)` for the weight-belief
+  rule), matching f64 `fit` to ~1e-5 until the f64 run itself leaves f32's
+  range (pyhgf's runaway, P18); no trajectory recording. Continuous layers
+  (filters) and `checkGradientHealth` stay on the CPU.
 
 - Web: `import 'package:hgf_gpu/web.dart'`. On Linux, Chromium needs
   `--enable-unsafe-webgpu` and Vulkan.
 - Native (macOS, Linux, Windows, Android, iOS):
   `import 'package:hgf_gpu/native.dart'`. The build hook (`hook/build.dart`)
   downloads the pinned `libwgpu_native` v29 release for the target and Flutter
-  bundles it into the app. `WGPU_LIB` overrides it. For plain `dart run` and
+  bundles it into the app (on macOS with room made in its header for the
+  install name `dart test` and `flutter test` give it). `WGPU_LIB` overrides it. For plain `dart run` and
   `dart test`, install the library, or run `tool/fetch_wgpu.sh` and set
   `WGPU_LIB`. Offline builds bundle nothing and fall back to the system
   library.

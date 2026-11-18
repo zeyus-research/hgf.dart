@@ -514,34 +514,38 @@ double _finalize(double expected, double pwpe, double max) {
   return math.min(p, max);
 }
 
+/// `_volatility_parents_mgf`: Σ_m κ_am² / (2 π̂_m) per child a, the MGF term
+/// the relaxed prediction adds to the child's log-volatility.
+Float64List _volatilityParentsMgf(LayerState parent, _VolatilityChild c) {
+  final out = Float64List(c.state.nodes);
+  _mv(
+    out,
+    c.kappa,
+    _map(parent.expectedPrecision, (p) => 1.0 / (2.0 * p)),
+    squared: true,
+  );
+  return out;
+}
+
 /// The known variance of each volatility child's prediction: the carried
 /// variance reconstructed from π̄ (`_child_previous_variance`) plus the
-/// variance its value parents add (`_value_coupling_variance`).
+/// variance its value parents add (`_value_coupling_variance`). [mgf] is
+/// [_volatilityParentsMgf], or null under mean-field updates.
 Float64List _knownVariance(
   LayerState parent,
   _VolatilityChild c,
   double t,
-  bool meanField,
+  Float64List? mgf,
 ) {
   final s = c.state;
   final n = s.nodes;
   final omega = c.layer.tonicVolatility!;
   final kMu = Float64List(n);
   _mv(kMu, c.kappa, parent.expectedMean);
-  Float64List? kVar;
-  if (!meanField) {
-    kVar = Float64List(n);
-    _mv(
-      kVar,
-      c.kappa,
-      _map(parent.expectedPrecision, (p) => 1.0 / (2.0 * p)),
-      squared: true,
-    );
-  }
   final out = Float64List(n);
   for (var a = 0; a < n; a++) {
     var total = omega[a] + kMu[a];
-    if (kVar != null) total = total + kVar[a];
+    if (mgf != null) total = total + mgf[a];
     final previous = _floor(
       1.0 / s.conditionalExpectedPrecision[a] - t * math.exp(total),
       1e-128,
@@ -622,7 +626,8 @@ void _posteriorEhgf(
 
 /// `_volatility_precision_pwpe_ehgf`: each κ edge re-predicts the child's
 /// volatility with its parent at the new posterior mean (the others at
-/// their predictions, no MGF term); each edge's increment is floored at 0.
+/// their predictions), plus the MGF term of every parent unless mean-field
+/// (pyhgf #480); each edge's increment is floored at 0.
 void _addVolatilityPrecisionEhgf(
   Float64List pwpe,
   Float64List posteriorMean,
@@ -632,7 +637,8 @@ void _addVolatilityPrecisionEhgf(
   bool meanField,
 ) {
   final s = c.state;
-  final previous = _knownVariance(parent, c, t, meanField);
+  final mgf = meanField ? null : _volatilityParentsMgf(parent, c);
+  final previous = _knownVariance(parent, c, t, mgf);
   final omega = c.layer.tonicVolatility!;
   final kMu = Float64List(s.nodes);
   _mv(kMu, c.kappa, parent.expectedMean);
@@ -642,14 +648,14 @@ void _addVolatilityPrecisionEhgf(
     final d = s.mean[a] - s.expectedMean[a];
     final aux = 1.0 / s.precision[a] + d * d;
     final prev = previous[a];
+    final base = omega[a] + kMu[a];
+    final mgfA = mgf == null ? 0.0 : mgf[a];
     for (var m = 0; m < cols; m++) {
       final kappa = kd[a * cols + m];
       final predVol =
           t *
           math.exp(
-            omega[a] +
-                kMu[a] +
-                kappa * (posteriorMean[m] - parent.expectedMean[m]),
+            base + kappa * (posteriorMean[m] - parent.expectedMean[m]) + mgfA,
           );
       final expected = 1.0 / (prev + predVol);
       final eff = predVol * expected;
@@ -672,7 +678,12 @@ void _posteriorUnbounded(
 ) {
   final child = c.state;
   final omega = c.layer.tonicVolatility!;
-  final previous = _knownVariance(s, c, t, settings.meanFieldUpdates);
+  final previous = _knownVariance(
+    s,
+    c,
+    t,
+    settings.meanFieldUpdates ? null : _volatilityParentsMgf(s, c),
+  );
   final logT = math.log(t);
   final maxPp = settings.maxPosteriorPrecision;
   final cols = c.kappa.cols;

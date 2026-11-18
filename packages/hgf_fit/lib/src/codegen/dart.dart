@@ -43,7 +43,6 @@ final class DartExport {
       if (plan.volatilityUpdates != VolatilityUpdates.unbounded)
         'volatilityUpdates: VolatilityUpdates.${plan.volatilityUpdates.name}',
       if (plan.meanFieldUpdates) 'meanFieldUpdates: true',
-      if (plan.ehgfMgfCorrection) 'ehgfMgfCorrection: true',
       if (plan.fixes != NetworkFixes.recommended)
         plan.fixes == NetworkFixes.none
             ? 'fixes: NetworkFixes.none'

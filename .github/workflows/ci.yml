@@ -72,3 +72,41 @@ jobs:
       - run: melos run test:web-workers --no-select
         env:
           CHROME_EXECUTABLE: "${{ github.workspace }}/chrome_ci_wrapper.sh"
+
+  gpu-web:
+    name: GPU kernels on WebGPU (SwiftShader)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # New (2026-11-18), not yet seen green on a runner: it doesn't block
+    # CI (or the Pages deploy) until it has. Remove once it passes.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+      - run: flutter pub get
+      - name: Configure Chrome Sandbox Bypass Wrapper
+        run: |
+          echo '#!/bin/bash' > ./chrome_ci_wrapper.sh
+          echo 'exec "${{ steps.chrome.outputs.chrome-path }}" --no-sandbox "$@"' >> ./chrome_ci_wrapper.sh
+          chmod +x ./chrome_ci_wrapper.sh
+      # test:gpu's web half: the kernels against the f64 engines on every
+      # fixture. The runner has no GPU, so Chrome's WebGPU runs on
+      # SwiftShader (CHROME_EXECUTABLE overrides chrome-gpu's executable).
+      # The tests skip without an adapter, so a skip fails the step.
+      - name: Kernels on Chrome's WebGPU (dart2wasm)
+        working-directory: packages/hgf_gpu
+        shell: bash
+        run: |
+          set -o pipefail
+          dart test -p chrome-gpu -c dart2wasm --tags gpu 2>&1 | tee "$RUNNER_TEMP/gpu.log"
+          if grep -q 'No WebGPU adapter' "$RUNNER_TEMP/gpu.log"; then
+            echo '::error::Chrome offered no WebGPU adapter'
+            exit 1
+          fi
+        env:
+          CHROME_EXECUTABLE: "${{ github.workspace }}/chrome_ci_wrapper.sh"

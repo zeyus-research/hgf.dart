@@ -25,8 +25,9 @@ supersedes its phase list.
     surprise (`DpSurprise`, an hgf.dart extension, 2026-11-10).
 - 658 engine tests pass (plus 142 fitting, 120 hgf_deep, 16 widget and 80
   playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
-  (4 of them against a patched pyhgf: see `ehgfMgfCorrection`, and
-  `dp_missing`; 11 ef-state, 7 categorical, 6 dp-state),
+  (1 of them against a patched pyhgf, `dp_missing`; 11 ef-state, 7
+  categorical, 6 dp-state; since 2026-11-18 the fixtures are at pyhgf
+  `4db3b093`, which has the P1 fix),
   on the VM, dart2js, dart2wasm, and a dart2wasm `-O4` release build.
   `BatchNetwork` matches `Network` bit for bit on all of them, on the same
   four targets.
@@ -423,6 +424,8 @@ major rewrite.** Concretely:
       (trial 44 on USD/CHF, `continuous_3level_eHGF` fixture), in JAX and
       in Dart alike.
 
+    (2026-11-18: pyhgf adopted the fix in #480; the flag is gone and the
+    terms are always on. What follows is the history.)
     **Implemented as the opt-in `Network.ehgfMgfCorrection`** (off by
     default, so the default engine keeps pyhgf parity). It adds
     `Σ_p κ_p²/(2π̂_p)` over all of the child's volatility parents to ω̃,
@@ -1306,14 +1309,16 @@ rest is the sampler's own host work per chain and leapfrog step.
     weight-belief rule (`synaptic_uncertainty`), `sample_weight`,
     `update_input_layer`, `check_gradient_health`. See "hgf_deep: the
     rest of pyhgf's learning" below.
-  - [ ] Continuous layers (`kind="continuous"`, `input_data`): a
+  - [x] Continuous layers (`kind="continuous"`, `input_data`): a
     vectorised notation for a nodal continuous `Network` in pyhgf (its
     tests check them against `Network`), so hgf_deep can build the
     equivalent hgf `Network`. pyhgf #477 (noise parents of continuous
     input nodes), which the observation layer's volatility parent follows,
     is in hgf since 2026-11-12 (see "Noise parents of input nodes" below).
-  - [ ] The new learning features on the GPU (`GpuDeepNetwork` and
-    `GpuDeepEnsemble` reject them with an `UnsupportedError`).
+  - [x] The new learning features on the GPU (2026-11-18): the
+    weight-belief rule, `updateInputLayer` and sample weights in
+    `GpuDeepNetwork` and `GpuDeepEnsemble`. See "hgf_deep's learning
+    options on the GPU" below.
 - [x] Tangents in the codegen (exact gradients on the GPU), then a GPU
   `Pass` transport in hgf_fit (MAP, NUTS with many chains, hierarchical):
   Phase 7b.
@@ -1324,8 +1329,12 @@ rest is the sampler's own host work per chain and leapfrog step.
 - [ ] Sampler ensembles on worker isolates feeding one GPU pass per round,
   and less host work per element (see the Phase 7b note): the remaining
   ~27 s of host time at 2000 agents.
-- [ ] `GpuFitter` with `ResponseModel.fn`: needs a way to express the
-  response in WGSL (an `Ex` builder callback?).
+- [x] `GpuFitter` with a custom response: `ExprReadout` (2026-11-16,
+  Phase 9's expressions) is that way, compiled into the kernels with exact
+  gradients. `ResponseModel.fn`'s closures stay on the CPU (`GpuFitter`
+  falls back to it), as do the vector kinds' responses
+  (`CategoricalSoftmaxReadout`, categorical and dp surprises), which come
+  with the vector node kinds below.
 - [ ] Vector node kinds on the GPU (ef-state first). dp-state's
   data-dependent branching is the hard one. (The CPU batch runs ef-state
   and categorical since 2026-11-10; `GpuFitter` falls back to it for
@@ -1335,9 +1344,11 @@ rest is the sampler's own host work per chain and leapfrog step.
     wgpu-native (Apple M3 Pro through Metal: measured 2026-11-12, see
     "macOS / Apple silicon");
   - Firefox and Safari WebGPU.
-- [ ] CI: run `test/gpu_parity_test.dart` on SwiftShader. The
-  `chrome-gpu` platform names `chromium`, but CI has Chrome through a
-  wrapper.
+- [~] CI: run `test/gpu_parity_test.dart` on SwiftShader (2026-11-18:
+  the `gpu-web` job; `CHROME_EXECUTABLE` overrides `chrome-gpu`'s
+  `chromium`, since package:test keeps the parent platform's environment
+  override). It fails if Chrome offers no adapter (the tests would skip).
+  `continue-on-error` until it has passed on a runner once.
 - [ ] Tuning not tried yet: the workgroup size (64 is used), the memory
   layout at very large B, and a kernel variant whose state is in
   registers only, without a store between dispatches.
@@ -1703,8 +1714,8 @@ since the spike".
   mutation (each of four perturbations fails the suite). The 4-layer tanh
   fixtures use smaller initial weights (0.25) to stay clear of P18's
   runaway; the eHGF ones still reach it late and are compared up to it.
-- The GPU classes reject the new options for now; the GPU fixture checks
-  skip fixtures that use them.
+- The GPU classes rejected the new options at first; since 2026-11-18 they
+  run them (see "hgf_deep's learning options on the GPU").
 
 #### hgf_deep: continuous layers (2026-11-12): done
 
@@ -1795,6 +1806,57 @@ IR (GPU kernels, CPU reverse mode, exact Hessians).
 - GPU: 95/95 on Metal with the noise-parent fit cases (forward and
   reverse); `noise_parent_time_steps` is f32-sensitive (a total that
   cancels to ~−1, where pyhgf's own float32 is 3.6e-5 off).
+
+#### pyhgf #480 (P1 fixed upstream), and hgf_deep's learning options on the GPU (2026-11-18): done
+
+- **P1 upstream (#480, `4db3b093`):** the relaxed eHGF re-predicts with the
+  MGF terms in JAX and rshgf, nodal and vectorised. hgf.dart follows:
+  `ehgfMgfCorrection` is gone (the terms are always on under relaxed
+  updates: `Network`, `BatchNetwork` and tangents, the trial IR, the
+  codegen and documents, the playground's switch), and hgf_deep's
+  continuous layers add them in their eHGF posterior
+  (`_volatilityParentsMgf`). Fixtures regenerated at `4db3b093` (hgf 81,
+  hgf_deep 74); dropping the term fails 8 deep fixtures. The repro now
+  prints no NaN.
+- **hgf_deep's learning options on the GPU**, in `GpuDeepNetwork` and
+  `GpuDeepEnsemble`:
+  - the weight-belief rule (`synapticUncertainty`): per child layer an
+    elementwise kernel for the softened evidence and the gradient factors,
+    the evidence pullback as a GEMM (before that layer's step moves its
+    weights), and the gradient GEMM with the curvature as a second
+    accumulator (`_gemm(a1:)`, its own A operand) and the belief step as
+    its epilogue (split-K: two partial buffers). The sequential kernel runs
+    the same phases per row. Weight beliefs (Δ) upload and download with
+    the network; an ensemble lays them out only with
+    `create(weightBeliefs: true)` (or when a member has one), so
+    workgroup-memory members don't grow;
+  - `updateInputLayer`: the root prediction in the top kernel (it shares
+    `_volatilityLevelPrediction` with the layer epilogue), a precision-only
+    posterior of the top layer, and its precision carried like the
+    interior layers';
+  - `batchUpdate(sampleWeight:)`: normalised weights in the state buffer,
+    applied to the gradient factors, the curvature and the carry; the
+    uniform's `div` and `wsum` replace the batch width.
+  - Learning calls are checked by hgf_deep's `checkLearningRequest`, the
+    same function `DeepNetwork` uses.
+- **Tests:** the 16 fixtures with these options now run on the GPU too
+  (`gpuDeepSupported` leaves out only continuous layers and the health
+  probe): 123 native tests on Metal, the batch updates within ~1e-7 of
+  f64 and the sequential fits ~1e-5. `input_layer_eHGF` loses one value to
+  f32 like `mean_field_eHGF` (P18: two samples drive a volatility mean to
+  232 and 98, and `exp` overflows). Mutations of each option (no Δ
+  increment, no root prediction, unweighted factors) fail 14, 6 and 2
+  tests.
+- **GEMM tiles** now halve their depth until they fit WebGPU's default
+  16 KiB of workgroup storage (two-accumulator tiles over wide batches
+  could exceed it; native devices allow 32 KiB).
+- **Speed unchanged:** `deep_gpu` (M3 Pro, small/medium/wide at B = 256
+  and 4096) gives the same epoch and predict times as before, within
+  run-to-run noise.
+- **macOS dev loop:** Dart 3.14's `dart test` rewrites bundled dylibs'
+  install names like `flutter test` does; the build hook now makes room in
+  wgpu-native's header (see Phase 9's notes), so both work without
+  `bundle: false`.
 
 ### Phase 8: App -> HGF GUI modelling
 
@@ -2480,10 +2542,15 @@ Follow-ups:
   thing vs the background, taps and double taps, scroll zoom about the
   pointer, a jittering right click; the compact layout and pinning,
   through auto layout and undo. 152 playground tests pass.
-- [ ] Note for running the playground's tests on macOS: `flutter test`
-  needs the `hgf_gpu` user-define `bundle: false` (see
-  `packages/hgf_gpu/hook/build.dart`), else `install_name_tool` aborts
-  on the bundled wgpu-native.
+- [x] ~~`flutter test` on macOS needs the `hgf_gpu` user-define
+  `bundle: false`~~ (2026-11-18: no longer). Since Dart 3.14, `dart test`
+  hit it too: the SDK rewrites a bundled dylib's install name to its
+  absolute path, and wgpu-native's release has 72 bytes of header room.
+  The build hook now drops two empty load commands (`LC_SOURCE_VERSION`
+  0.0, an empty `LC_DATA_IN_CODE`; `hook/macho_headroom.dart`, tested) and
+  re-signs ad hoc, which leaves room for a 135-character path. 95/95
+  native GPU tests and 152 playground tests pass on macOS with the
+  bundled library.
 
 #### Deep training and wiring (2026-11-17): done
 
@@ -3206,9 +3273,9 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
 `upstream/dart2wasm/`). What hgf.dart does about each is noted there too.
 
 - **pyhgf (JAX, and rshgf where noted)**
-  - [ ] [P1](upstream/README.md#p1) relaxed eHGF diverges (missing MGF
-        terms; JAX and rshgf). Fix ready (`gen_fixtures.py`); hgf.dart has
-        it opt-in as `ehgfMgfCorrection`. **The one that matters most.**
+  - [x] [P1](upstream/README.md#p1) relaxed eHGF diverges (missing MGF
+        terms; JAX and rshgf). Fixed upstream in #480; hgf.dart follows
+        (2026-11-18: `ehgfMgfCorrection` removed, the terms are always on).
   - [x] [P2](upstream/README.md#p2) `lambert_w0` NaN for z ≳ 2.7e151 (`f1²`
         overflows). Fixed upstream in #475; hgf.dart follows.
   - [ ] [P3](upstream/README.md#p3) the update-sequence move loop mutates
@@ -3340,7 +3407,8 @@ parents of continuous input nodes) is ported, with fixtures at pyhgf
 `1e6e98d7` and the P21 fix (`NetworkFixes`); hgf_deep has continuous
 layers (2026-11-12). pyhgf v0.3.3 (#478, Δt scaling on continuous state
 nodes) is ported (2026-11-13). The playground switches between relaxed
-and mean-field updates and has the eHGF MGF switch (2026-11-16). Phase 9, the model
+and mean-field updates (2026-11-16; its eHGF MGF switch went with P1's
+upstream fix, 2026-11-18). Phase 9, the model
 builder, started 2026-11-16 (LSL / real-time sources shelved until
 after it): the model document and expressions (couplings, readouts and
 data transforms) are done (2026-11-16), and the choice follow-ups
@@ -3355,7 +3423,14 @@ transform caching for whole sessions (2026-11-17), deep networks in the
 builder beside or instead of the HGF network, with Dart and pyhgf exports,
 the data-pipeline steps, and deep networks trained in the builder with their
 predictions wired into the HGF inputs (2026-11-17); next Julia export (after
-upstream settles) or the leftovers of item 8. Vector node kinds on the GPU and a
+upstream settles) or the leftovers of item 8. 2026-11-18: P1 is fixed
+upstream (#480) and ported (`ehgfMgfCorrection` removed; fixtures at
+`4db3b093`); hgf_deep's weight-belief rule, `updateInputLayer` and sample
+weights run on the GPU; the macOS build hook makes `dart test` and
+`flutter test` work with the bundled wgpu-native; a CI job runs the
+WebGPU suite on SwiftShader. Phase 7b's open items: vector node kinds on
+the GPU (they need vector slots and multi-column inputs in the trial IR),
+sampler ensembles on worker isolates, tuning, and hardware coverage. Vector node kinds on the GPU and a
 faster dp candidate search can run alongside.
 
 ```sh

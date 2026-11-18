@@ -15,6 +15,7 @@ DeepNetwork _net({
   bool ffu = false,
   bool meanField = false,
   LayerKind bottom = LayerKind.volatile,
+  bool updateInputLayer = false,
 }) =>
     DeepNetwork(
         coupling: CouplingFn.tanh,
@@ -22,6 +23,7 @@ DeepNetwork _net({
         feedforwardUncertainty: ffu,
         meanFieldUpdates: meanField,
         tonicVolatility: true,
+        updateInputLayer: updateInputLayer,
       )
       ..addLayer(3, kind: bottom)
       ..addLayer(5, kind: LayerKind.binary, coupling: CouplingFn.sigmoid)
@@ -31,6 +33,9 @@ DeepNetwork _net({
 List<DeepKernelSource> _all(DeepKernels k) => [
   for (final opt in DeepOptimiserKind.values)
     ...k.batchUpdate(errors: true, optimiser: opt, updatePrecisions: true),
+  // The weight-belief rule needs relaxed updates.
+  if (!k.settings.meanFieldUpdates)
+    ...k.batchUpdate(errors: true, synaptic: true, updatePrecisions: true),
   ...k.predict(),
 ];
 
@@ -162,47 +167,47 @@ void main() {
             if (bottom == LayerKind.binary && ffu) continue;
             // Continuous layers don't mix with the layers above.
             if (bottom == LayerKind.continuous) continue;
-            final k = DeepKernels(
-              _net(
+            for (final uil in [false, true]) {
+              DeepNetwork net() => _net(
                 update: update,
                 ffu: ffu,
                 meanField: meanField,
                 bottom: bottom,
-              ),
-              capacity: 1024,
-            );
-            final seqs = [
-              for (final (ws, wp) in [
-                (false, false),
-                (true, false),
-                (true, true),
-              ])
-                DeepKernels.sequential(
-                  _net(
-                    update: update,
-                    ffu: ffu,
-                    meanField: meanField,
-                    bottom: bottom,
-                  ),
-                  workgroupState: ws,
-                  workgroupParams: wp,
-                ),
-            ];
-            for (final s in [
-              ..._all(k),
-              for (final seq in seqs)
-                for (final opt in [null, ...DeepOptimiserKind.values])
-                  seq.sequentialFit(optimiser: opt),
-            ]) {
-              final f = File('${dir.path}/k.wgsl')..writeAsStringSync(s.source);
-              final r = Process.runSync('naga', [f.path]);
-              expect(
-                r.exitCode,
-                0,
-                reason:
-                    '$update ffu=$ffu meanField=$meanField $bottom '
-                    '${s.name}:\n${r.stderr}${r.stdout}',
+                updateInputLayer: uil,
               );
+              final k = DeepKernels(net(), capacity: 1024);
+              final seqs = [
+                for (final (ws, wp) in [
+                  (false, false),
+                  (true, false),
+                  (true, true),
+                ])
+                  DeepKernels.sequential(
+                    net(),
+                    workgroupState: ws,
+                    workgroupParams: wp,
+                    weightBeliefs: true,
+                  ),
+              ];
+              for (final s in [
+                ..._all(k),
+                for (final seq in seqs) ...[
+                  for (final opt in [null, ...DeepOptimiserKind.values])
+                    seq.sequentialFit(optimiser: opt),
+                  if (!meanField) seq.sequentialFit(synaptic: true),
+                ],
+              ]) {
+                final f = File('${dir.path}/k.wgsl')
+                  ..writeAsStringSync(s.source);
+                final r = Process.runSync('naga', [f.path]);
+                expect(
+                  r.exitCode,
+                  0,
+                  reason:
+                      '$update ffu=$ffu meanField=$meanField $bottom '
+                      'updateInputLayer=$uil ${s.name}:\n${r.stderr}${r.stdout}',
+                );
+              }
             }
           }
         }

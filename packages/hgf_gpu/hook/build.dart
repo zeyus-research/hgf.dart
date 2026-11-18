@@ -16,15 +16,21 @@
 //         bundle: false
 //
 // The backend then loads the system library (`$WGPU_LIB`, Homebrew's
-// wgpu-native, ...). `flutter test` on macOS needs this today: it rewrites a
-// bundled dylib's install name to an absolute path, which the prebuilt
-// release has no header room for (install_name_tool aborts).
+// wgpu-native, ...).
+//
+// On macOS, `dart test`/`dart run`/`flutter test` rewrite a bundled dylib's
+// install name to its absolute path, which the prebuilt release has too
+// little header room for (install_name_tool aborts). The hook makes room
+// (macho_headroom.dart) and re-signs the library ad hoc.
 
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:code_assets/code_assets.dart';
 import 'package:crypto/crypto.dart';
 import 'package:hooks/hooks.dart';
+
+import 'macho_headroom.dart';
 
 const _version = 'v29.0.1.1';
 
@@ -112,8 +118,10 @@ void main(List<String> args) async {
     final libName = code.targetOS.dylibFileName('wgpu_native');
 
     // Shared between configs that only differ in irrelevant fields.
+    // (`-2`: since the header-room edit, so older unedited copies are
+    // fetched again.)
     final dir = Directory.fromUri(
-      input.outputDirectoryShared.resolve('wgpu-$_version-$name/'),
+      input.outputDirectoryShared.resolve('wgpu-$_version-$name-2/'),
     );
     final lib = File.fromUri(dir.uri.resolve(libName));
     if (!lib.existsSync()) {
@@ -195,13 +203,36 @@ Future<void> _fetch(
         result.exitCode,
       );
     }
+    final extracted = File('${tmp.path}/lib/$libName');
+    if (libName.endsWith('.dylib')) await _headroom(extracted);
     await dir.create(recursive: true);
     // Copy then rename, so a half-written library is never picked up.
-    final partial = await File(
-      '${tmp.path}/lib/$libName',
-    ).copy('${dir.path}/$libName.partial');
+    final partial = await extracted.copy('${dir.path}/$libName.partial');
     await partial.rename('${dir.path}/$libName');
   } finally {
     await tmp.delete(recursive: true);
+  }
+}
+
+/// Frees header room in the dylib [lib] for the install-name rewrite (see
+/// macho_headroom.dart) and re-signs it ad hoc. Leaves [lib] as it was if
+/// `codesign` is missing or fails: an unsigned arm64 dylib would not load.
+Future<void> _headroom(File lib) async {
+  final original = await lib.readAsBytes();
+  final edited = Uint8List.fromList(original);
+  if (makeHeadroom(edited) == 0) return;
+  await lib.writeAsBytes(edited, flush: true);
+  ProcessResult? sign;
+  try {
+    sign = await Process.run('codesign', ['--force', '--sign', '-', lib.path]);
+  } on ProcessException {
+    sign = null;
+  }
+  if (sign == null || sign.exitCode != 0) {
+    stderr.writeln(
+      'hgf_gpu: could not re-sign ${lib.path} (${sign?.stderr ?? 'no '
+              'codesign'}); bundling it unedited.',
+    );
+    await lib.writeAsBytes(original, flush: true);
   }
 }

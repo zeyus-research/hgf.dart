@@ -711,12 +711,10 @@ class BuilderModel extends ChangeNotifier {
   void setSettings({
     VolatilityUpdates? volatilityUpdates,
     bool? meanFieldUpdates,
-    bool? ehgfMgfCorrection,
   }) => _set(
     doc.copyWith(
       volatilityUpdates: volatilityUpdates,
       meanFieldUpdates: meanFieldUpdates,
-      ehgfMgfCorrection: ehgfMgfCorrection,
     ),
   );
 

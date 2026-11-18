@@ -33,7 +33,10 @@ final class GpuDeepEnsemble {
     this._signature0,
   ) : _params = backend.storage(size * kernels.paramFloats * 4),
       _state = backend.storage(size * kernels.stateFloats * 4),
-      _uniform = backend.uniform(64);
+      _uniform = backend.uniform(deepFitUniformWords * 4),
+      _beliefs = [
+        for (var e = 0; e < size; e++) List.filled(kernels.nLayers, false),
+      ];
 
   /// Uploads [members] (at least one; all built alike, see
   /// [GpuDeepEnsemble]). [workgroupSize] threads share each member's
@@ -47,12 +50,17 @@ final class GpuDeepEnsemble {
   /// `DeepKernels.sequential`; `DeepKernels.fitsWorkgroup` tells whether
   /// they fit). By default the state goes there when that was measured
   /// faster (see [_workgroupPlan]), the parameters never.
+  ///
+  /// [weightBeliefs] lays out the weight beliefs that
+  /// [LearningKind.synapticUncertainty] learns with; by default only when
+  /// a member already carries one (`DeepNetwork.installWeightBelief`).
   static Future<GpuDeepEnsemble> create(
     GpuBackend backend,
     List<DeepNetwork> members, {
     int? workgroupSize,
     bool? workgroupState,
     bool? workgroupParams,
+    bool? weightBeliefs,
   }) async {
     if (members.isEmpty) throw ArgumentError('No members.');
     final first = members.first;
@@ -64,16 +72,23 @@ final class GpuDeepEnsemble {
         );
       }
     }
+    final beliefs =
+        weightBeliefs ??
+        members.any(
+          (m) => m.debugLayers.any((l) => l.weightsPrecisionDelta != null),
+        );
     final (ws, wp) = _workgroupPlan(
       first,
       members.length,
       workgroupState,
       workgroupParams,
+      beliefs,
     );
     final kernels = DeepKernels.sequential(
       first,
       workgroupState: ws,
       workgroupParams: wp,
+      weightBeliefs: beliefs,
     );
     final wg =
         workgroupSize ??
@@ -98,7 +113,7 @@ final class GpuDeepEnsemble {
     gpu._initState();
     final host = backend.hostFloats(n * kernels.paramFloats);
     for (var e = 0; e < n; e++) {
-      gpu._pack(members[e], host, e * kernels.paramFloats);
+      gpu._pack(members[e], host, e * kernels.paramFloats, e);
     }
     backend.write(gpu._params, host);
     return gpu;
@@ -117,8 +132,9 @@ final class GpuDeepEnsemble {
     int members,
     bool? state,
     bool? params,
+    bool weightBeliefs,
   ) {
-    final k = DeepKernels.sequential(net);
+    final k = DeepKernels.sequential(net, weightBeliefs: weightBeliefs);
     final limit = DeepKernels.workgroupStorageBytes;
     final stateBytes = k.stateFloats * 4;
     final allBytes = stateBytes + k.paramFloats * 4;
@@ -182,7 +198,11 @@ final class GpuDeepEnsemble {
   GpuBuffer? _x, _y, _out, _bc;
   int _xFloats = 0, _yFloats = 0, _outFloats = 0, _bcFloats = 0;
 
-  final _pipelines = <DeepOptimiserKind?, Future<GpuPipeline>>{};
+  final _pipelines = <(DeepOptimiserKind?, bool), Future<GpuPipeline>>{};
+
+  /// Per member, which layers carry a weight belief (see
+  /// `DeepNetwork.weightPrecisionDeltas`).
+  final List<List<bool>> _beliefs;
 
   Adam? _adam;
   int _adamCount = 0;
@@ -200,8 +220,9 @@ final class GpuDeepEnsemble {
     backend.write(_state, host);
   }
 
-  /// Writes [net]'s parameters and beliefs into [host] at [base].
-  void _pack(DeepNetwork net, Float32List host, int base) {
+  /// Writes [net]'s parameters and beliefs into [host] at [base], for
+  /// member [member].
+  void _pack(DeepNetwork net, Float32List host, int base, int member) {
     final k = kernels;
     if (_signature(net) != _signature0) {
       throw ArgumentError('The network differs in its layers or settings.');
@@ -220,6 +241,15 @@ final class GpuDeepEnsemble {
       host.setAll(base + k.priorOffset(l), layer.priorPrecision);
       final w = layer.weights;
       if (w != null) host.setAll(base + k.weightsOffset(l), w.data);
+      final delta = layer.weightsPrecisionDelta;
+      if (delta != null && !k.weightBeliefs) {
+        throw ArgumentError(
+          'Layer $l carries a weight belief: create the ensemble with '
+          'weightBeliefs: true.',
+        );
+      }
+      if (delta != null) host.setAll(base + k.deltaOffset(l), delta);
+      _beliefs[member][l] = delta != null;
     }
   }
 
@@ -229,7 +259,7 @@ final class GpuDeepEnsemble {
   void upload(int member, DeepNetwork net) {
     RangeError.checkValidIndex(member, this, 'member', size);
     final host = backend.hostFloats(kernels.paramFloats);
-    _pack(net, host, 0);
+    _pack(net, host, 0, member);
     // The moments live in the same region: keep them.
     _writeExceptMoments(host, member);
   }
@@ -269,7 +299,7 @@ final class GpuDeepEnsemble {
       offset: member * k.paramFloats * 4,
       bytes: k.paramFloats * 4,
     );
-    _unpack(p, 0, net);
+    _unpack(p, 0, net, member);
   }
 
   /// [download] for every member, with one read: `nets[e]` gets member `e`.
@@ -280,11 +310,11 @@ final class GpuDeepEnsemble {
     final k = kernels;
     final p = await backend.read(_params, bytes: size * k.paramFloats * 4);
     for (var e = 0; e < size; e++) {
-      _unpack(p, e * k.paramFloats, nets[e]);
+      _unpack(p, e * k.paramFloats, nets[e], e);
     }
   }
 
-  void _unpack(Float32List p, int base, DeepNetwork net) {
+  void _unpack(Float32List p, int base, DeepNetwork net, int member) {
     final k = kernels;
     final weights = <Matrix>[];
     for (var l = 0; l < k.nLayers; l++) {
@@ -314,6 +344,15 @@ final class GpuDeepEnsemble {
       }
     }
     net.setWeights(weights);
+    for (var l = 0; l < k.nLayers; l++) {
+      if (!_beliefs[member][l]) continue;
+      net.installWeightBelief(layers: [l]);
+      final dst = net.weightPrecisionDeltas[l]!.data;
+      final o = base + k.deltaOffset(l);
+      for (var i = 0; i < dst.length; i++) {
+        dst[i] = p[o + i];
+      }
+    }
   }
 
   GpuBuffer _ensure(GpuBuffer? buffer, int have, int floats) {
@@ -365,12 +404,16 @@ final class GpuDeepEnsemble {
     }
   }
 
-  Future<GpuPipeline> _pipeline(DeepOptimiserKind? kind) =>
+  Future<GpuPipeline> _pipeline(DeepOptimiserKind? kind, bool synaptic) =>
       _pipelines.putIfAbsent(
-        kind,
+        (kind, synaptic),
         () => backend.pipeline(
           kernels
-              .sequentialFit(optimiser: kind, workgroupSize: workgroupSize)
+              .sequentialFit(
+                optimiser: kind,
+                synaptic: synaptic,
+                workgroupSize: workgroupSize,
+              )
               .source,
         ),
       );
@@ -390,24 +433,43 @@ final class GpuDeepEnsemble {
   /// resets the device when a kernel runs for seconds (seen at 256 rows of
   /// 1024 wide members). By default it is sized for ~50 ms per dispatch on
   /// a mid-range GPU ([defaultRowsPerDispatch]).
+  ///
+  /// [LearningKind.synapticUncertainty] takes [synapticUncertainty] instead
+  /// of an optimiser, as on the CPU, and needs an ensemble created with
+  /// `weightBeliefs: true`.
   Future<List<Matrix>?> fit(
     List<Matrix> x,
     List<Matrix> y, {
     Optimiser? optimiser,
     LearningKind learningKind = LearningKind.precisionWeighted,
+    SynapticUncertainty? synapticUncertainty,
     bool weightUpdate = true,
     double timeStep = 1.0,
     bool updatePrecisions = true,
     bool readPredictions = true,
     int? rowsPerDispatch,
   }) async {
-    if (learningKind == LearningKind.synapticUncertainty) {
-      throw UnsupportedError(
-        'LearningKind.synapticUncertainty has no GPU kernel yet: use the CPU '
-        'DeepNetwork.',
-      );
+    checkLearningRequest(
+      kernels.settings,
+      learningKind,
+      synapticUncertainty,
+      optimiser,
+    );
+    if (synapticUncertainty != null) {
+      if (!kernels.weightBeliefs) {
+        throw ArgumentError(
+          'LearningKind.synapticUncertainty needs the weight beliefs: create '
+          'the ensemble with weightBeliefs: true.',
+        );
+      }
+      // As DeepNetwork.installWeightBelief: every weight layer, from zero.
+      for (final b in _beliefs) {
+        for (var l = 0; l < kernels.nLayers; l++) {
+          if (kernels.layers[l].weights != null) b[l] = true;
+        }
+      }
     }
-    if (weightUpdate && optimiser == null) {
+    if (weightUpdate && optimiser == null && synapticUncertainty == null) {
       throw ArgumentError('fit needs an optimiser (or weightUpdate: false).');
     }
     rowsPerDispatch ??= defaultRowsPerDispatch;
@@ -429,7 +491,8 @@ final class GpuDeepEnsemble {
       Adam() => DeepOptimiserKind.adam,
       null => null,
     };
-    final pipeline = await _pipeline(kind);
+    final synaptic = weightUpdate && synapticUncertainty != null;
+    final pipeline = await _pipeline(kind, synaptic);
     if (rows == 0) {
       return readPredictions
           ? [for (var e = 0; e < size; e++) Matrix(0, kernels.bottomSize)]
@@ -457,14 +520,14 @@ final class GpuDeepEnsemble {
       backend.write(_bc!, bc);
       _adamCount += rows;
     }
-    final u = Uint32List(16);
+    final u = Uint32List(deepFitUniformWords);
     final uf = Float32List.view(u.buffer);
     u
       ..[0] = size
       ..[3] =
-          (learningKind == LearningKind.precisionWeighted
-              ? DeepFitFlags.precisionWeighted
-              : 0) |
+          (learningKind == LearningKind.standard
+              ? 0
+              : DeepFitFlags.precisionWeighted) |
           (updatePrecisions ? DeepFitFlags.updatePrecisions : 0) |
           (readPredictions ? DeepFitFlags.predictions : 0)
       ..[4] = 0x7fc00000
@@ -483,6 +546,14 @@ final class GpuDeepEnsemble {
           ..[12] = opt.eps
           ..[13] = opt.epsRoot;
       case null:
+    }
+    if (synaptic) {
+      uf
+        ..[9] = synapticUncertainty.learningRate
+        ..[14] = synapticUncertainty.priorPrecision
+        ..[15] = synapticUncertainty.window
+        ..[16] = synapticUncertainty.priorMean
+        ..[17] = synapticUncertainty.incrementScale;
     }
     final bindings = <GpuBuffer?>[
       for (final b in DeepBinding.values)

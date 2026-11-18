@@ -1,5 +1,10 @@
 ## Unreleased
 
+- `checkLearningRequest` (and `sweepsReachTop`) are public, so hgf_gpu
+  checks learning calls as `DeepNetwork` does.
+- Continuous layers follow pyhgf #480: under relaxed updates the eHGF
+  precision update re-predicts each volatility child with the MGF term
+  `Σ κ²/(2π̂)` of its parents. Fixtures regenerated at pyhgf `4db3b093`.
 - Continuous layers follow pyhgf #478: the observation layer's drift and
   noise prediction error take no Δt, and a state layer's value messages
   to its parent take t·W. The 28 `continuous_*` fixtures regenerated at

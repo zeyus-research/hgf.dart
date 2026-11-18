@@ -81,6 +81,15 @@ final class _LayerLayout {
   int splits = 1;
   int? tonicVol, tonic, prior;
   int? weights, mu, nu;
+
+  /// The weight belief's accumulated precision Δ (parameters), and the
+  /// weight-belief rule's per-sample buffers: the softened evidence ξ̃ of
+  /// a child layer, and the evidence ξ carried up to a non-bottom child
+  /// (`evidence_pullback`). Only with [DeepKernels.weightBeliefs].
+  int? delta, soft, ev;
+
+  /// Split-K partial sums of the curvature increments (weight beliefs).
+  int? partial1;
 }
 
 /// Generates the kernels of one network shape for a batch capacity.
@@ -89,14 +98,17 @@ final class _LayerLayout {
 /// the batch width (up to [capacity]), the row offset, the time step,
 /// the learning kind and the optimiser's hyperparameters are uniforms.
 final class DeepKernels {
-  DeepKernels(DeepNetwork net, {required this.capacity})
-    : settings = net.settings,
-      layers = net.debugLayers,
-      workgroupState = false,
-      workgroupParams = false,
-      sequentialLayout = false,
-      _pb = '',
-      _sb = '' {
+  DeepKernels(
+    DeepNetwork net, {
+    required this.capacity,
+    this.weightBeliefs = true,
+  }) : settings = net.settings,
+       layers = net.debugLayers,
+       workgroupState = false,
+       workgroupParams = false,
+       sequentialLayout = false,
+       _pb = '',
+       _sb = '' {
     _check();
   }
 
@@ -113,10 +125,17 @@ final class DeepKernels {
   /// [workgroupParams] does the same with the member's parameters (weights,
   /// optimiser moments, beliefs; `paramFloats · 4` bytes more), so a row
   /// touches no storage at all but `X`, `Y` and `OUT`.
+  ///
+  /// [weightBeliefs] lays out the buffers of
+  /// [LearningKind.synapticUncertainty] (a weight belief per weight, and
+  /// the evidence carried up the layers); without them, kernels for that
+  /// kind can't be generated. They cost parameter memory, which matters for
+  /// [workgroupParams].
   DeepKernels.sequential(
     DeepNetwork net, {
     this.workgroupState = false,
     this.workgroupParams = false,
+    this.weightBeliefs = false,
   }) : capacity = 1,
        settings = net.settings,
        layers = net.debugLayers,
@@ -132,6 +151,10 @@ final class DeepKernels {
   /// Whether these are [DeepKernels.sequential]'s width-1 layouts.
   final bool sequentialLayout;
 
+  /// Whether the layouts hold the weight beliefs and evidence buffers of
+  /// [LearningKind.synapticUncertainty].
+  final bool weightBeliefs;
+
   /// Whether the sequential kernel's working state lives in workgroup
   /// memory (see [DeepKernels.sequential]).
   final bool workgroupState;
@@ -146,8 +169,12 @@ final class DeepKernels {
 
   /// Whether [net]'s width-1 working state (with [params], its parameters
   /// as well) fits in [workgroupStorageBytes].
-  static bool fitsWorkgroup(DeepNetwork net, {bool params = false}) {
-    final k = DeepKernels.sequential(net);
+  static bool fitsWorkgroup(
+    DeepNetwork net, {
+    bool params = false,
+    bool weightBeliefs = false,
+  }) {
+    final k = DeepKernels.sequential(net, weightBeliefs: weightBeliefs);
     return (k.stateFloats + (params ? k.paramFloats : 0)) * 4 <=
         workgroupStorageBytes;
   }
@@ -161,11 +188,6 @@ final class DeepKernels {
       throw UnsupportedError(
         'Continuous networks are filters with no GPU kernel: use the CPU '
         'DeepNetwork.inputData.',
-      );
-    }
-    if (settings.updateInputLayer) {
-      throw UnsupportedError(
-        'updateInputLayer has no GPU kernel yet: use the CPU DeepNetwork.',
       );
     }
     for (final l in layers) {
@@ -189,6 +211,15 @@ final class DeepKernels {
 
   final _l = <_LayerLayout>[];
   late final int paramFloats, stateFloats;
+
+  /// Offset of the batch's sample weights in the state buffer (batch
+  /// kernels only).
+  int get sampleWeightsOffset => _sw!;
+  int? _sw;
+
+  /// Whether the sweeps treat the top layer as part of the hierarchy
+  /// ([DeepSettings.updateInputLayer], see `sweepsReachTop`).
+  bool get _reachTop => sweepsReachTop(layers, settings);
 
   int get nLayers => layers.length;
   int get topSize => layers.last.size;
@@ -227,6 +258,10 @@ final class DeepKernels {
         if (ll.splits > 1) {
           ll.partial = s;
           s += ll.splits * w.data.length;
+          if (weightBeliefs) {
+            ll.partial1 = s;
+            s += ll.splits * w.data.length;
+          }
         }
         ll.weights = p;
         p += w.data.length;
@@ -234,6 +269,10 @@ final class DeepKernels {
         p += w.data.length;
         ll.nu = p;
         p += w.data.length;
+        if (weightBeliefs) {
+          ll.delta = p;
+          p += w.data.length;
+        }
       }
       final isTop = i == layers.length - 1;
       final rows = n + (layer.hasConstant ? 1 : 0);
@@ -262,6 +301,14 @@ final class DeepKernels {
         s += n * bm;
         ll.effc = s;
         s += n * bm;
+        if (weightBeliefs) {
+          ll.soft = s;
+          s += n * bm;
+          if (i >= 1) {
+            ll.ev = s;
+            s += n * bm;
+          }
+        }
       }
       if (i == 0) {
         // Raw logits of predict() on a categorical output.
@@ -269,6 +316,11 @@ final class DeepKernels {
         s += n * bm;
       }
       _l.add(ll);
+    }
+    if (!sequentialLayout) {
+      // Normalised sample weights of a weighted batchUpdate.
+      _sw = s;
+      s += bm;
     }
     paramFloats = p;
     stateFloats = s;
@@ -285,6 +337,10 @@ final class DeepKernels {
   int tonicVolOffset(int layer) => _l[layer].tonicVol!;
   int? tonicOffset(int layer) => _l[layer].tonic;
   int priorOffset(int layer) => _l[layer].prior!;
+
+  /// Offset of [layer]'s weight belief Δ (`childSize × cols`), with
+  /// [weightBeliefs].
+  int deltaOffset(int layer) => _l[layer].delta!;
 
   /// Bias rows (constant 1) in the state buffer, as (offset, length), to
   /// fill once.
@@ -356,6 +412,8 @@ const MINV: f32 = 1.17549435e-38f;
 fn nan() -> f32 { return bitcast<f32>(U.nanBits); }
 fn guardV(v: f32) -> f32 { return select(nan(), v, v > MINV); }
 fn floorV(x: f32, lo: f32) -> f32 { return select(x, lo, x < lo); }
+fn fin0(x: f32) -> f32 { return select(0.0f, x, isFinite(x)); }
+fn sq(x: f32) -> f32 { return x * x; }
 // min/max that propagate NaN like Dart's (and jnp's): WGSL's may not.
 fn isNan(x: f32) -> bool { return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u; }
 fn minN(a: f32, b: f32) -> f32 { return select(min(a, b), nan(), isNan(a) || isNan(b)); }
@@ -395,8 +453,23 @@ struct Uniform {
   epsRoot: f32,
   bc1: f32,
   bc2: f32,
+  div: f32,
+  wsum: f32,
+  synPrior: f32,
+  synWindow: f32,
+  synMean: f32,
+  synScale: f32,
+  pad0: u32,
+  pad1: u32,
 }
 ''';
+
+  /// Words of the batch kernels' uniform (see `Uniform` in the WGSL).
+  static const uniformWords = 20;
+
+  /// Flag bits of the batch kernels' uniform.
+  static const flagPrecisionWeighted = 1;
+  static const flagSampleWeights = 2;
 
   /// Wraps [body] with the declarations of the bindings it uses.
   DeepKernelSource _kernel(
@@ -469,8 +542,12 @@ $body
 
   /// A tiled GEMM `acc[r][c] = Σ_k A(r, k)·B(k, c)` over `r < m`, `c < n`,
   /// `k < depth`, with a second accumulator when [b1] is given (its A is
-  /// A(r, k)² when [squareA1]); each thread holds a 4×4 register tile and
-  /// calls `epi(r, c, acc0, acc1)` for each in-range output.
+  /// [a1] if given, else A(r, k)² when [squareA1], else A); each thread
+  /// holds a 4×4 register tile and calls `epi(r, c, acc0, acc1)` for each
+  /// in-range output.
+  ///
+  /// The tile depth is 16, halved until the tiles fit in WebGPU's default
+  /// 16 KiB of workgroup storage.
   ///
   /// [a] and [b0]/[b1] are WGSL expressions in `r`/`k` and `k`/`c`;
   /// [aAlongK]/[bAlongK] say which index is contiguous in memory, for
@@ -487,25 +564,34 @@ $body
     required bool aAlongK,
     required String b0,
     String? b1,
+    String? a1,
     bool squareA1 = false,
     required bool bAlongK,
     required String epilogue,
     required (int, int) Function(int b) Function(int tm, int tn) grid,
     int splits = 1,
   }) {
-    const tk = 16;
+    assert(a1 == null || (b1 != null && !squareA1));
     final (wx, wy) = _tile(mMax, nMax);
     final tm = 4 * wy, tn = 4 * wx, nt = wx * wy;
-    final two = b1 != null;
+    final two = b1 != null, twoA = a1 != null;
+    var tk = 16;
+    while (tk > 4 &&
+        4 * tk * (tm * (twoA ? 2 : 1) + tn * (two ? 2 : 1)) >
+            workgroupStorageBytes) {
+      tk ~/= 2;
+    }
     final buf = StringBuffer()
       ..writeln('var<workgroup> As: array<f32, ${tk * tm}>;')
       ..writeln('var<workgroup> Bs0: array<f32, ${tk * tn}>;');
+    if (twoA) buf.writeln('var<workgroup> As1: array<f32, ${tk * tm}>;');
     if (two) buf.writeln('var<workgroup> Bs1: array<f32, ${tk * tn}>;');
     buf
       ..writeln('fn epi(r: u32, c: u32, acc0: f32, acc1: f32, split: u32) {')
       ..writeln(epilogue)
       ..writeln('}')
       ..writeln('fn loadA(r: u32, k: u32) -> f32 { return $a; }')
+      ..writeln(twoA ? 'fn loadA1(r: u32, k: u32) -> f32 { return $a1; }' : '')
       ..writeln('fn loadB0(k: u32, c: u32) -> f32 { return $b0; }');
     if (two) buf.writeln('fn loadB1(k: u32, c: u32) -> f32 { return $b1; }');
     buf
@@ -554,9 +640,17 @@ $body
     }
     buf
       ..writeln('      let r = r0 + rr; let k = k0 + kk;')
-      ..writeln('      var v = 0.0f;')
-      ..writeln('      if (r < M && k < ke) { v = loadA(r, k); }')
-      ..writeln('      As[kk * ${tm}u + rr] = v;')
+      ..writeln('      var v = 0.0f;');
+    if (twoA) buf.writeln('      var v1 = 0.0f;');
+    buf
+      ..writeln('      if (r < M && k < ke) {')
+      ..writeln('        v = loadA(r, k);');
+    if (twoA) buf.writeln('        v1 = loadA1(r, k);');
+    buf
+      ..writeln('      }')
+      ..writeln('      As[kk * ${tm}u + rr] = v;');
+    if (twoA) buf.writeln('      As1[kk * ${tm}u + rr] = v1;');
+    buf
       ..writeln('    }')
       ..writeln('    for (var e = li; e < ${tk * tn}u; e += ${nt}u) {');
     if (bAlongK) {
@@ -582,6 +676,9 @@ $body
     for (var ii = 0; ii < 4; ii++) {
       buf.writeln('      let x$ii = As[kk * ${tm}u + ty + ${ii * wy}u];');
       if (two && squareA1) buf.writeln('      let q$ii = x$ii * x$ii;');
+      if (twoA) {
+        buf.writeln('      let q$ii = As1[kk * ${tm}u + ty + ${ii * wy}u];');
+      }
     }
     for (var jj = 0; jj < 4; jj++) {
       buf.writeln('      let y$jj = Bs0[kk * ${tn}u + tx + ${jj * wx}u];');
@@ -594,7 +691,7 @@ $body
         buf.writeln('      a0_${ii}_$jj += x$ii * y$jj;');
         if (two) {
           buf.writeln(
-            '      a1_${ii}_$jj += ${squareA1 ? 'q' : 'x'}$ii * z$jj;',
+            '      a1_${ii}_$jj += ${squareA1 || twoA ? 'q' : 'x'}$ii * z$jj;',
           );
         }
       }
@@ -637,25 +734,41 @@ $body
   // --- batchUpdate ----------------------------------------------------------
 
   /// The kernels of one `batchUpdate`, in dispatch order. [errors] adds the
-  /// input-layer error kernel; [optimiser] the weight steps (none when
-  /// `null`); [updatePrecisions] the carried-belief increment.
+  /// input-layer error kernel; [optimiser] the weight steps, or [synaptic]
+  /// the weight-belief rule's (none when neither); [updatePrecisions] the
+  /// carried-belief increment.
   List<DeepKernelSource> batchUpdate({
     required bool errors,
     DeepOptimiserKind? optimiser,
+    bool synaptic = false,
     required bool updatePrecisions,
-  }) => [
-    top(),
-    for (var l = nLayers - 2; l >= 0; l--) ...[
-      predictLayer(l),
-      if (layers[l].kind == LayerKind.categorical) softmax(),
-    ],
-    updateBottom(),
-    for (var l = 1; l < nLayers - 1; l++) posterior(l),
-    if (errors) inputErrors(),
-    if (optimiser != null)
-      for (var l = 1; l < nLayers; l++) ...gradient(l, optimiser),
-    if (updatePrecisions) carry(),
-  ];
+  }) {
+    assert(!(synaptic && optimiser != null));
+    if (synaptic && !weightBeliefs) {
+      throw StateError('Build the kernels with weightBeliefs: true.');
+    }
+    return [
+      top(),
+      for (var l = nLayers - 2; l >= 0; l--) ...[
+        predictLayer(l),
+        if (layers[l].kind == LayerKind.categorical) softmax(),
+      ],
+      updateBottom(),
+      for (var l = 1; l < nLayers - 1; l++) posterior(l),
+      if (_reachTop) posterior(nLayers - 1),
+      if (errors) inputErrors(),
+      if (optimiser != null)
+        for (var l = 1; l < nLayers; l++) ...gradient(l, optimiser),
+      if (synaptic)
+        for (var l = 1; l < nLayers; l++) ...[
+          synapticFactors(l - 1),
+          // Before layer l's step moves the weights it reads.
+          if (l + 1 < nLayers) pullback(l),
+          ...synapticGradient(l),
+        ],
+      if (updatePrecisions) carry(),
+    ];
+  }
 
   /// Clamp `x` on the top layer: its means, its coupled outputs `g(x)` (the
   /// prediction's and the gradient's) and, with feedforward uncertainty,
@@ -667,7 +780,9 @@ $body
   );
 
   /// Clamp predictor [x] (a WGSL expression) on top node `i` (expects `i`,
-  /// `k` in scope).
+  /// `k` in scope). With [DeepSettings.updateInputLayer], also predict the
+  /// top layer's precisions (`vectorised_root_prediction`) into its batch
+  /// state.
   String _topBody(String x) {
     final l = nLayers - 1;
     final ll = _l[l];
@@ -679,13 +794,31 @@ $body
       ..writeln('  let gv = ${_g(fn, 'v')};')
       ..writeln('  ${_at(ll.coupled!, 'k')} = gv;')
       ..writeln('  ${_at(ll.h!, 'k')} = select(0.0f, gv, isFinite(gv));');
+    var ep = _t(l, LayerField.expectedPrecision, 'i');
+    if (_reachTop) {
+      String S(LayerField f) => _s(l, f, 'k');
+      _volatilityLevelPrediction(body, l);
+      if (settings.predictPrecision) {
+        // Without value parents, the conditional and the marginal predicted
+        // precision coincide.
+        body
+          ..writeln('  let e0 = 1.0f / (1.0f / pi + predVol);')
+          ..writeln('  ${S(LayerField.expectedPrecision)} = e0;')
+          ..writeln('  ${S(LayerField.conditionalExpectedPrecision)} = e0;')
+          ..writeln('  ${S(LayerField.effectivePrecision)} = predVol * e0;');
+      } else {
+        body
+          ..writeln('  let e0 = pi;')
+          ..writeln('  ${S(LayerField.expectedPrecision)} = pi;')
+          ..writeln('  ${S(LayerField.conditionalExpectedPrecision)} = pi;')
+          ..writeln('  ${S(LayerField.effectivePrecision)} = 0.0f;');
+      }
+      ep = 'e0';
+    }
     if (ll.perParent != null) {
       body
         ..writeln('  let d = ${_dg(fn, 'v')};')
-        ..writeln(
-          '  ${_at(ll.perParent!, 'k')} = d * d / '
-          '${_t(l, LayerField.expectedPrecision, 'i')};',
-        );
+        ..writeln('  ${_at(ll.perParent!, 'k')} = d * d / $ep;');
     }
     return body.toString();
   }
@@ -745,49 +878,11 @@ $body
       ..writeln('  let i = r; let s = c; let k = i * $_bm + s;')
       ..writeln('  let mu = acc0;');
     String S(LayerField f) => _s(l, f, 'k');
-    String T(LayerField f) => _t(l, f, 'i');
     switch (c.kind) {
       case LayerKind.continuous:
         throw UnsupportedError('GPU deep networks have no continuous layers.');
       case LayerKind.volatile:
-        final ll = _l[l];
-        e
-          ..writeln('  let pi = ${T(LayerField.precision)};')
-          ..writeln('  ${S(LayerField.precision)} = pi;')
-          ..writeln('  var predVol = 0.0f;');
-        if (c.hasVolatility) {
-          e
-            ..writeln('  let mv = ${T(LayerField.meanVol)};')
-            ..writeln('  let pv = ${T(LayerField.precisionVol)};')
-            ..writeln('  ${S(LayerField.meanVol)} = mv;')
-            ..writeln('  ${S(LayerField.precisionVol)} = pv;');
-        }
-        if (predict) {
-          if (c.hasVolatility) {
-            e
-              ..writeln(
-                '  let pvv = guardV(U.t * exp(${_p(ll.tonicVol!, 'i')}));',
-              )
-              ..writeln('  let ev = 1.0f / (1.0f / pv + pvv);')
-              ..writeln('  ${S(LayerField.expectedMeanVol)} = mv;')
-              ..writeln('  ${S(LayerField.expectedPrecisionVol)} = ev;')
-              ..writeln('  ${S(LayerField.effectivePrecisionVol)} = pvv * ev;')
-              ..writeln('  var total = mv;');
-            if (!settings.meanFieldUpdates) {
-              e.writeln('  total = total + 1.0f / (2.0f * ev);');
-            }
-            if (ll.tonic != null) {
-              e.writeln('  total = total + ${_p(ll.tonic!, 'i')};');
-            }
-            e.writeln('  predVol = guardV(U.t * exp(total));');
-          } else if (ll.tonic != null) {
-            e.writeln('  predVol = guardV(U.t * exp(${_p(ll.tonic!, 'i')}));');
-          }
-        } else if (c.hasVolatility) {
-          e
-            ..writeln('  ${S(LayerField.expectedMeanVol)} = mv;')
-            ..writeln('  ${S(LayerField.expectedPrecisionVol)} = pv;');
-        }
+        _volatilityLevelPrediction(e, l);
         e.writeln('  ${S(LayerField.expectedMean)} = mu;');
         if (c.isInputLayer || !predict) {
           e
@@ -833,6 +928,52 @@ $body
         e.writeln('  ${S(LayerField.expectedMean)} = mu;');
     }
     return e.toString();
+  }
+
+  /// `_predict_volatility_level` of volatile layer [l] (expects `i` and `k`
+  /// in scope): copies the carried precision `pi` (and the volatility
+  /// level `mv`, `pv`) into the batch state, predicts the volatility level,
+  /// and leaves the value level's diffusion term in `predVol`.
+  void _volatilityLevelPrediction(StringBuffer e, int l) {
+    final c = layers[l];
+    final ll = _l[l];
+    String S(LayerField f) => _s(l, f, 'k');
+    String T(LayerField f) => _t(l, f, 'i');
+    e
+      ..writeln('  let pi = ${T(LayerField.precision)};')
+      ..writeln('  ${S(LayerField.precision)} = pi;')
+      ..writeln('  var predVol = 0.0f;');
+    if (c.hasVolatility) {
+      e
+        ..writeln('  let mv = ${T(LayerField.meanVol)};')
+        ..writeln('  let pv = ${T(LayerField.precisionVol)};')
+        ..writeln('  ${S(LayerField.meanVol)} = mv;')
+        ..writeln('  ${S(LayerField.precisionVol)} = pv;');
+    }
+    if (settings.predictPrecision) {
+      if (c.hasVolatility) {
+        e
+          ..writeln('  let pvv = guardV(U.t * exp(${_p(ll.tonicVol!, 'i')}));')
+          ..writeln('  let ev = 1.0f / (1.0f / pv + pvv);')
+          ..writeln('  ${S(LayerField.expectedMeanVol)} = mv;')
+          ..writeln('  ${S(LayerField.expectedPrecisionVol)} = ev;')
+          ..writeln('  ${S(LayerField.effectivePrecisionVol)} = pvv * ev;')
+          ..writeln('  var total = mv;');
+        if (!settings.meanFieldUpdates) {
+          e.writeln('  total = total + 1.0f / (2.0f * ev);');
+        }
+        if (ll.tonic != null) {
+          e.writeln('  total = total + ${_p(ll.tonic!, 'i')};');
+        }
+        e.writeln('  predVol = guardV(U.t * exp(total));');
+      } else if (ll.tonic != null) {
+        e.writeln('  predVol = guardV(U.t * exp(${_p(ll.tonic!, 'i')}));');
+      }
+    } else if (c.hasVolatility) {
+      e
+        ..writeln('  ${S(LayerField.expectedMeanVol)} = mv;')
+        ..writeln('  ${S(LayerField.expectedPrecisionVol)} = pv;');
+    }
   }
 
   /// `g(μ̂)` (and `g'(μ̂)²/π̂`) of layer [l] for the layer below.
@@ -895,7 +1036,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   /// The value-level posterior of layer [l] from its children's errors,
-  /// then its own prediction error.
+  /// then its own prediction error. For the top layer (under
+  /// [DeepSettings.updateInputLayer]) only the precision moves.
   DeepKernelSource posterior(int l) {
     final pl = layers[l];
     final cl = _l[l - 1];
@@ -903,7 +1045,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     final w = _l[l].weights!;
     final nc = layers[l - 1].size;
     return _gemm(
-      'posterior layer $l',
+      'posterior layer $l${l == nLayers - 1 ? ' (precision only)' : ''}',
       m: '${pl.size}u',
       mMax: pl.size,
       n: 'U.b',
@@ -926,6 +1068,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   /// error and `g(μ)` for the gradient.
   String _posteriorEpilogue(int l) {
     final fn = _fn(l);
+    final precisionOnly = l == nLayers - 1;
     final e = StringBuffer()
       ..writeln('  let i = r; let s = c; let k = i * $_bm + s;')
       ..writeln('  let msg = acc0; let pc1 = acc1;')
@@ -934,7 +1077,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       ..writeln('  let g2 = ${_d2g(fn, 'x')};')
       ..writeln('  let epx = ${_s(l, LayerField.expectedPrecision, 'k')};')
       ..writeln('  let info = pc1 * (g1 * g1);')
-      ..writeln('  let raw = epx + info + (-g2 * msg);')
+      ..writeln('  let raw = epx + info + (-g2 * msg);');
+    if (precisionOnly) {
+      // `_top_precision_only`: the mean stays on the predictors, so there
+      // is no residual (and no curvature floor: the mean never moves).
+      e
+        ..writeln(
+          '  ${_s(l, LayerField.precision, 'k')} = '
+          'minN(maxN(raw, epx), ${_f(settings.maxPosteriorPrecision)});',
+        )
+        ..writeln('  ${_s(l, LayerField.valuePredictionError, 'k')} = 0.0f;');
+      return e.toString();
+    }
+    e
       ..writeln(
         // DeepFixes.curvatureFloor: floor at π̂ + information, not π̂.
         '  let prec = minN(maxN(raw, '
@@ -1009,10 +1164,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       ..writeln('  ${_at(ll.gain!, 'k')} = gain * vpe;')
       ..writeln('  var uu = mean - em;');
     if (layer.kind != LayerKind.binary) {
-      e.writeln('  if ((U.flags & 1u) != 0u) { uu = uu * $precision; }');
+      e.writeln(
+        '  if ((U.flags & ${flagPrecisionWeighted}u) != 0u) '
+        '{ uu = uu * $precision; }',
+      );
     }
-    e.writeln('  ${_at(ll.u!, 'k')} = -select(0.0f, uu, isFinite(uu));');
+    e.writeln(
+      '  ${_at(ll.u!, 'k')} = -select(0.0f, uu, isFinite(uu))$_timesWeight;',
+    );
   }
+
+  /// Sample `s`'s weight of a weighted batch (1 otherwise), as a WGSL
+  /// expression; empty in a sequential kernel (no weights).
+  String get _timesWeight => sequentialLayout ? '' : ' * ${_sampleWeight('s')}';
+
+  String _sampleWeight(String s) =>
+      'select(1.0f, S[${_sw}u + $s], (U.flags & ${flagSampleWeights}u) != 0u)';
 
   /// The volatility-level posterior of volatile layer [l] (expects `mean`,
   /// `precision`, `em`, `ep` and `k` in scope).
@@ -1194,7 +1361,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       epilogue: splits > 1
           ? '  ${_at(ll.partial!, 'split * ${nc * cols}u + r * ${cols}u + c')}'
                 ' = acc0;'
-          : '  let g = ${_edge(l, 'acc0 / f32(U.b)')};\n'
+          : '  let g = ${_edge(l, 'acc0 / U.div')};\n'
                 '  let wi = r * ${cols}u + c;\n$step',
       grid: (tm, tn) =>
           (_) => ((cols + tn - 1) ~/ tn, (nc + tm - 1) ~/ tm),
@@ -1214,11 +1381,170 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     sum += ${_at(ll.partial!, 'sp * ${n}u + wi')};
   }
   let r = wi / ${cols}u; let c = wi % ${cols}u;
-  let g = ${_edge(l, 'sum / f32(U.b)')};
+  let g = ${_edge(l, 'sum / U.div')};
 $step
 }
 ''', (_) => ((n + 63) ~/ 64, 1)),
     ];
+  }
+
+  // --- The weight-belief rule (LearningKind.synapticUncertainty) -----------
+
+  /// The gradient factors of child layer [c] under the weight-belief rule:
+  /// the evidence ξ at the child (from the clamped layer for the bottom,
+  /// else carried up by [pullback]), softened by the child's process noise
+  /// to `ξ̃ = ξ/(1 + Ω·ξ)` with `Ω = γ/π̂`; `u` (overwritten) and `ξ̃`.
+  DeepKernelSource synapticFactors(int c) => _elementwise(
+    'weight-belief factors $c',
+    layers[c].size,
+    _synapticFactorsBody(c),
+  );
+
+  /// [synapticFactors]' body (expects `i`, `s`, `k` in scope).
+  String _synapticFactorsBody(int c) {
+    final layer = layers[c];
+    final ll = _l[c];
+    String S(LayerField f) => _s(c, f, 'k');
+    final e = StringBuffer();
+    if (c == 0) {
+      // clamped_layer_evidence: π of a volatile leaf, p(1 − p) of a
+      // binary or categorical one.
+      if (layer.kind == LayerKind.volatile) {
+        e.writeln('  let ev0 = ${S(LayerField.precision)};');
+      } else {
+        e
+          ..writeln('  let pr = ${S(LayerField.expectedMean)};')
+          ..writeln('  let ev0 = pr * (1.0f - pr);');
+      }
+      e.writeln('  let ev = fin0(ev0);');
+    } else {
+      e.writeln('  let ev = ${_at(ll.ev!, 'k')};');
+    }
+    e
+      ..writeln(
+        '  let noise = ${S(LayerField.effectivePrecision)} / '
+        'floorV(${S(LayerField.expectedPrecision)}, 1e-30f);',
+      )
+      ..writeln('  let fl = floorV(ev, 0.0f);')
+      ..writeln('  let soft = 1.0f / (1.0f + noise * fl);')
+      ..writeln(
+        '  var v = ${S(LayerField.mean)} - ${S(LayerField.expectedMean)};',
+      );
+    if (layer.kind != LayerKind.binary) {
+      e.writeln('  v = v * ${S(LayerField.precision)} * soft;');
+    }
+    e
+      ..writeln('  ${_at(ll.u!, 'k')} = -fin0(v)$_timesWeight;')
+      ..writeln('  ${_at(ll.soft!, 'k')} = fl * soft;');
+    return e.toString();
+  }
+
+  /// `evidence_pullback` into layer [l] from the softened evidence of the
+  /// layer below: `ξ_j = g'(μ̂_j)² Σ_a W_aj² ξ̃_a`, floored at zero (and
+  /// zero where not finite).
+  DeepKernelSource pullback(int l) {
+    final cols = layers[l].weights!.cols;
+    final w = _l[l].weights!;
+    return _gemm(
+      'evidence pullback $l',
+      m: '${layers[l].size}u',
+      mMax: layers[l].size,
+      n: 'U.b',
+      nMax: capacity,
+      depth: '${layers[l - 1].size}u',
+      a: 'sq(P[${w}u + k * ${cols}u + r])',
+      aAlongK: false,
+      b0: _at(_l[l - 1].soft!, 'k * $_bm + c'),
+      bAlongK: false,
+      epilogue: _pullbackEpilogue(l, 'r * $_bm + c'),
+      grid: (tm, tn) => _overSamples(layers[l].size, tm, tn),
+    );
+  }
+
+  /// Store layer [l]'s evidence at flat index [k] from `acc0`.
+  String _pullbackEpilogue(int l, String k) {
+    final d = _dg(_fn(l), _s(l, LayerField.expectedMean, k));
+    return '  let d = $d;\n'
+        '  let v = acc0 * (d * d);\n'
+        '  ${_at(_l[l].ev!, k)} = select(0.0f, max(v, 0.0f), isFinite(v));';
+  }
+
+  /// Layer [l]'s descent gradient `Σ_s u·h / div` and curvature increment
+  /// `Σ_s ξ̃·h² / div` (sample-weighted like the gradient), then the
+  /// weight-belief step ([_synapticStep]); split-K like [gradient].
+  List<DeepKernelSource> synapticGradient(int l) {
+    final w = layers[l].weights!;
+    final nc = w.rows, cols = w.cols;
+    final ll = _l[l], cl = _l[l - 1];
+    final splits = ll.splits;
+    final step = _synapticStep(l);
+    final gemm = _gemm(
+      'gradient layer $l${splits > 1 ? ' partial' : ''} (weight belief)',
+      m: '${nc}u',
+      mMax: nc,
+      n: '${cols}u',
+      nMax: cols,
+      depth: 'U.b',
+      a: _at(cl.u!, 'r * $_bm + k'),
+      a1: 'fin0(${_at(cl.soft!, 'r * $_bm + k')}) * ${_sampleWeight('k')}',
+      aAlongK: true,
+      b0: _at(ll.h!, 'c * $_bm + k'),
+      b1: 'fin0(sq(${_at(ll.h!, 'c * $_bm + k')}))',
+      bAlongK: true,
+      epilogue: splits > 1
+          ? '  let pi0 = split * ${nc * cols}u + r * ${cols}u + c;\n'
+                '  ${_at(ll.partial!, 'pi0')} = acc0;\n'
+                '  ${_at(ll.partial1!, 'pi0')} = acc1;'
+          : '  let g = ${_edge(l, 'acc0 / U.div')};\n'
+                '  let hh = ${_edge(l, 'acc1 / U.div')};\n'
+                '  let wi = r * ${cols}u + c;\n$step',
+      grid: (tm, tn) =>
+          (_) => ((cols + tn - 1) ~/ tn, (nc + tm - 1) ~/ tm),
+      splits: splits,
+    );
+    if (splits == 1) return [gemm];
+    final n = nc * cols;
+    return [
+      gemm,
+      _kernel('gradient layer $l apply (weight belief)', '''
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let wi = gid.x;
+  if (wi >= ${n}u) { return; }
+  var sum = 0.0f;
+  var sum1 = 0.0f;
+  for (var sp = 0u; sp < ${splits}u; sp++) {
+    sum += ${_at(ll.partial!, 'sp * ${n}u + wi')};
+    sum1 += ${_at(ll.partial1!, 'sp * ${n}u + wi')};
+  }
+  let r = wi / ${cols}u; let c = wi % ${cols}u;
+  let g = ${_edge(l, 'sum / U.div')};
+  let hh = ${_edge(l, 'sum1 / U.div')};
+$step
+}
+''', (_) => ((n + 63) ~/ 64, 1)),
+    ];
+  }
+
+  /// `_apply_synaptic_uncertainty_updates` for weight `wi = (r, c)` of
+  /// layer [l] from its gradient `g` and curvature increment `hh`: with
+  /// `π = max(Δ + π_p, 1e-30)`, `w ← w − α·g/π + (π_p/(N·π))·(μ_p − w)`
+  /// and `Δ ← Δ + c·H − Δ/N`. In a one-to-one layer only the diagonal
+  /// moves.
+  String _synapticStep(int l) {
+    final ll = _l[l];
+    final w = _p(ll.weights!, 'wi'), d = _p(ll.delta!, 'wi');
+    final dense = layers[l].config.fullyConnected;
+    return '''
+  ${dense ? '{' : 'if (r == c) {'}
+    let dk = $d;
+    let piw = floorV(dk + U.synPrior, 1e-30f);
+    let wv = $w;
+    let reversion = (U.synPrior / (U.synWindow * piw)) * (U.synMean - wv);
+    let upd = -U.lr * g / piw + reversion;
+    $d = dk + U.synScale * hh - dk / U.synWindow;
+    $w = wv + upd;
+  }''';
   }
 
   /// Gradient [g] of weight `(r, c)` of layer [l]: zero off the diagonal
@@ -1277,8 +1603,11 @@ $step
           : _p(_l[l].prior!, i);
       body.writeln('  ${first == 0 ? '' : 'else '}if (node < ${first + n}u) {');
       body.writeln('    let i = node - ${first}u;');
-      if (l == nLayers - 1) {
-        // The top layer's batch beliefs are its own (never predicted).
+      final top = l == nLayers - 1;
+      if (top && !_reachTop) {
+        // The top layer's batch beliefs are its own (never predicted): the
+        // same carried value for every sample, so the (weighted) mean
+        // increment is the increment times the weights' sum.
         if (carries) {
           final tp = _t(l, LayerField.precision, 'i');
           body
@@ -1287,17 +1616,18 @@ $step
             ..writeln(
               '      let v = ${carried('tp', _t(l, LayerField.conditionalExpectedPrecision, 'i'), _t(l, LayerField.expectedPrecision, 'i'), 'i')};',
             )
-            ..writeln('      $tp = tp + (v - tp);')
+            ..writeln('      $tp = tp + (v - tp) * U.wsum;')
             ..writeln('    }');
         }
         body.writeln('  }');
         first += n;
         continue;
       }
+      // (A top layer the sweeps reach has only its precision updated.)
       final fields = [
         LayerField.precision,
-        if (vol) LayerField.meanVol,
-        if (vol) LayerField.precisionVol,
+        if (vol && !top) LayerField.meanVol,
+        if (vol && !top) LayerField.precisionVol,
       ];
       for (var f = 0; f < fields.length; f++) {
         body
@@ -1306,7 +1636,8 @@ $step
       }
       body
         ..writeln('    for (var s = t; s < U.b; s += 256u) {')
-        ..writeln('      let k = i * $_bm + s;');
+        ..writeln('      let k = i * $_bm + s;')
+        ..writeln('      let ws = ${_sampleWeight('s')};');
       for (var f = 0; f < fields.length; f++) {
         var v = _s(l, fields[f], 'k');
         if (f == 0 && carries) {
@@ -1317,7 +1648,7 @@ $step
             'i',
           );
         }
-        body.writeln('      sum$f += ($v) - t$f;');
+        body.writeln('      sum$f += ws * (($v) - t$f);');
       }
       body.writeln('    }');
       for (var f = 0; f < fields.length; f++) {
@@ -1339,7 +1670,7 @@ $step
         ..writeln('    if (t == 0u) {');
       for (var f = 0; f < fields.length; f++) {
         body.writeln(
-          '      ${_t(l, fields[f], 'i')} = t$f + red[${f * 256}u] / f32(U.b);',
+          '      ${_t(l, fields[f], 'i')} = t$f + red[${f * 256}u] / U.div;',
         );
       }
       body

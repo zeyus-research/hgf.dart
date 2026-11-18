@@ -11,7 +11,7 @@ export 'src/config.dart';
 export 'src/continuous.dart' show ContinuousTopology;
 export 'src/deep_network.dart';
 export 'src/init.dart';
-export 'src/kernels.dart' show DeepSettings, Layer;
+export 'src/kernels.dart' show DeepSettings, Layer, sweepsReachTop;
 export 'src/matrix.dart';
 export 'src/optimiser.dart';
 export 'src/state.dart';

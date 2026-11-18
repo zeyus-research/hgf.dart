@@ -5,7 +5,9 @@ t·exp(κ μ_b + ω̃) without the Σ κ²/(2 π̂) terms of the relaxed predict
 at μ_b = μ̂_b it isn't the child's predicted precision. The increment is then
 floored at 0 on most trials, the volatility parent never gains precision, and
 the network goes NaN. Mean-field (no MGF terms in its prediction) is fine.
-The patched run uses gen_fixtures' ``_MgfCorrection`` (the proposed fix).
+
+Fixed upstream in pyhgf #480 (``4db3b093``): from there on, every row below
+stays finite and x2 gains precision on most trials.
 """
 
 import numpy as np
@@ -38,8 +40,3 @@ spec = g.continuous_3level("eHGF")
 rs = g.build_rs(spec)
 rs.input_data(input_data=y[:, None].tolist())
 report("rshgf eHGF, relaxed", dict(enumerate(rs.node_trajectories)))
-
-net = g.build_jax(g.continuous_3level("eHGF"))
-with g._MgfCorrection():
-    net.input_data(input_data=y[:, None])
-report("JAX eHGF, relaxed + MGF correction", net.node_trajectories)

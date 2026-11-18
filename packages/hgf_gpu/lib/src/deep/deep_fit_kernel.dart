@@ -1,6 +1,6 @@
 part of 'deep_kernels.dart';
 
-/// The uniform of [SequentialFitKernel.sequentialFit] (64 bytes).
+/// The uniform of [SequentialFitKernel.sequentialFit] (80 bytes).
 const _fitUniformStruct = '''
 struct Uniform {
   members: u32,
@@ -17,6 +17,10 @@ struct Uniform {
   b2: f32,
   eps: f32,
   epsRoot: f32,
+  synPrior: f32,
+  synWindow: f32,
+  synMean: f32,
+  synScale: f32,
   pad0: u32,
   pad1: u32,
 }
@@ -29,6 +33,9 @@ abstract final class DeepFitFlags {
   static const updatePrecisions = 2;
   static const predictions = 4;
 }
+
+/// Words of [SequentialFitKernel.sequentialFit]'s uniform.
+const deepFitUniformWords = 20;
 
 /// Workgroups along x before a grid wraps into y.
 const deepFitGridWidth = 65535;
@@ -43,9 +50,10 @@ extension SequentialFitKernel on DeepKernels {
   /// Per row, as `DeepNetwork.fit`: the prediction sweep (clamping x on top),
   /// the update sweep (clamping y at the bottom), with flag
   /// [DeepFitFlags.predictions] the bottom layer's expected means into
-  /// `OUT`, the weight gradient and one [optimiser] step (none when
-  /// `null`), and with [DeepFitFlags.updatePrecisions] the carried beliefs
-  /// into the member's own state.
+  /// `OUT`, the weight gradient and one [optimiser] step, or with
+  /// [synaptic] one step of the weight-belief rule (none when neither),
+  /// and with [DeepFitFlags.updatePrecisions] the carried beliefs into the
+  /// member's own state.
   ///
   /// Member `e` reads `X[e·xStride + row·topSize + i]` (stride 0: shared
   /// data), `Y` likewise, and writes `OUT[e·outStride + row·bottomSize + i]`.
@@ -53,10 +61,16 @@ extension SequentialFitKernel on DeepKernels {
   /// `BC[2·row + 1]`.
   DeepKernelSource sequentialFit({
     DeepOptimiserKind? optimiser,
+    bool synaptic = false,
     int workgroupSize = 64,
   }) {
     if (!sequentialLayout) {
       throw StateError('Build the kernels with DeepKernels.sequential.');
+    }
+    if (synaptic && (optimiser != null || !weightBeliefs)) {
+      throw StateError(
+        'The weight-belief rule needs weightBeliefs and no optimiser.',
+      );
     }
     final wg = '${workgroupSize}u';
     final top = nLayers - 1;
@@ -162,7 +176,9 @@ extension SequentialFitKernel on DeepKernels {
     // Update sweep.
     nodes(bottomSize, _bottomBody('Y[yb + row * ${bottomSize}u + i]'));
     barrier();
-    for (var l = 1; l < top; l++) {
+    // The interior posteriors, and the top layer's precision when the
+    // sweeps reach it.
+    for (var l = 1; l < (_reachTop ? nLayers : top); l++) {
       final cl = _l[l - 1];
       final cols = layers[l].weights!.cols;
       b
@@ -217,6 +233,49 @@ extension SequentialFitKernel on DeepKernels {
           ..writeln('    }');
       }
     }
+    if (synaptic) {
+      for (var l = 1; l < nLayers; l++) {
+        nodes(layers[l - 1].size, _synapticFactorsBody(l - 1));
+        barrier();
+        final w = layers[l].weights!;
+        final cols = w.cols;
+        if (l + 1 < nLayers) {
+          // Before layer l's step moves the weights it reads.
+          final soft = _l[l - 1].soft!;
+          b
+            ..writeln(
+              '    for (var r = lid; r < ${layers[l].size}u; r += $wg) {',
+            )
+            ..writeln('      var acc0 = 0.0f;')
+            ..writeln(
+              '      for (var j = 0u; j < ${layers[l - 1].size}u; j++) {',
+            )
+            ..writeln(
+              '        acc0 += sq(${_p(_l[l].weights!, 'j * ${cols}u + r')}) * '
+              '${_at(soft, 'j')};',
+            )
+            ..writeln('      }')
+            ..writeln(_pullbackEpilogue(l, 'r'))
+            ..writeln('    }');
+          barrier();
+        }
+        final cl = _l[l - 1], ll = _l[l];
+        b
+          ..writeln(
+            '    for (var wi = lid; wi < ${w.rows * cols}u; wi += $wg) {',
+          )
+          ..writeln('      let r = wi / ${cols}u; let c = wi % ${cols}u;')
+          ..writeln('      let hv = ${_at(ll.h!, 'c')};')
+          ..writeln('      let g = ${_edge(l, '${_at(cl.u!, 'r')} * hv')};')
+          ..writeln(
+            '      let hh = '
+            '${_edge(l, 'fin0(${_at(cl.soft!, 'r')}) * fin0(sq(hv))')};',
+          )
+          ..writeln(_synapticStep(l))
+          ..writeln('    }');
+        barrier();
+      }
+    }
 
     // Carry the beliefs into the member's own state.
     b.writeln('    if ((U.flags & ${DeepFitFlags.updatePrecisions}u) != 0u) {');
@@ -239,7 +298,8 @@ extension SequentialFitKernel on DeepKernels {
     }
     b.writeln('}');
     return _kernel(
-      'sequential fit${optimiser == null ? '' : ' (${optimiser.name})'}',
+      'sequential fit${optimiser == null ? '' : ' (${optimiser.name})'}'
+      '${synaptic ? ' (weight belief)' : ''}',
       b.toString(),
       (members) => (
         math.min(members, deepFitGridWidth),
@@ -266,7 +326,19 @@ extension SequentialFitKernel on DeepKernels {
       String t(LayerField f) => _t(l, f, 'i');
       String s(LayerField f) => _s(l, f, 'i');
       final body = StringBuffer();
-      if (l == nLayers - 1) {
+      if (l == nLayers - 1 && _reachTop) {
+        // The sweeps updated the top layer's precision (only).
+        final p = carries
+            ? carried(
+                s(LayerField.precision),
+                s(LayerField.conditionalExpectedPrecision),
+                s(LayerField.expectedPrecision),
+                'i',
+                l,
+              )
+            : s(LayerField.precision);
+        body.writeln('        ${t(LayerField.precision)} = $p;');
+      } else if (l == nLayers - 1) {
         // The top layer's beliefs are its own (never predicted).
         if (!carries) continue;
         body.writeln(

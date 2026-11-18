@@ -344,8 +344,8 @@ dart run hgf_fit:export model.json --to python --fit nuts --data data.csv
   after building written to `net.attributes`, and a PyMC model (the priors,
   the network's log-likelihood from JAX via `pytensor.wrap_jax`) fitted
   with `pm.find_MAP` or `pm.sample`. What pyhgf can't express is said in
-  the script: hgf.dart's eHGF MGF correction, the dp-state surprise, an
-  input node's tonic volatility set after building (pyhgf resets it).
+  the script: the dp-state surprise, an input node's tonic volatility set
+  after building (pyhgf resets it).
 
 `NetworkPlan` recovers the builder calls from a snapshot (implied nodes
 folded back into `addEfState` / `addCategoricalState`) and checks that

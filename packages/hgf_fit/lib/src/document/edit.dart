@@ -10,7 +10,6 @@ extension NetworkDocumentEdits on NetworkDocument {
   NetworkDocument copyWith({
     VolatilityUpdates? volatilityUpdates,
     bool? meanFieldUpdates,
-    bool? ehgfMgfCorrection,
     NetworkFixes? fixes,
     List<DocNode>? nodes,
     List<DocEdge>? edges,
@@ -18,7 +17,6 @@ extension NetworkDocumentEdits on NetworkDocument {
   }) => NetworkDocument(
     volatilityUpdates: volatilityUpdates ?? this.volatilityUpdates,
     meanFieldUpdates: meanFieldUpdates ?? this.meanFieldUpdates,
-    ehgfMgfCorrection: ehgfMgfCorrection ?? this.ehgfMgfCorrection,
     fixes: fixes ?? this.fixes,
     maxPosteriorPrecision: maxPosteriorPrecision,
     precisionClippingValue: precisionClippingValue,

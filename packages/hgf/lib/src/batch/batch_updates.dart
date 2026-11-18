@@ -739,7 +739,7 @@ extension on BatchNetwork {
     // mean.
     _bObservedChildren(i, lo, m, flags);
     _bValuePrecisionWpe(i, lo, m, meanField, t, wpe);
-    final mgf = !meanField && ehgfMgfCorrection;
+    final mgf = !meanField;
     final volcK = _volcK;
     final eff = _effectivePrecision,
         vopeC = _volatilityPredictionError,
