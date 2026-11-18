@@ -253,7 +253,10 @@ class NodeCard extends StatelessWidget {
     final net = pg.network;
     final kind = net.kindOf(i);
     final input = pg.layout.level[i] == 0;
-    final defs = paramsFor(kind, input: input);
+    // With HGF learning, an ef-state node's ν follows its parents.
+    final defs = kind == NodeKind.efState && net.valueParentsOf(i).isNotEmpty
+        ? const <ParamDef>[]
+        : paramsFor(kind, input: input);
     // Couplings between continuous and binary nodes; the edges into
     // categorical and dp-state nodes are fixed by those nodes.
     bool scalar(int j) =>
@@ -345,6 +348,15 @@ String? _about(Network net, int i) {
       if (children.isNotEmpty) {
         return 'A cluster of ${defaultNodeLabel(children.first)}: it learns '
             'the mean and variance of the observations assigned to it.';
+      }
+      final parents = net.valueParentsOf(i);
+      if (parents.isNotEmpty) {
+        return 'Learns the expected sufficient statistics (x, x²) of its '
+            'observations, so their mean and variance. Each statistic is '
+            'observed by its own node (${parents.map(defaultNodeLabel).join(', ')}); '
+            'its rate 1/(1 + ν) is how much those nodes\' value parents '
+            'move per unit of prediction error. It has no parameters of its '
+            'own: edit the nodes above it.';
       }
       return 'Learns the expected sufficient statistics (x, x²) of its '
           'observations, so their mean and variance, at a fixed rate.';

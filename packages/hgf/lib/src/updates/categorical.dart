@@ -28,12 +28,23 @@ extension on Network {
   /// divergence from the previous α, the summed binary surprise, and
   /// replaces the node's mean with the updated probabilities `σ(μ_p)`.
   ///
-  /// As in pyhgf, nothing checks `observed`: on a missing observation
-  /// `Δ = 0` and α becomes ±∞ (KL NaN for that trial and the next).
+  /// pyhgf checks no `observed` flag: on a missing observation `Δ = 0` and
+  /// α becomes ±∞ (KL NaN for that trial and the next). With
+  /// [NetworkFixes.categoricalMissing] an unobserved node keeps α and
+  /// records a KL divergence and a surprise of 0 (P12).
   void _posteriorCategorical(int c) {
     final x = _vMean, alpha = _alpha, next = _alphaScratch;
     final m0 = _vMeanStart[c], a0 = _alphaStart[c];
     final vp0 = _vpStart[c], n = _vpStart[c + 1] - vp0;
+    if (fixes.categoricalMissing && _observed[c] == 0.0) {
+      for (var i = 0; i < n; i++) {
+        x[m0 + i] = sigmoid(_mean[_vpIdx[_vpStart[_vpIdx[vp0 + i]]]]);
+      }
+      _klDivergence[c] = 0.0;
+      _surprise[c] = 0.0;
+      _mean[c] = x[m0];
+      return;
+    }
     var surprise = 0.0;
     for (var i = 0; i < n; i++) {
       final b = _vpIdx[vp0 + i];

@@ -37,11 +37,27 @@ void main() {
   });
 
   test('unsupported node kinds and couplings throw', () {
-    final categorical = Network()..addCategoricalState(nCategories: 3);
-    expect(() => HgfKernel(categorical), throwsUnsupportedError);
+    final dp = Network()
+      ..addDpState(batchSize: 2)
+      ..addEfState(nNodes: 2, valueChildren: [0]);
+    expect(() => HgfKernel(dp), throwsUnsupportedError);
+    // A categorical node whose binary node's parent has another child.
+    final shared = Network()
+      ..addCategoricalState(nCategories: 2)
+      ..addNodes(valueParents: [3]);
+    expect(() => HgfKernel(shared), throwsUnsupportedError);
+    expect(
+      () => HgfKernel(
+        Network()..addNodes(),
+        response: GpuResponse.categoricalSurprise,
+      ),
+      throwsArgumentError,
+    );
     // ef-state learning whose rate-scaling node has another child.
-    final shared = Network()..addEfState(learning: EfLearning.hgf1);
-    expect(HgfKernel(shared).nColumns, 1);
+    expect(
+      HgfKernel(Network()..addEfState(learning: EfLearning.hgf1)).nColumns,
+      1,
+    );
     final extra = Network()
       ..addEfState(learning: EfLearning.hgf1)
       ..addNodes(valueParents: [2]);
@@ -126,6 +142,70 @@ void main() {
             ..writeAsStringSync(kernel.source);
           final r = Process.runSync('naga', [f.path]);
           expect(r.exitCode, 0, reason: '$mode $options\n${r.stderr}');
+        }
+      }
+    }
+  });
+
+  test('categorical networks: columns, slots and valid WGSL', () {
+    final dir = Directory.systemTemp.createTempSync('hgf_cat_wgsl');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    var k = 0;
+    for (final mode in VolatilityUpdates.values) {
+      for (final meanField in [false, true]) {
+        final nets = [
+          Network(volatilityUpdates: mode, meanFieldUpdates: meanField)
+            ..addCategoricalState(nCategories: 3),
+          Network(
+              volatilityUpdates: mode,
+              meanFieldUpdates: meanField,
+              fixes: NetworkFixes.none,
+            )
+            ..addNodes()
+            ..addNodes(valueChildren: [0])
+            ..addCategoricalState(nCategories: 4)
+            ..addCategoricalState(nCategories: 2),
+        ];
+        for (final net in nets) {
+          for (final response in [
+            GpuResponse.categoricalSurprise,
+            GpuCategoricalSoftmax(
+              node: net.inputIdxs.lastWhere(
+                (i) => net.kindOf(i) == NodeKind.categoricalState,
+              ),
+              inverseTemperature: 2,
+            ),
+          ]) {
+            final kernel = HgfKernel(
+              net,
+              response: response,
+              observedMask: true,
+              timeSteps: true,
+            );
+            expect(kernel.nColumns, net.nInputColumns);
+            for (var i = 0; i < net.nNodes; i++) {
+              if (net.kindOf(i) != NodeKind.categoricalState) {
+                expect(kernel.vectorLength(i, VectorField.alpha), 0);
+                continue;
+              }
+              for (final f in [VectorField.alpha, VectorField.mean]) {
+                final v = net.getInitialVector(i, f);
+                expect(kernel.vectorLength(i, f), v.length);
+                for (var q = 0; q < v.length; q++) {
+                  expect(kernel.initial[kernel.vectorSlot(i, f, q)], v[q]);
+                }
+              }
+              expect(
+                kernel.slot(i, NodeField.klDivergence),
+                kernel.slot(i, NodeField.surprise) - 1,
+              );
+            }
+            if (!naga) continue;
+            final f = File('${dir.path}/c${k++}.wgsl')
+              ..writeAsStringSync(kernel.source);
+            final r = Process.runSync('naga', [f.path]);
+            expect(r.exitCode, 0, reason: '$mode $response\n${r.stderr}');
+          }
         }
       }
     }

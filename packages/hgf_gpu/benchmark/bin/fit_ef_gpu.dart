@@ -1,5 +1,5 @@
-// ef-state models' likelihood passes (value, and value + gradient) on the
-// GPU (GpuFitter) against the CPU (HgfModel.negLogPosterior on one
+// ef-state and categorical models' likelihood passes (value, and value +
+// gradient) on the GPU (GpuFitter) against the CPU (HgfModel.negLogPosterior on one
 // isolate, f64 BatchNetwork). From packages/hgf_gpu:
 //
 //   dart compile exe benchmark/bin/fit_ef_gpu.dart -o .dart_tool/fit_ef_gpu
@@ -42,7 +42,50 @@ Float64List _series(int n, int d, math.Random rng) {
   return out;
 }
 
-typedef _Case = ({String name, HgfModel model, int columns});
+/// [n] one-hot rows over [k] categories; the likely category moves every
+/// 40 trials.
+Float64List _categories(int n, int k, math.Random rng) {
+  final out = Float64List(n * k);
+  for (var t = 0; t < n; t++) {
+    final c = rng.nextDouble() < 0.7 ? (t ~/ 40) % k : rng.nextInt(k);
+    out[t * k + c] = 1;
+  }
+  return out;
+}
+
+typedef _Case = ({
+  String name,
+  HgfModel model,
+  Float64List Function(int n, math.Random rng) data,
+});
+
+/// A categorical node over [k] categories at 0 (binary nodes 1..k, their
+/// value parents k+1..2k, the volatility parent 2k+1), scored by the
+/// categorical surprise.
+_Case _categorical(int k) => (
+  name: 'categorical, $k categories (${2 * k + 2} nodes)',
+  data: (n, rng) => _categories(n, k, rng),
+  model: HgfModel(
+    network: Network()..addCategoricalState(nCategories: k),
+    response: const ObservationSurprise(CategoricalSurprise()),
+    parameters: [
+      Parameter(
+        'omega2',
+        targets: [
+          for (var i = k + 1; i <= 2 * k; i++)
+            NodeTarget(i, NodeField.tonicVolatility),
+        ],
+        prior: const Normal(-4, 2),
+      ),
+      Parameter.node(
+        'omega3',
+        2 * k + 1,
+        NodeField.tonicVolatility,
+        prior: const Normal(-6, 2),
+      ),
+    ],
+  ),
+);
 
 List<_Case> _cases() {
   // Statistic s of an HGF-k ef-state node at 0: its node, then its value
@@ -54,7 +97,7 @@ List<_Case> _cases() {
   return [
     (
       name: '1-d ef-state, HGF-2 (7 nodes)',
-      columns: 1,
+      data: (n, rng) => _series(n, 1, rng),
       model: HgfModel(
         network: Network()..addEfState(learning: EfLearning.hgf2),
         response: const ObservationSurprise(TotalGaussianSurprise()),
@@ -74,7 +117,7 @@ List<_Case> _cases() {
     ),
     (
       name: '2-d ef-state, HGF-2 (16 nodes)',
-      columns: 2,
+      data: (n, rng) => _series(n, 2, rng),
       model: HgfModel(
         network: Network()..addEfState(dimension: 2, learning: EfLearning.hgf2),
         response: const ObservationSurprise(TotalGaussianSurprise()),
@@ -92,6 +135,8 @@ List<_Case> _cases() {
         ],
       ),
     ),
+    _categorical(3),
+    _categorical(8),
   ];
 }
 
@@ -119,7 +164,7 @@ Future<void> main(List<String> args) async {
   for (final c in _cases()) {
     final rng = math.Random(5);
     final subjects = [
-      for (var s = 0; s < 16; s++) Subject(inputs: _series(nT, c.columns, rng)),
+      for (var s = 0; s < 16; s++) Subject(inputs: c.data(nT, rng)),
     ];
     final model = c.model;
     final k = model.dimension;

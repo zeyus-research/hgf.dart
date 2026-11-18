@@ -8,14 +8,23 @@ import '../../../hgf_fit/test/src/fit_cases.dart';
 
 export '../../../hgf_fit/test/src/fit_cases.dart';
 
+bool _none(String _) => false;
+
+/// Checks every fit case (but those [skip] names) on [fitter] against the
+/// CPU; returns the failures.
 Future<List<String>> checkFitCases(
   GpuFitter fitter, {
   double valueTol = 2e-5,
   double gradientTol = 2e-3,
   void Function(String)? log,
+  bool Function(String name) skip = _none,
 }) async {
   final failures = <String>[];
   for (final c in fitCases()) {
+    if (skip(c.name)) {
+      log?.call('${c.name}: skipped');
+      continue;
+    }
     final model = c.model, k = model.dimension;
     final n = c.subjects.length * c.points.length;
     final subjectOf = Int32List(n);

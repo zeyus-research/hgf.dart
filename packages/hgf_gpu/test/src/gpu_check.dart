@@ -56,15 +56,24 @@ double _perturbed(Network net, int i, NodeField field, int e) =>
     };
 
 /// One fixture's result: null if it has no GPU kernel (the reason in
-/// [skipped]), else the max relative error (of the totals and of every
-/// ef-state node's final ξ), the non-finite mismatches, and the max relative
-/// error of the ef-state nodes' final ν (0 without any).
+/// [skipped]), else the max relative error (of the totals, of every
+/// ef-state node's final ξ and of every categorical node's final
+/// probabilities and surprise), the non-finite mismatches, the max relative
+/// error of the ef-state nodes' final ν and the categorical nodes' final α
+/// (0 without any), and the max error of the categorical nodes' final KL
+/// divergence relative to `1 + ln Γ(Σα)` ([klTolerance]).
 typedef FixtureResult = ({
   double maxRel,
   int nonFiniteMismatch,
   int finite,
   double nusRel,
+  double klRel,
 });
+
+/// The KL divergence of Dirichlet distributions is a sum of log-gamma
+/// terms that cancel (ln Γ(Σα) is ~30 where the KL is ~0.1), so in f32 its
+/// error is absolute, a few ulp of ln Γ(Σα).
+const klTolerance = 1e-5;
 
 Future<FixtureResult?> checkFixture(
   GpuBackend backend,
@@ -83,14 +92,19 @@ Future<FixtureResult?> checkFixture(
       : Float64List.fromList([
           for (final x in fixture['time_steps']! as List<Object?>) _decode(x),
         ]);
-  final bool binary;
+  final bool binary, categorical;
   try {
     net = spec.build()..build();
     binary = net.inputIdxs.every((i) => net.kindOf(i) == NodeKind.binaryState);
+    categorical = net.inputIdxs.any(
+      (i) => net.kindOf(i) == NodeKind.categoricalState,
+    );
     kernel = HgfKernel(
       net,
       response: binary
           ? GpuResponse.firstLevelBinarySurprise
+          : categorical
+          ? GpuResponse.categoricalSurprise
           : GpuResponse.totalGaussianSurprise,
       observedMask: observed != null,
       timeSteps: steps != null,
@@ -126,6 +140,8 @@ Future<FixtureResult?> checkFixture(
   }
   final ResponseFunction response = binary
       ? const FirstLevelBinarySurprise()
+      : categorical
+      ? const CategoricalSurprise()
       : const TotalGaussianSurprise();
   // A lone ef-state node has no continuous node to score (the CPU's
   // TotalGaussianSurprise refuses it; the kernel's sums nothing): its ξ are
@@ -139,7 +155,7 @@ Future<FixtureResult?> checkFixture(
   }
   final got = await gpu.surprise(data, observed: observed, timeSteps: steps);
   double rel(double a, double b) => (a - b).abs() / math.max(a.abs(), 1.0);
-  var maxRel = 0.0, mismatch = 0, finite = 0, nusRel = 0.0;
+  var maxRel = 0.0, mismatch = 0, finite = 0, nusRel = 0.0, klRel = 0.0;
   for (var e = 0; e < _elements; e++) {
     if (ref[e].isFinite != got[e].isFinite) {
       mismatch++;
@@ -167,12 +183,47 @@ Future<FixtureResult?> checkFixture(
       if (want.isFinite) nusRel = math.max(nusRel, rel(want, nus[e]));
     }
   }
+  for (var i = 0; i < net.nNodes; i++) {
+    if (net.kindOf(i) != NodeKind.categoricalState) continue;
+    // Without NetworkFixes.categoricalMissing the CPU's α is ±∞ after an
+    // unobserved trial, and its KL NaN then and on the next trial; the
+    // kernel keeps α: compared where the CPU's are finite.
+    for (var k = 0; k < kernel.vectorLength(i, VectorField.alpha); k++) {
+      final alpha = await gpu.readVector(i, VectorField.alpha, k);
+      final p = await gpu.readVector(i, VectorField.mean, k);
+      for (var e = 0; e < _elements; e++) {
+        final want = cpu.getVector(e, i, VectorField.alpha)[k];
+        if (want.isFinite) nusRel = math.max(nusRel, rel(want, alpha[e]));
+        maxRel = math.max(
+          maxRel,
+          rel(cpu.getVector(e, i, VectorField.mean)[k], p[e]),
+        );
+      }
+    }
+    final kl = await gpu.read(i, NodeField.klDivergence);
+    final s = await gpu.read(i, NodeField.surprise);
+    for (var e = 0; e < _elements; e++) {
+      final want = cpu.get(e, i, NodeField.klDivergence);
+      if (want.isFinite) {
+        var total = 0.0;
+        for (final a in cpu.getVector(e, i, VectorField.alpha)) {
+          total += a;
+        }
+        klRel = math.max(
+          klRel,
+          (want - kl[e]).abs() / (1 + logGamma(total).abs()),
+        );
+      }
+      maxRel = math.max(maxRel, rel(cpu.get(e, i, NodeField.surprise), s[e]));
+    }
+  }
   gpu.dispose();
   return (
     maxRel: maxRel,
     nonFiniteMismatch: mismatch,
     finite: finite,
     nusRel: nusRel,
+    klRel: klRel,
   );
 }
 
@@ -194,11 +245,15 @@ Future<List<String>> checkAll(
     print(
       '$name: max rel ${r.maxRel.toStringAsExponential(2)}, '
       '${r.finite} finite, ${r.nonFiniteMismatch} non-finite mismatches'
-      '${r.nusRel > 0 ? ', ν ${r.nusRel.toStringAsExponential(2)}' : ''}',
+      '${r.nusRel > 0 ? ', ν/α ${r.nusRel.toStringAsExponential(2)}' : ''}'
+      '${r.klRel > 0 ? ', KL ${r.klRel.toStringAsExponential(2)}' : ''}',
     );
     if (outOfRange.contains(name)) continue;
     final tol = sensitive[name] ?? tolerance;
-    if (r.nonFiniteMismatch != 0 || r.maxRel > tol || r.nusRel > tolerance) {
+    if (r.nonFiniteMismatch != 0 ||
+        r.maxRel > tol ||
+        r.nusRel > tolerance ||
+        r.klRel > klTolerance) {
       failures.add('$name: $r');
     }
   }

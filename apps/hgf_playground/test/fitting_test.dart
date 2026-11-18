@@ -13,7 +13,7 @@ import 'package:hgf_playground/src/ui/fit_card.dart';
 Future<FitWorkers> _inline([int? _]) => FitWorkers.spawn(count: 0);
 
 void main() {
-  test('candidates per preset; ef nodes are not fitted', () {
+  test('candidates per preset; fixed-rate ef nodes are not fitted', () {
     for (final p in presets) {
       final f = Fitting(
         Playground(presetId: p.id, nTrials: 50),
@@ -153,6 +153,48 @@ void main() {
     f.setMethod(FitMethod.map);
     expect(f.wantsGpu, isFalse);
   });
+
+  test(
+    'categorical and ef HGF fits run on the GPU when there is one',
+    () async {
+      for (final id in ['categorical3', 'ef_hgf']) {
+        final pg = Playground(presetId: id, nTrials: 300);
+        final gpu = Fitting(
+          pg,
+          spawnWorkers: _inline,
+          config: const FitConfig(device: FitDevice.gpu, restarts: 0),
+        )..simulateAgent(seed: 4);
+        await gpu.fit();
+        expect(gpu.error, isNull, reason: id);
+        final r = gpu.result!;
+        if (r.where != 'the GPU') {
+          markTestSkipped('No GPU: ${r.deviceNote}');
+          return;
+        }
+        // Not the CPU fallback: the model has a kernel.
+        expect(r.deviceNote, isNull, reason: id);
+        // The CPU, in f64, finds the same optimum from the same responses.
+        final cpu = Fitting(
+          pg,
+          spawnWorkers: _inline,
+          config: const FitConfig(device: FitDevice.cpu, restarts: 0),
+        )..loadResponses(gpu.responses!, 'the GPU fit\'s');
+        await cpu.fit();
+        final c = cpu.result!;
+        expect(c.estimates, hasLength(r.estimates.length), reason: id);
+        for (var k = 0; k < c.estimates.length; k++) {
+          expect(
+            r.estimates[k].estimate,
+            closeTo(
+              c.estimates[k].estimate,
+              1e-3 * (1 + c.estimates[k].estimate.abs()),
+            ),
+            reason: '$id ${c.estimates[k].param.id}',
+          );
+        }
+      }
+    },
+  );
 
   test('a new worker count respawns the pool', () async {
     final asked = <int?>[];

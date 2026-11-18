@@ -364,13 +364,19 @@ final class UpdateSequence {
 /// without `fixes:`; [none] reproduces pyhgf, as the parity tests do, until
 /// the fixes reach pyhgf.
 final class NetworkFixes {
-  const NetworkFixes({this.constantNoiseVariance = false});
+  const NetworkFixes({
+    this.constantNoiseVariance = false,
+    this.categoricalMissing = false,
+  });
 
   /// Every correction off: pyhgf's behaviour.
   static const none = NetworkFixes();
 
   /// Every correction on.
-  static const recommended = NetworkFixes(constantNoiseVariance: true);
+  static const recommended = NetworkFixes(
+    constantNoiseVariance: true,
+    categoricalMissing: true,
+  );
 
   /// P21: the noise prediction error of an input with noise parents
   /// (pyhgf #477) adds the posterior variance of each value parent,
@@ -380,25 +386,39 @@ final class NetworkFixes {
   /// bias parent adds none, as with the equivalent tonic drift.
   final bool constantNoiseVariance;
 
+  /// P12: pyhgf's categorical posterior doesn't check `observed`. On a
+  /// missing observation the binary HGFs learn nothing, so `Δ = 0` and
+  /// `α = ±∞` (the KL divergence NaN on that trial and the next), and the
+  /// node's surprise scores whatever the empty cells hold. With this fix an
+  /// unobserved categorical node keeps its α, records a KL divergence and
+  /// a surprise of 0, and its mean is still the binary HGFs' current
+  /// probabilities (their predictions).
+  final bool categoricalMissing;
+
   /// As JSON (`Network.toJson`, [NetworkSpec]'s `"fixes"`).
   Map<String, Object?> toJson() => {
     'constant_noise_variance': constantNoiseVariance,
+    'categorical_missing': categoricalMissing,
   };
 
-  /// From [toJson]'s output; missing keys are off.
+  /// From [toJson]'s output; missing keys are off (a network saved before a
+  /// fix existed runs as it did).
   factory NetworkFixes.fromJson(Map<String, Object?> json) => NetworkFixes(
     constantNoiseVariance: (json['constant_noise_variance'] as bool?) ?? false,
+    categoricalMissing: (json['categorical_missing'] as bool?) ?? false,
   );
 
   @override
   bool operator ==(Object other) =>
       other is NetworkFixes &&
-      other.constantNoiseVariance == constantNoiseVariance;
+      other.constantNoiseVariance == constantNoiseVariance &&
+      other.categoricalMissing == categoricalMissing;
 
   @override
-  int get hashCode => constantNoiseVariance.hashCode;
+  int get hashCode => Object.hash(constantNoiseVariance, categoricalMissing);
 
   @override
   String toString() =>
-      'NetworkFixes(constantNoiseVariance: $constantNoiseVariance)';
+      'NetworkFixes(constantNoiseVariance: $constantNoiseVariance, '
+      'categoricalMissing: $categoricalMissing)';
 }

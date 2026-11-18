@@ -1,5 +1,6 @@
 import 'package:hgf/hgf.dart'
     show
+        CategoricalSurprise,
         FirstLevelBinarySurprise,
         FirstLevelGaussianSurprise,
         TotalGaussianSurprise;
@@ -43,10 +44,13 @@ GpuResponse irResponseOf(ResponseModel response) => switch (response) {
     ),
   BinarySoftmaxReadout(:final node, :final inverseTemperature) =>
     GpuBinarySoftmax(node: node, inverseTemperature: inverseTemperature),
+  CategoricalSoftmaxReadout(:final node, :final inverseTemperature) =>
+    GpuCategoricalSoftmax(node: node, inverseTemperature: inverseTemperature),
   ObservationSurprise(:final function) => switch (function) {
     TotalGaussianSurprise() => GpuResponse.totalGaussianSurprise,
     FirstLevelGaussianSurprise() => GpuResponse.firstLevelGaussianSurprise,
     FirstLevelBinarySurprise() => GpuResponse.firstLevelBinarySurprise,
+    CategoricalSurprise() => GpuResponse.categoricalSurprise,
     _ => throw UnsupportedError('${function.runtimeType} has no GPU kernel'),
   },
   _ => throw UnsupportedError('${response.runtimeType} has no GPU kernel'),

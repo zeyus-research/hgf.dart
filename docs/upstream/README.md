@@ -31,7 +31,7 @@ but did not fix it.
 | [P9](#p9) | pyhgf | licence: MIT in `LICENSE`, GPL-3.0 in `pyproject.toml` | to settle | [ ] |
 | [P10](#p10) | pyhgf JAX | `categorical-state` with `n_nodes > 1` builds a broken graph | medium | [ ] |
 | [P11](#p11) | pyhgf JAX | `add_categorical_state` ignores `binary_parameters`; docstring says `3n + 2` nodes | low | [ ] |
-| [P12](#p12) | pyhgf JAX | categorical α = ±∞ on missing observations | low | [ ] |
+| [P12](#p12) | pyhgf JAX | categorical α = ±∞ on missing observations, and the surprise scores the empty cells | medium: fits count missing trials | [ ] |
 | [P13](#p13) | pyhgf JAX | `dirichlet_kullback_leibler` NaN once Σα > 171 (Γ overflows) | low | fixed in #475 |
 | [P14](#p14) | pyhgf JAX | dp-state ignores `observed`: missing samples are clustered (NaN opens a NaN cluster) | medium | [ ] |
 | [P15](#p15) | pyhgf JAX | dp-state results depend on JAX's PRNG mode and precision; the tests pin the legacy mode | low | [ ] |
@@ -267,9 +267,16 @@ kl_divergence: [0.754 0.086 0.102 nan nan 0.1 0.046 0.067]
 binary HGFs get no prediction error, so Δ = σ(μ_p) − μ̂_b is exactly 0 and
 ν = δ/Δ − 1 = ±∞. The KL divergence is NaN on that trial and the next. The
 binary HGFs are unaffected, as is the next α (it doesn't depend on the old
-one). Like [P6](#p6). **Fix:** keep α, the mean and the surprise terms where
-`observed` is 0. **hgf.dart:** same as pyhgf (fixture
-`categorical_3_missing`).
+one). Like [P6](#p6). The node's surprise also scores the binary surprise of
+whatever the missing trial's cells hold (a row of zeros, say), so a model
+fitted to the categorical surprise counts trials that were never observed.
+**Fix:** where `observed` is 0, keep α, and record a KL divergence and a
+surprise of 0. The mean stays the binary HGFs' probabilities σ(μ_p), which
+are their predictions on that trial. **hgf.dart:**
+`NetworkFixes.categoricalMissing`, on by default (2026-11-18), in
+`Network`, `BatchNetwork`, `CategoricalSurprise`'s gradients and the GPU
+kernels; the parity fixture `categorical_3_missing` runs with
+`NetworkFixes.none`.
 
 ### P13
 

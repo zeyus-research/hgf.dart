@@ -152,7 +152,19 @@ extension on BatchNetwork {
     final cur = _alphaCurrent, next = _alphaNext;
     final m0 = _vMeanStart[c], a0 = _alphaStart[c];
     final vp0 = _vpStart[c], n = _vpStart[c + 1] - vp0;
+    final keep = fixes.categoricalMissing;
     for (var e = lo; e < hi; e++) {
+      if (keep && _observed[c * b + e] == 0.0) {
+        // P12 (NetworkFixes.categoricalMissing): α kept.
+        for (var i = 0; i < n; i++) {
+          final bn = _vpIdx[vp0 + i];
+          x[(m0 + i) * b + e] = sigmoid(_mean[_vpIdx[_vpStart[bn]] * b + e]);
+        }
+        _klDivergence[c * b + e] = 0.0;
+        _surprise[c * b + e] = 0.0;
+        _mean[c * b + e] = x[m0 * b + e];
+        continue;
+      }
       var surprise = 0.0;
       for (var i = 0; i < n; i++) {
         final bn = _vpIdx[vp0 + i];

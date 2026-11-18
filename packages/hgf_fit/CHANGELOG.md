@@ -1,5 +1,20 @@
 ## Unreleased
 
+- categorical-state nodes in the trial IR (so in `IrReverse` and the GPU
+  kernels): the indicators to the binary nodes, and with
+  `TrialCompiler.vectorState` α, the probabilities, the KL divergence
+  (`lgamma`, `digamma` and `expm1` in the WGSL prelude) and the surprise.
+  α's Δ comes from the gain of the binary node's parent, as ν's does for
+  ef-state. New IR responses `GpuResponse.categoricalSurprise` and
+  `GpuCategoricalSoftmax` (`irResponseOf` maps `CategoricalSurprise` and
+  `CategoricalSoftmaxReadout` to them). `TrialCompiler.efState` is now
+  `vectorState`, `efScaleNodes` `gainNodes`; `vectorSlot`,
+  `vectorLength` and `fieldSlot` address the vector slots. Two categorical
+  models in the shared fit cases (a softmax over 3 categories with missed
+  responses; the categorical surprise over 4 with missing observations and
+  time steps, mean-field eHGF).
+- The Dart export writes `NetworkFixes(..., categoricalMissing: ...)`;
+  the pyhgf export warns when a categorical input runs with P12's fix.
 - ef-state nodes in the trial IR (so in `IrReverse` and the GPU
   kernels): the sufficient statistics to the tracking parents, ν and ξ
   (`TrialCompiler.efState`: off in the likelihood kernels, which never

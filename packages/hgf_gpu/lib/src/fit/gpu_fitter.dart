@@ -19,7 +19,7 @@ import 'fit_kernel.dart';
 ///
 /// Passes that need `f64` ([Pass.precise]: finite differences, Hessians,
 /// the values `fitMap` reports) and models without a GPU kernel
-/// (categorical and dp-state nodes, custom couplings or response models)
+/// (dp-state nodes, custom couplings or response models)
 /// run on the CPU: on [cpu]
 /// if given, else on the calling isolate. So `laplace` and the final
 /// estimates of `fitMap` match the CPU's to `f64` accuracy at the optimum

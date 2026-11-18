@@ -179,6 +179,16 @@ final class GpuBatch {
   void setInitialXis(int node, int k, List<double> values) =>
       _setSlot(kernel.xisSlot(node, k), values);
 
+  /// Initial value of entry [k] of [node]'s vector [field] (an ef-state
+  /// node's `xis`, a categorical node's `alpha` or `mean`; see
+  /// [HgfKernel.vectorLength]), per element.
+  void setInitialVector(
+    int node,
+    VectorField field,
+    int k,
+    List<double> values,
+  ) => _setSlot(kernel.vectorSlot(node, field, k), values);
+
   void setValueCoupling(int parent, int child, List<double> values) =>
       _setSlot(kernel.valueCouplingSlot(parent, child), values);
 
@@ -356,8 +366,9 @@ final class GpuBatch {
 
   /// The final value of [field] of [node] per element, after [surprise].
   /// Only the fields a dispatch stores are current: the means and
-  /// precisions (expected and posterior) of every node, and an ef-state
-  /// node's [NodeField.nus].
+  /// precisions (expected and posterior) of every node, an ef-state
+  /// node's [NodeField.nus], and a categorical node's
+  /// [NodeField.klDivergence] and [NodeField.surprise].
   Future<Float64List> read(int node, NodeField field) =>
       _readSlot(kernel.slot(node, field));
 
@@ -365,6 +376,11 @@ final class GpuBatch {
   /// ef-state node [node] per element, after [surprise].
   Future<Float64List> readXis(int node, int k) =>
       _readSlot(kernel.xisSlot(node, k));
+
+  /// The final entry [k] of [node]'s vector [field] per element, after
+  /// [surprise] (see [HgfKernel.vectorLength]).
+  Future<Float64List> readVector(int node, VectorField field, int k) =>
+      _readSlot(kernel.vectorSlot(node, field, k));
 
   Future<Float64List> _readSlot(int slot) async {
     final raw = await backend.read(

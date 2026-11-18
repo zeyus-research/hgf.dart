@@ -7,6 +7,7 @@ import 'trial.dart';
 export 'trial.dart'
     show
         GpuBinarySoftmax,
+        GpuCategoricalSoftmax,
         GpuExprReadout,
         GpuGaussianReadout,
         GpuResponse,
@@ -34,7 +35,8 @@ final class HgfKernel {
   /// Compiles [network] (built if needed).
   ///
   /// A trial's row of data has [nColumns] values: one per scalar input
-  /// node, `dimension` for an ef-state input.
+  /// node, `dimension` for an ef-state input, one per category for a
+  /// categorical one.
   ///
   /// [perElementData]: each element gets its own observations
   /// (`data[t][column][element]`) and responses (`responses[t][element]`)
@@ -46,7 +48,7 @@ final class HgfKernel {
   /// a missed one.
   ///
   /// Throws [UnsupportedError] for node kinds and update steps without a
-  /// GPU kernel (categorical and dp-state nodes, custom couplings).
+  /// GPU kernel (dp-state nodes, custom couplings).
   factory HgfKernel(
     Network network, {
     GpuResponse response = GpuResponse.totalGaussianSurprise,
@@ -137,6 +139,14 @@ final class HgfKernel {
         ])
           if (trial.written.contains(TrialCompiler.fieldVar(i, f)))
             TrialCompiler.fieldVar(i, f),
+      // A categorical node's probabilities, KL divergence and surprise.
+      for (final i in c.categoricalNodes)
+        for (final v in [
+          for (var k = 0; k < c.categoryCount(i); k++) 'cx${i}_$k',
+          'kl$i',
+          'su$i',
+        ])
+          if (trial.written.contains(v)) v,
     };
     for (final v in slotOfVar.keys.where(stored.contains)) {
       src.writeln('  state[${slotOfVar[v]}u * B + e] = $v;');
@@ -218,14 +228,23 @@ final class HgfKernel {
   /// How many slots a dispatch loads and stores (diagnostic).
   final int loaded, stored;
 
-  /// Slot of [field] of [node]: a field of [gpuNodeFields], or an ef-state
-  /// node's [NodeField.nus].
-  int slot(int node, NodeField field) =>
-      field == NodeField.nus ? _c.nusSlot(node) : _c.slot(node, field);
+  /// Slot of [field] of [node]: a field of [gpuNodeFields], an ef-state
+  /// node's [NodeField.nus], or a categorical node's
+  /// [NodeField.klDivergence] or [NodeField.surprise].
+  int slot(int node, NodeField field) => _c.fieldSlot(node, field);
 
   /// Slot of ef-state node [node]'s expected sufficient statistic [k]
   /// (`VectorField.xis`).
   int xisSlot(int node, int k) => _c.xisSlot(node, k);
+
+  /// Slot of entry [k] of [node]'s vector [field].
+  int vectorSlot(int node, VectorField field, int k) =>
+      _c.vectorSlot(node, field, k);
+
+  /// The length of [node]'s vector [field] in the kernel: an ef-state
+  /// node's `xis`, a categorical node's `alpha` and `mean` (its
+  /// categories' probabilities); 0 for the others.
+  int vectorLength(int node, VectorField field) => _c.vectorLength(node, field);
 
   /// The number of sufficient statistics of ef-state node [node].
   int xisLength(int node) => _c.efStatistics(node);
@@ -267,7 +286,8 @@ final class HgfKernel {
   int get nInputs => inputs.length;
 
   /// Width of one trial's row of shared data: one column per scalar input
-  /// node, `dimension` per ef-state input.
+  /// node, `dimension` per ef-state input, one per category per
+  /// categorical input.
   final int nColumns;
 }
 

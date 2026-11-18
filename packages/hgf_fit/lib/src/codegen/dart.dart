@@ -47,7 +47,8 @@ final class DartExport {
         plan.fixes == NetworkFixes.none
             ? 'fixes: NetworkFixes.none'
             : 'fixes: NetworkFixes(constantNoiseVariance: '
-                  '${plan.fixes.constantNoiseVariance})',
+                  '${plan.fixes.constantNoiseVariance}, categoricalMissing: '
+                  '${plan.fixes.categoricalMissing})',
       if (plan.maxPosteriorPrecision != 1e10)
         'maxPosteriorPrecision: ${dartDouble(plan.maxPosteriorPrecision)}',
       if (plan.precisionClippingValue != 1e-6)

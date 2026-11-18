@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 
-import 'package:hgf/hgf.dart' hide lambertW0, logAddExp;
+import 'package:hgf/hgf.dart' hide digamma, lambertW0, logAddExp;
 
 import 'expr.dart';
 import 'ir.dart';
@@ -46,6 +46,11 @@ sealed class GpuResponse {
   /// `FirstLevelBinarySurprise`: the binary surprise of the input nodes.
   static const firstLevelBinarySurprise = _ObservationResponse('binary');
 
+  /// `CategoricalSurprise`: each categorical input's indicators under its
+  /// binary nodes' predictions (0 where it is unobserved, with
+  /// `NetworkFixes.categoricalMissing`).
+  static const categoricalSurprise = _ObservationResponse('categorical');
+
   /// Parameter defaults, in slot order.
   List<double> get defaults => const [];
 
@@ -86,6 +91,22 @@ final class GpuGaussianReadout extends GpuResponse {
 /// `σ(β logit μ̂_node)`. Parameter: `inverseTemperature`.
 final class GpuBinarySoftmax extends GpuResponse {
   const GpuBinarySoftmax({this.node = 0, this.inverseTemperature = 1.0});
+
+  final int node;
+  final double inverseTemperature;
+
+  @override
+  List<double> get defaults => [inverseTemperature];
+
+  @override
+  bool get usesResponses => true;
+}
+
+/// `CategoricalSoftmaxReadout`: category `k` of categorical [node] chosen
+/// with probability `μ̂ₖ^β / Σⱼ μ̂ⱼ^β`, `μ̂ₖ` the prediction of its `k`-th
+/// binary node. Parameter: `inverseTemperature`.
+final class GpuCategoricalSoftmax extends GpuResponse {
+  const GpuCategoricalSoftmax({this.node = 0, this.inverseTemperature = 1.0});
 
   final int node;
   final double inverseTemperature;
@@ -230,24 +251,27 @@ final class CompiledTrial {
 ///
 /// The slot layout: every node field of [gpuNodeFields] (`field * n +
 /// node`), the value edges, the volatility edges, each ef-state node's
-/// expected sufficient statistics ξ and learning rate ν ([xisSlot],
-/// [nusSlot]), the response's parameters ([GpuResponse.defaults]), then
-/// the running total, its Kahan compensation, the non-finite flag and the
-/// result (`resultSlot`).
+/// expected sufficient statistics ξ and learning rate ν ([vectorSlot],
+/// [fieldSlot]), each categorical node's α, probabilities, KL divergence
+/// and surprise, the gains of [gainNodes], the response's parameters
+/// ([GpuResponse.defaults]), then the running total, its Kahan
+/// compensation, the non-finite flag and the result (`resultSlot`).
 ///
-/// With [efState] false, ef-state nodes keep ξ and ν at their initial
-/// values: no response reads them, so a likelihood doesn't depend on them
-/// (with HGF learning, the sufficient statistics still reach the parents
-/// that track them). The fitting kernels leave them out.
+/// With [vectorState] false, ef-state nodes keep ξ and ν at their initial
+/// values and categorical nodes their α, probabilities, KL divergence and
+/// surprise: no response reads them, so a likelihood doesn't depend on
+/// them (with HGF learning, an ef node's sufficient statistics still reach
+/// the parents that track them, and a categorical node's indicators its
+/// binary nodes). The fitting kernels leave them out.
 ///
 /// Throws [UnsupportedError] for node kinds and update steps without a GPU
-/// kernel (categorical and dp-state nodes, custom couplings).
+/// kernel (dp-state nodes, custom couplings).
 final class TrialCompiler {
   TrialCompiler(
     this.net,
     this.response, {
     this.directions = 0,
-    this.efState = true,
+    this.vectorState = true,
   }) : n = net.nNodes {
     net.build();
     for (var i = 0; i < n; i++) {
@@ -258,20 +282,20 @@ final class TrialCompiler {
           break;
         case NodeKind.efState:
           // A dp-state cluster has its dp node as value child; dp-state has
-          // no kernel (above), so only input ef-state nodes get here.
+          // no kernel (below), so only input ef-state nodes get here.
           _checkEfParents(i);
           efNodes.add(i);
-          if (efState) {
+          if (vectorState) {
             for (final p in net.valueParentsOf(i)) {
-              final pp = net.valueParentsOf(p).first;
-              if (net.valueChildrenOf(pp).length != 1 ||
-                  net.volatilityChildrenOf(pp).isNotEmpty) {
-                throw UnsupportedError(
-                  'ef-state node $i: node $pp, which scales its learning '
-                  'rate, has children besides node $p',
-                );
-              }
-              efScaleNodes.add(pp);
+              _addGain(i, p, 'scales its learning rate');
+            }
+          }
+        case NodeKind.categoricalState:
+          _checkCategoricalParents(i);
+          categoricalNodes.add(i);
+          if (vectorState) {
+            for (final b in net.valueParentsOf(i)) {
+              _addGain(i, b, 'sets its α');
             }
           }
         default:
@@ -288,6 +312,10 @@ final class TrialCompiler {
           col++;
         case NodeKind.efState:
           final d = efDimension(i);
+          inputColumns.add((col, d));
+          col += d;
+        case NodeKind.categoricalState:
+          final d = categoryCount(i);
           inputColumns.add((col, d));
           col += d;
         default:
@@ -336,7 +364,15 @@ final class TrialCompiler {
             throw UnsupportedError('No GPU slot for ${b.field}');
           }
         }
+      case GpuCategoricalSoftmax(:final node):
+        _checkNode(node);
+        if (net.kindOf(node) != NodeKind.categoricalState) {
+          throw ArgumentError.value(node, 'node', 'Not a categorical node');
+        }
       case _ObservationResponse(:final which):
+        if (which == 'categorical' && categoricalNodes.isEmpty) {
+          throw ArgumentError('CategoricalSurprise needs a categorical input');
+        }
         if (which == 'first' &&
             (n < 2 ||
                 net.kindOf(0) != NodeKind.continuousState ||
@@ -368,7 +404,17 @@ final class TrialCompiler {
       }
       slotOfVar['nu$i'] = s++;
     }
-    for (final i in efScaleNodes) {
+    for (final i in categoricalNodes) {
+      for (var k = 0; k < categoryCount(i); k++) {
+        slotOfVar['al${i}_$k'] = s++;
+      }
+      for (var k = 0; k < categoryCount(i); k++) {
+        slotOfVar['cx${i}_$k'] = s++;
+      }
+      slotOfVar['kl$i'] = s++;
+      slotOfVar['su$i'] = s++;
+    }
+    for (final i in gainNodes) {
       slotOfVar['gain$i'] = s++;
     }
     for (var j = 0; j < response.defaults.length; j++) {
@@ -380,6 +426,37 @@ final class TrialCompiler {
   void _checkNode(int node) {
     if (node < 0 || node >= n) {
       throw ArgumentError.value(node, 'node', 'No such node');
+    }
+  }
+
+  /// Node [p], a value parent of [i], has a continuous value parent whose
+  /// posterior also writes its gain ([gainNodes]); it must have [p] as its
+  /// only child.
+  void _addGain(int i, int p, String what) {
+    final pp = net.valueParentsOf(p).first;
+    if (net.valueChildrenOf(pp).length != 1 ||
+        net.volatilityChildrenOf(pp).isNotEmpty) {
+      throw UnsupportedError(
+        '${net.kindOf(i).pyhgfName} node $i: node $pp, which $what, has '
+        'children besides node $p',
+      );
+    }
+    gainNodes.add(pp);
+  }
+
+  /// One binary value parent per category, each with one continuous value
+  /// parent (as `addCategoricalState` builds them).
+  void _checkCategoricalParents(int i) {
+    for (final b in net.valueParentsOf(i)) {
+      final parents = net.valueParentsOf(b);
+      if (net.kindOf(b) != NodeKind.binaryState ||
+          parents.length != 1 ||
+          net.kindOf(parents.single) != NodeKind.continuousState) {
+        throw UnsupportedError(
+          'categorical-state node $i: parent $b must be a binary node with '
+          'one continuous value parent',
+        );
+      }
     }
   }
 
@@ -409,8 +486,10 @@ final class TrialCompiler {
   final int directions;
   final int n;
 
-  /// Whether ef-state nodes update ξ and ν (see the class documentation).
-  final bool efState;
+  /// Whether ef-state nodes update ξ and ν, and categorical nodes their α,
+  /// probabilities, KL divergence and surprise (see the class
+  /// documentation).
+  final bool vectorState;
 
   final valueEdges = <(int, int)>[];
   final volatilityEdges = <(int, int)>[];
@@ -419,14 +498,19 @@ final class TrialCompiler {
   /// The ef-state nodes, in node order.
   final efNodes = <int>[];
 
-  /// With [efState]: the nodes whose change of mean Δ scales an ef-state
-  /// node's ν (the value parent of each statistic's node). Each has that
-  /// statistic's node as its only child, so its update is linear in the
-  /// child's prediction error δ, Δ = K δ, and its posterior also writes the
-  /// gain K (`gain`, 0 where the child is unobserved). ν takes δ/Δ as 1/K:
-  /// in f32 an observation often equals its prediction (δ = Δ = 0, so δ/Δ
-  /// would be NaN), where f64 still resolves both.
-  final efScaleNodes = <int>{};
+  /// The categorical-state nodes, in node order.
+  final categoricalNodes = <int>[];
+
+  /// With [vectorState]: the nodes whose change of mean Δ sets an ef-state
+  /// node's ν (the value parent of each statistic's node) or a categorical
+  /// node's α (the value parent of each category's binary node). Each has
+  /// that node as its only child, so its update is linear in the child's
+  /// prediction error δ, Δ = K δ, and its posterior also writes the gain K
+  /// (`gain`, 0 where the child is unobserved). The vector steps take Δ
+  /// from K instead of subtracting means: in f32 an observation often
+  /// equals its prediction (δ = Δ = 0, so δ/Δ would be NaN), and a small Δ
+  /// cancels, where f64 still resolves both.
+  final gainNodes = <int>{};
 
   /// Each input node's first data column and number of columns, in
   /// `Network.inputIdxs` order.
@@ -439,29 +523,61 @@ final class TrialCompiler {
   /// (`d + d(d+1)/2`).
   int efStatistics(int i) => net.vectorLength(i, VectorField.xis);
 
-  /// Slot of ef-state node [node]'s expected sufficient statistic [k] (ξ).
-  int xisSlot(int node, int k) {
-    final v = slotOfVar['xi${node}_$k'];
-    if (v == null) throw ArgumentError('No statistic $k of ef-state $node');
+  /// The number of categories of categorical node [i].
+  int categoryCount(int i) => net.valueParentsOf(i).length;
+
+  /// The length of [node]'s vector [field] on the GPU: an ef-state node's
+  /// [VectorField.xis], a categorical node's [VectorField.alpha] and
+  /// [VectorField.mean]; 0 for the others.
+  int vectorLength(int node, VectorField field) =>
+      switch ((net.kindOf(node), field)) {
+        (NodeKind.efState, VectorField.xis) => efStatistics(node),
+        (NodeKind.categoricalState, VectorField.alpha || VectorField.mean) =>
+          categoryCount(node),
+        _ => 0,
+      };
+
+  static const _vectorVar = {
+    VectorField.xis: 'xi',
+    VectorField.alpha: 'al',
+    VectorField.mean: 'cx',
+  };
+
+  /// Slot of entry [k] of [node]'s vector [field] (see [vectorLength]).
+  int vectorSlot(int node, VectorField field, int k) {
+    final stem = _vectorVar[field];
+    final v = stem == null ? null : slotOfVar['$stem${node}_$k'];
+    if (v == null) throw ArgumentError('No GPU slot for $field[$k] of $node');
     return v;
   }
+
+  /// Slot of ef-state node [node]'s expected sufficient statistic [k] (ξ).
+  int xisSlot(int node, int k) => vectorSlot(node, VectorField.xis, k);
 
   /// Slot of ef-state node [node]'s learning rate ν.
-  int nusSlot(int node) {
-    final v = slotOfVar['nu$node'];
-    if (v == null) throw ArgumentError('Node $node is not an ef-state node');
-    return v;
-  }
+  int nusSlot(int node) => fieldSlot(node, NodeField.nus);
+
+  static const _extraVar = {
+    NodeField.nus: 'nu',
+    NodeField.klDivergence: 'kl',
+    NodeField.surprise: 'su',
+  };
 
   /// The slot variable of [field] of [node]: a node field of
-  /// [gpuNodeFields], or an ef-state node's [NodeField.nus]; null if it
+  /// [gpuNodeFields], an ef-state node's [NodeField.nus], or a categorical
+  /// node's [NodeField.klDivergence] or [NodeField.surprise]; null if it
   /// has none.
   String? varOf(int node, NodeField field) {
     if (gpuNodeFields.contains(field)) return fieldVar(node, field);
-    if (field == NodeField.nus && slotOfVar.containsKey('nu$node')) {
-      return 'nu$node';
-    }
-    return null;
+    final v = '${_extraVar[field]}$node';
+    return slotOfVar.containsKey(v) ? v : null;
+  }
+
+  /// Slot of [field] of [node] (see [varOf]).
+  int fieldSlot(int node, NodeField field) {
+    final v = varOf(node, field);
+    if (v == null) throw ArgumentError('No GPU slot for $field of $node');
+    return slotOfVar[v]!;
   }
 
   /// Slot of the running total (then compensation, flag, result).
@@ -524,7 +640,17 @@ final class TrialCompiler {
       }
       out[s++] = net.getInitial(i, NodeField.nus);
     }
-    s += efScaleNodes.length; // gain: written before read
+    for (final i in categoricalNodes) {
+      for (final x in net.getInitialVector(i, VectorField.alpha)) {
+        out[s++] = x;
+      }
+      for (final x in net.getInitialVector(i, VectorField.mean)) {
+        out[s++] = x;
+      }
+      out[s++] = net.getInitial(i, NodeField.klDivergence);
+      out[s++] = net.getInitial(i, NodeField.surprise);
+    }
+    s += gainNodes.length; // gain: written before read
     for (final d in response.defaults) {
       out[s++] = d;
     }
@@ -707,11 +833,12 @@ final class _Pass {
     for (var q = 0; q < inputs.length; q++) {
       final i = inputs[q];
       final (col, d) = c.inputColumns[q];
-      // An ef-state input's first column is also its scalar mean.
+      // An ef-state or categorical input's first column is also its scalar
+      // mean.
       w(i, NodeField.mean, Lit(source.input(col)));
       w(i, NodeField.observed, Lit(source.observed(q)));
-      if (kind(i) == NodeKind.efState) {
-        _efObservation[i] = [
+      if (kind(i) == NodeKind.efState || kind(i) == NodeKind.categoricalState) {
+        _observation[i] = [
           r(i, NodeField.mean),
           for (var j = 1; j < d; j++)
             let('x${i}_$j', Lit(source.input(col + j))),
@@ -952,6 +1079,10 @@ final class _Pass {
         _predictionErrorEfDynamic(i);
       case UpdateStep.posteriorEfDynamic:
         _posteriorEfDynamic(i);
+      case UpdateStep.predictionErrorCategorical:
+        _predictionErrorCategorical(i);
+      case UpdateStep.posteriorCategorical:
+        _posteriorCategorical(i);
       default:
         throw UnsupportedError('${step.name} has no GPU kernel yet');
     }
@@ -1256,10 +1387,10 @@ final class _Pass {
       relaxedGain(ch, meanField: meanField) /
       prec;
 
-  /// The gain of [i], which scales an ef-state node's ν
-  /// ([TrialCompiler.efScaleNodes]): its mean increment per unit of its
-  /// only child's prediction error, 0 where the child is unobserved.
-  void _efGain(int i, Ex prec, {required bool meanField}) {
+  /// The gain of [i], which sets an ef-state node's ν or a categorical
+  /// node's α ([TrialCompiler.gainNodes]): its mean increment per unit of
+  /// its only child's prediction error, 0 where the child is unobserved.
+  void _gain(int i, Ex prec, {required bool meanField}) {
     final ch = net.valueChildrenOf(i).single;
     _slotWrite(
       'gain$i',
@@ -1338,7 +1469,7 @@ final class _Pass {
     final prec = let('prec', observedOrPredicted(i, hasObs, wpe));
     final vm = let('vm', valueMeanWpe(i, prec, meanField: meanField));
     final volm = let('volm', volatilityMeanWpe(i, prec));
-    if (c.efScaleNodes.contains(i)) _efGain(i, prec, meanField: meanField);
+    if (c.gainNodes.contains(i)) _gain(i, prec, meanField: meanField);
     w(i, NodeField.precision, prec);
     w(i, NodeField.mean, r(i, NodeField.expectedMean) + (vm + volm));
   }
@@ -1371,7 +1502,7 @@ final class _Pass {
     final epi = let('epi', r(i, NodeField.expectedPrecision));
     final vm = let('vm', valueMeanWpe(i, epi, meanField: meanField));
     final volm = let('volm', volatilityMeanWpe(i, epi));
-    if (c.efScaleNodes.contains(i)) _efGain(i, epi, meanField: meanField);
+    if (c.gainNodes.contains(i)) _gain(i, epi, meanField: meanField);
     w(i, NodeField.mean, r(i, NodeField.expectedMean) + vm + volm);
     final hasObs = letCond('hasObs', anyObserved(i));
     final mgf = !meanField;
@@ -1423,7 +1554,7 @@ final class _Pass {
       final nmw = let('nmw', volatilityMeanWpe(i, pp, noiseOnly: true));
       pm = let('pm', emi + vmw + nmw);
       // No volatility children, so one expansion: the mean is pm.
-      if (c.efScaleNodes.contains(i)) _efGain(i, pp, meanField: mf);
+      if (c.gainNodes.contains(i)) _gain(i, pp, meanField: mf);
     }
     final nc = children.length;
     // Per child: observed, coupling, ω̃, previous variance, b, vope.
@@ -1620,13 +1751,14 @@ final class _Pass {
   // ef-state
   // ---------------------------------------------------------------------------
 
-  /// Each ef-state input's observation this trial (its columns).
-  final _efObservation = <int, List<Ex>>{};
+  /// Each ef-state or categorical input's observation this trial (its
+  /// columns).
+  final _observation = <int, List<Ex>>{};
 
   /// t(x) of [i]'s observation: `x`, then the lower triangle of `x xᵀ` row
   /// by row (`[x, x²]` in one dimension).
   List<Ex> _efSufficientStatistics(int i) {
-    final x = _efObservation[i]!;
+    final x = _observation[i]!;
     return [
       ...x,
       for (var row = 0; row < x.length; row++)
@@ -1646,7 +1778,7 @@ final class _Pass {
 
   /// A fixed learning rate (no parents).
   void _predictionErrorEfFixed(int i) {
-    if (!c.efState) return;
+    if (!c.vectorState) return;
     _efMoveXis(i, letCond('on', ne(r(i, NodeField.observed), zero)));
   }
 
@@ -1667,7 +1799,7 @@ final class _Pass {
   /// its own value parent's expectation; then ξ moves as with a fixed rate.
   ///
   /// Each δ/Δ is 1/K, K the gain of the parent's update, which is linear
-  /// in δ (see [TrialCompiler.efScaleNodes]): the same value where δ ≠ 0;
+  /// in δ (see [TrialCompiler.gainNodes]): the same value where δ ≠ 0;
   /// where δ = 0 the CPU engines get 0/0.
   ///
   /// Unobserved, both changes are 0 and the CPU engines store ν = 0/0
@@ -1675,18 +1807,118 @@ final class _Pass {
   /// again; the kernel keeps the last ν instead (and divides by 1 there,
   /// so that no derivative is NaN). ξ and the likelihood are the same.
   void _posteriorEfDynamic(int i) {
-    if (!c.efState) return;
+    if (!c.vectorState) return;
     final on = letCond('on', ne(r(i, NodeField.observed), zero));
     final parents = net.valueParentsOf(i);
     final ratios = <Ex>[];
     for (final p in parents) {
-      // δ/Δ = 1/K (TrialCompiler.efScaleNodes).
+      // δ/Δ = 1/K (TrialCompiler.gainNodes).
       final gain = _slotRead('gain${net.valueParentsOf(p).first}');
       ratios.add(one / sel(one, gain, on));
     }
     final nu = let('nu', sum(ratios) / lit(parents.length.toDouble()));
     _slotWrite('nu$i', sel(_slotRead('nu$i'), nu, on));
     _efMoveXis(i, on);
+  }
+
+  // ---------------------------------------------------------------------------
+  // categorical-state
+  // ---------------------------------------------------------------------------
+
+  /// Each category's indicator, and the node's observed flag, to that
+  /// category's binary node.
+  void _predictionErrorCategorical(int i) {
+    final x = _observation[i]!;
+    final ob = let('ob', r(i, NodeField.observed));
+    final parents = net.valueParentsOf(i);
+    for (var k = 0; k < parents.length; k++) {
+      w(parents[k], NodeField.mean, x[k]);
+      w(parents[k], NodeField.observed, ob);
+    }
+  }
+
+  /// The binary surprise of category [k]'s indicator under its binary
+  /// node [b]'s prediction.
+  Ex _categorySurprise(int b) => binarySurprise(
+    ne(r(b, NodeField.mean), zero),
+    r(b, NodeField.expectedMean),
+    oneMinusMean(b),
+  );
+
+  /// After the binary HGFs' updates. The node's mean is the first
+  /// category's new probability σ(μ_p) (`μ_p` the binary node's value
+  /// parent's mean), which a readout may read.
+  ///
+  /// With [TrialCompiler.vectorState], per category: `α = ν μ̂_b + 1`,
+  /// `ν = δ/Δ − 1`, with the binary node's prediction error
+  /// `δ = x − μ̂_b` and the change of its expectation
+  /// `Δ = σ(μ_p) − μ̂_b`; then the KL divergence from the previous α, the
+  /// summed binary surprise, and the probabilities σ(μ_p).
+  ///
+  /// Δ is `σ(μ_p) (1 − μ̂_b) (1 − e^{−ι})`, with `μ̂_b = σ(μ̂_p)` and
+  /// `ι = μ_p − μ̂_p = K δ / π̂_b` from the gain K of `p`'s update
+  /// ([TrialCompiler.gainNodes]): subtracting means cancels in f32 where
+  /// `p` moves little. Where μ̂_b was clipped (the identity fails) it is
+  /// the difference.
+  ///
+  /// Unobserved, the CPU engines without [NetworkFixes.categoricalMissing]
+  /// get Δ = 0 and α = ±∞ (P12); the kernel keeps α and records a KL
+  /// divergence of 0 either way (WGSL has no infinities), and the surprise
+  /// follows the fix.
+  void _posteriorCategorical(int i) {
+    final parents = net.valueParentsOf(i);
+    Ex probability(int b) =>
+        sigm(r(net.valueParentsOf(b).single, NodeField.mean));
+    if (c.vectorState) {
+      final on = letCond('on', ne(r(i, NodeField.observed), zero));
+      final v = lit(net.precisionClippingValue);
+      final cur = <Ex>[], next = <Ex>[], up = <Ex>[], terms = <Ex>[];
+      for (var k = 0; k < parents.length; k++) {
+        final b = parents[k], p = net.valueParentsOf(b).single;
+        final em = let('emb$k', r(b, NodeField.expectedMean));
+        final q = let('qb$k', oneMinusMean(b));
+        final u = r(b, NodeField.mean);
+        // x − μ̂ as x (1 − μ̂) − (1 − x) μ̂, as the binary node's.
+        final delta = let('dl$k', u * q - (one - u) * em);
+        up.add(let('up$k', probability(b)));
+        final iota = let(
+          'io$k',
+          _slotRead('gain$p') * r(b, NodeField.valuePredictionError),
+        );
+        final clipped = letCond('cl$k', le(em, v) | ge(em, one - v));
+        final change = let(
+          'ch$k',
+          sel(up[k] * q * -expm1(-iota), up[k] - em, clipped),
+        );
+        final ratio = let('ra$k', delta / sel(one, change, on));
+        next.add(let('an$k', (ratio - one) * em + one));
+        cur.add(_slotRead('al${i}_$k'));
+        terms.add(_categorySurprise(b));
+      }
+      final kl = let('kl', _dirichletKl(cur, next));
+      for (var k = 0; k < parents.length; k++) {
+        _slotWrite('al${i}_$k', sel(cur[k], next[k], on));
+        _slotWrite('cx${i}_$k', up[k]);
+      }
+      _slotWrite('kl$i', sel(zero, kl, on));
+      final s = sum(terms);
+      _slotWrite('su$i', net.fixes.categoricalMissing ? sel(zero, s, on) : s);
+    }
+    w(i, NodeField.mean, probability(parents.first));
+  }
+
+  /// `KL[Dir(a) ‖ Dir(b)]`, as `dirichletKullbackLeibler` sums it (for
+  /// positive concentrations).
+  Ex _dirichletKl(List<Ex> a, List<Ex> b) {
+    final sa = let('klsa', sum(a)), sb = let('klsb', sum(b));
+    final psi = let('klpsi', digamma(sa));
+    final gammas = sum([
+      for (var k = 0; k < a.length; k++) lgamma(b[k]) - lgamma(a[k]),
+    ]);
+    final digammas = sum([
+      for (var k = 0; k < a.length; k++) (a[k] - b[k]) * (digamma(a[k]) - psi),
+    ]);
+    return (lgamma(sa) - lgamma(sb)) + gammas + digammas;
   }
 
   // ---------------------------------------------------------------------------
@@ -1729,6 +1961,19 @@ final class _Pass {
           r(1, NodeField.expectedMean),
           r(1, NodeField.expectedPrecision),
         );
+      case _ObservationResponse(:final which) when which == 'categorical':
+        // As the categorical posterior sums the node's surprise.
+        s = sum([
+          for (final i in c.categoricalNodes)
+            () {
+              final terms = sum([
+                for (final b in net.valueParentsOf(i)) _categorySurprise(b),
+              ]);
+              return net.fixes.categoricalMissing
+                  ? sel(zero, terms, ne(r(i, NodeField.observed), zero))
+                  : terms;
+            }(),
+        ]);
       case _ObservationResponse():
         s = sum([
           for (final i in net.inputIdxs)
@@ -1750,6 +1995,25 @@ final class _Pass {
         final p = let('prob', one / (one + exp(-z)));
         final q = let('qprob', one / (one + exp(z)));
         s = sel(zero, binarySurprise(ne(resp, zero), p, q), present);
+      case GpuCategoricalSoftmax(:final node):
+        // log Σ μ̂ₖ^β − β log μ̂_resp; a response that is no category's index
+        // picks none (the CPU engine rejects it).
+        final present = letCond('present', Cond(source.responsePresent()));
+        final resp = let('resp', Lit(source.response()));
+        final parents = net.valueParentsOf(node);
+        final z = [
+          for (var k = 0; k < parents.length; k++)
+            let('z$k', rp(0) * log(r(parents[k], NodeField.expectedMean))),
+        ];
+        var lse = z.first;
+        for (var k = 1; k < z.length; k++) {
+          lse = let('lse$k', logAddExp(lse, z[k]));
+        }
+        final chosen = sum([
+          for (var k = 0; k < z.length; k++)
+            sel(zero, z[k], eq(resp, lit(k.toDouble()))),
+        ]);
+        s = sel(zero, lse - chosen, present);
       case GpuSoftmax(
         :final options,
         :final field,
@@ -1916,6 +2180,52 @@ fn d3gelu(x: f32) -> f32 {
 fn logAddExp(a: f32, b: f32) -> f32 {
   let m = max(a, b);
   return m + log(exp(a - m) + exp(b - m));
+}
+fn expm1(x: f32) -> f32 {
+  // eˣ − 1 without cancellation: Taylor to x¹¹/11! for |x| < 1 (error
+  // below 4e-8 relative), else exp(x) − 1, which loses at most a bit there.
+  if (abs(x) < 1.0f) {
+    var p = 2.5052108e-8f;
+    p = 2.7557319e-7f + x * p;
+    p = 2.7557319e-6f + x * p;
+    p = 2.4801587e-5f + x * p;
+    p = 1.9841270e-4f + x * p;
+    p = 1.3888889e-3f + x * p;
+    p = 8.3333333e-3f + x * p;
+    p = 4.1666667e-2f + x * p;
+    p = 1.6666667e-1f + x * p;
+    p = 0.5f + x * p;
+    return x * (1.0f + x * p);
+  }
+  return exp(x) - 1.0f;
+}
+fn lgamma(x0: f32) -> f32 {
+  // ln Γ(x) for x > 0: Γ(x) = Γ(x + 1) / x up to x ≥ 8, then Stirling's
+  // series.
+  var x = x0;
+  var prod = 1.0f;
+  for (var i = 0; i < 8 && x < 8.0f; i++) {
+    prod *= x;
+    x += 1.0f;
+  }
+  let inv = 1.0f / x;
+  let inv2 = inv * inv;
+  let series = inv * (0.083333333f - inv2 * (0.0027777778f -
+      inv2 * (0.00079365079f - inv2 * 0.00059523810f)));
+  return (x - 0.5f) * log(x) - x + 0.91893853f + series - log(prod);
+}
+fn digamma(x0: f32) -> f32 {
+  // ψ(x) for x > 0: ψ(x) = ψ(x + 1) − 1/x up to x ≥ 8, then the asymptotic
+  // series.
+  var x = x0;
+  var acc = 0.0f;
+  for (var i = 0; i < 8 && x < 8.0f; i++) {
+    acc -= 1.0f / x;
+    x += 1.0f;
+  }
+  let inv2 = 1.0f / (x * x);
+  return acc + log(x) - 0.5f / x - inv2 * (0.083333333f - inv2 *
+      (0.0083333333f - inv2 * (0.0039682540f - inv2 * 0.0041666667f)));
 }
 fn lambertW0(z: f32) -> f32 {
   // Halley on (w eʷ − z) / eʷ, as pyhgf #475: no overflow for finite z.

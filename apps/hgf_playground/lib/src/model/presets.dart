@@ -351,6 +351,18 @@ final presets = <Preset>[
     addTo: (net) => net.addEfState(nus: 10.0),
   ),
   Preset(
+    id: 'ef_hgf',
+    name: 'Exponential family, HGF learning',
+    summary:
+        'The same mean and variance, but each sufficient statistic is a '
+        'node with an HGF above it (x₁–x₃ for x, x₄–x₆ for x²): the rate '
+        '1/(1 + ν) follows how much those learn, so it speeds up when the '
+        'signal turns volatile. Fittable, unlike a fixed rate.',
+    input: InputKind.continuous,
+    data: DataModel.randomWalk,
+    addTo: (net) => net.addEfState(learning: EfLearning.hgf2),
+  ),
+  Preset(
     id: 'igt',
     name: 'Iowa Gambling Task (choices)',
     summary:

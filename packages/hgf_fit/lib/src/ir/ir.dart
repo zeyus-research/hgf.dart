@@ -313,6 +313,12 @@ final Map<String, Partials> _rules = {
   'sqrt': (a, s) => [Lit('0.5f', 0.5) / s],
   'lambertW0': (a, s) => [s / (a[0] * (one + s))],
   'logAddExp': (a, s) => [_sigm(a[0] - a[1]), _sigm(a[1] - a[0])],
+  'expm1': (a, s) => [Call('exp', a)],
+  'lgamma': (a, s) => [Call('digamma', a)],
+  // Only the categorical node's KL divergence calls it, which no likelihood
+  // reads (TrialCompiler.vectorState).
+  'digamma': (a, s) =>
+      throw UnsupportedError('No derivative rule for digamma (trigamma)'),
 };
 
 Ex call(String fn, List<Object> args) {
@@ -331,6 +337,9 @@ Ex min(Object a, Object b) => call('min', [a, b]);
 Ex clamp(Object x, Object lo, Object hi) => call('clamp', [x, lo, hi]);
 Ex lambertW0(Object z) => call('lambertW0', [z]);
 Ex logAddExp(Object a, Object b) => call('logAddExp', [a, b]);
+Ex expm1(Object x) => call('expm1', [x]);
+Ex lgamma(Object x) => call('lgamma', [x]);
+Ex digamma(Object x) => call('digamma', [x]);
 
 /// Differentiates expressions given which variables carry tangents.
 final class Tangents {

@@ -1,5 +1,15 @@
 ## Unreleased
 
+- categorical-state nodes in the kernels (`HgfKernel`, `FitKernel`, so
+  `GpuFitter` runs categorical models on the GPU), with
+  `CategoricalSurprise` and `CategoricalSoftmaxReadout` (exact gradients,
+  forward and reverse mode). `GpuBatch.readVector` / `setInitialVector`
+  read and set a categorical node's α and probabilities (and ef ξ);
+  `read` takes its `klDivergence` and `surprise`. Unobserved, the kernel
+  keeps α (WGSL has no infinities); the surprise follows
+  `NetworkFixes.categoricalMissing`. All seven categorical fixtures match
+  f64 on Metal: totals, probabilities and surprise within 3e-6, α within
+  6.7e-6, the KL divergence within 1.9e-6 of `ln Γ(Σα)`.
 - ef-state nodes in the kernels (`HgfKernel`, `FitKernel`, so `GpuFitter`
   no longer falls back to the CPU for them): fixed and HGF learning, any
   dimension, beside scalar inputs. A trial's data row is

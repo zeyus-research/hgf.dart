@@ -79,7 +79,7 @@ final class FitKernel {
       model.network,
       response,
       directions: kt,
-      efState: false,
+      vectorState: false,
     );
     // The slot variable each parameter sets (the last one wins, as on the
     // CPU).

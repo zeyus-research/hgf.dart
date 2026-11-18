@@ -626,9 +626,12 @@ class Fitting extends ChangeNotifier {
       _buildDpCandidates();
       return;
     }
-    if (kinds.contains(NodeKind.efState)) {
+    if (net.inputIdxs.any(
+      (i) => net.kindOf(i) == NodeKind.efState && net.valueParentsOf(i).isEmpty,
+    )) {
       // pyhgf scores no observation at a fixed-rate ef-state node (its
-      // node surprise is undefined), so there is nothing to fit to.
+      // node surprise is undefined), so there is nothing to fit to. With
+      // HGF learning, the nodes tracking its statistics score them.
       unsupported =
           'A fixed-rate exponential-family node defines no surprise for its '
           'observations, so there is nothing to fit its learning rate to.';
@@ -873,7 +876,19 @@ class Fitting extends ChangeNotifier {
             node: pg.network.inputIdxs.single,
             inverseTemperature: agentBeta,
           )
-        : GaussianReadout(precision: 1 / (agentNoise * agentNoise));
+        : GaussianReadout(
+            node: _gaussianNode,
+            precision: 1 / (agentNoise * agentNoise),
+          );
+  }
+
+  /// The node whose prediction a Gaussian response reports: the input's,
+  /// or for an ef-state input (with HGF learning) that of the node tracking
+  /// its first statistic, E[x].
+  int get _gaussianNode {
+    final net = pg.network;
+    final i = net.inputIdxs.first;
+    return net.kindOf(i) == NodeKind.efState ? net.valueParentsOf(i).first : 0;
   }
 
   HgfModel _model(List<FreeParam> params) {

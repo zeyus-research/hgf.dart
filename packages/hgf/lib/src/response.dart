@@ -325,7 +325,8 @@ final class FirstLevelBinarySurprise extends ResponseFunction {
 /// each, `Σ binarySurprise(xₖ, μ̂ₖ)` over its categories, the indicator
 /// `xₖ` under the probability its binary node predicted (the node's
 /// [NodeField.surprise], as pyhgf computes it in the categorical posterior).
-/// Other input nodes are ignored.
+/// Other input nodes are ignored. With [NetworkFixes.categoricalMissing] an
+/// unobserved node adds 0 (pyhgf scores the empty cells, P12).
 final class CategoricalSurprise extends ResponseFunction {
   const CategoricalSurprise();
 
@@ -371,6 +372,11 @@ final class CategoricalSurprise extends ResponseFunction {
     var s = 0.0;
     for (final i in network.inputIdxs) {
       if (network.kindOf(i) != NodeKind.categoricalState) continue;
+      // Unobserved, the fixed posterior records 0 (P12).
+      if (network.fixes.categoricalMissing &&
+          network.get(element, i, NodeField.observed) == 0.0) {
+        continue;
+      }
       // The node's surprise, summed as its posterior step sums it.
       var node = 0.0;
       for (var k = 0, n = network.valueParentCount(i); k < n; k++) {

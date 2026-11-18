@@ -23,8 +23,8 @@ supersedes its phase list.
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`; a dp-state
     surprise (`DpSurprise`, an hgf.dart extension, 2026-11-10).
-- 658 engine tests pass (plus 142 fitting, 120 hgf_deep, 16 widget and 80
-  playground tests). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+- 834 engine tests pass (plus 807 fitting, 120 hgf_deep, 16 widget and
+  155 playground tests; counts of 2026-11-18). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (1 of them against a patched pyhgf, `dp_missing`; 11 ef-state, 7
   categorical, 6 dp-state; since 2026-11-18 the fixtures are at pyhgf
   `4db3b093`, which has the P1 fix),
@@ -1337,11 +1337,12 @@ rest is the sampler's own host work per chain and leapfrog step.
   with the vector node kinds below.
 - [ ] Vector node kinds on the GPU. dp-state's data-dependent branching
   is the hard one. (The CPU batch runs ef-state and categorical since
-  2026-11-10; `GpuFitter` falls back to it for categorical and dp.)
+  2026-11-10; `GpuFitter` falls back to it for dp.)
   - [x] ef-state (2026-11-18): fixed and HGF learning, any dimension,
     beside scalar inputs. See "ef-state on the GPU" below.
-  - [ ] categorical-state (with `CategoricalSoftmaxReadout` and the
-    categorical surprise).
+  - [x] categorical-state (with `CategoricalSoftmaxReadout` and the
+    categorical surprise; 2026-11-18). See "categorical-state on the GPU"
+    below.
   - [ ] dp-state.
 - [ ] Platform coverage still to measure:
   - Intel GPUs, and Android (Vulkan) and iOS (Metal) devices through
@@ -1924,6 +1925,78 @@ IR (GPU kernels, CPU reverse mode, exact Hessians).
   one (16 nodes) at 16384: 5.0 s → 7.2 ms, with gradients 12.2 s →
   214 ms (57×).
 
+#### categorical-state on the GPU (2026-11-18): done
+
+- **First, P12 in hgf.dart** (`NetworkFixes.categoricalMissing`, on by
+  default; `docs/upstream/README.md#p12`): pyhgf's categorical posterior
+  checks no `observed` flag, so a missing trial made α ±∞ (KL NaN then and
+  on the next trial), and the node's surprise scored the binary surprise
+  of whatever the empty cells held (the playground writes a row of
+  zeros), which a `CategoricalSurprise` fit counted. With the fix an
+  unobserved node keeps α and records a KL divergence and a surprise of 0;
+  `Network`, `BatchNetwork` (bit for bit) and `CategoricalSurprise`'s
+  gradients. Parity runs with `NetworkFixes.none` as before.
+- **The trial IR** (`TrialCompiler`, so `HgfKernel`, `FitKernel`,
+  `GradKernel` and the CPU's `IrReverse`): `predictionErrorCategorical`
+  (each indicator and the observed flag to its binary node) and
+  `posteriorCategorical` (the node's mean σ(μ_p) of the first category;
+  with `vectorState`, renamed from `efState`, α, the probabilities, the KL
+  divergence and the surprise). The KL needs `lgamma` and `digamma` (f32,
+  recurrence to x ≥ 8 then Stirling / the asymptotic series) in the WGSL
+  prelude; the likelihood kernels never compute it. Responses:
+  `GpuResponse.categoricalSurprise`, `GpuCategoricalSoftmax`.
+- **Δ from the gain, as for ef-state's ν:** α = (δ/Δ − 1) μ̂_b + 1 with
+  Δ = σ(μ_p) − μ̂_b. The binary node's parent p has it as its only child,
+  so p's update is linear in δ and writes its gain K (`gainNodes`, was
+  `efScaleNodes`): Δ = σ(μ_p)(1 − μ̂_b)(1 − e^{−ι}), ι = K δ/π̂_b, with a
+  Taylor `expm1` (the difference where μ̂_b was clipped). Measured against
+  plain subtraction on the seven fixtures: α's error 1.5–2× lower under
+  standard, eHGF and mean-field updates, equal under the unbounded one,
+  where f32 drift in the binary HGFs' states dominates (6.7e-6). It costs
+  a few operations and holds where p barely moves late in long series.
+- **Unobserved:** the kernel always keeps α and writes a KL of 0 (WGSL
+  has no infinities; `gpu_check` compares α and the KL where the CPU's are
+  finite); the surprise follows the fix, since the likelihood reads it.
+- **Tests:** `gpu_check` scores categorical fixtures with
+  `CategoricalSurprise` (they were skipped) and compares the final α,
+  probabilities, KL divergence and surprise with `BatchNetwork`. All seven
+  pass on Metal: totals, probabilities and surprise within 3e-6, α within
+  6.7e-6, the KL within 1.9e-6 of `1 + ln Γ(Σα)` (it is a sum of
+  cancelling log-gammas, so its f32 error is absolute). naga validates
+  categorical kernels under every update mode, mean-field or not, with
+  both responses. Two categorical fit cases (a softmax over three
+  categories with missed responses, unbounded updates; the surprise over
+  four with missing observations and time steps, mean-field eHGF): IR
+  reverse = forward in f64, exact
+  Hessians = central differences, on the GPU values within 4.7e-7 and
+  gradients within 5e-6 of f64 (forward and reverse mode). Categorical
+  models also get the CPU's reverse mode and exact Hessians now
+  (`HgfModel.reverseUnsupported` follows the IR).
+- **SwiftShader again:** the browser suite on SwiftShader (Chrome's
+  software WebGPU, which `dart test` and CI's `gpu-web` job use) lost the
+  GPU process ("Instance dropped", every later test failing) on the
+  categorical fit kernels. The four-category case under the unbounded
+  update (five Lambert W expansions in the shared volatility parent) did
+  it already in the forward kernels, so that case runs mean-field eHGF
+  now. Both categorical cases' reverse sweeps do it under any update, on
+  their own, in ~1:45 (the three-category unbounded one is 174 KiB, the
+  four-category eHGF one 82 KiB, smaller than the ef case's 98 KiB that
+  compiles). **Hardware WebGPU is fine:** Chrome on the M3 Pro's GPU
+  (Dawn on Metal; package:test's `--disable-gpu` and the Vulkan flags
+  dropped by a `CHROME_EXECUTABLE` wrapper) passes the whole suite, both
+  categorical cases in both modes included, in 18 s; Metal through
+  wgpu-native too. So the browser's reverse-mode fit test skips the
+  categorical cases only when the adapter is SwiftShader. Still open, as
+  under "ef-state on the GPU": what SwiftShader chokes on. Firefox wasn't
+  installed to check.
+- **Speed** (`benchmark/bin/fit_ef_gpu.dart`, now with categorical
+  cases; M3 Pro, 320 trials, two ω parameters, the CPU on one isolate in
+  f64): three categories (8 nodes) at 2000 elements 437 → 2.5 ms per
+  likelihood pass (178×), with gradients 769 → 3.9 ms; at 16384 4.1 s →
+  4.1 ms, with gradients 7.5 s → 10.7 ms (707×). Eight categories (18
+  nodes) at 16384: 14.0 s → 16.8 ms, with gradients 25.8 s → 240 ms
+  (108×).
+
 ### Phase 8: App -> HGF GUI modelling
 
 - [ ] Since the performance is excellent so far, the playground can be
@@ -1939,6 +2012,18 @@ IR (GPU kernels, CPU reverse mode, exact Hessians).
 - [x] Make sure the app runs with GPU if available, and allow user to
   toggle GPU, precision, other settings/preferences (2026-11-09, quick
   wins; see below).
+- [x] An ef-state preset with HGF learning, fittable (2026-11-18):
+  *Exponential family, HGF learning* (`ef_hgf`, `addEfState(learning:
+  EfLearning.hgf2)`, seven nodes). ν falls from ~2.9 in calm phases to
+  ~1.4 in volatile ones on the playground's random walk (HGF-1 settles to
+  a constant ν, so the preset is HGF-2). The fit view refuses only
+  fixed-rate ef inputs now: the ω of the six nodes above the statistics
+  are free, the observations are scored by the statistics' nodes, and a
+  Gaussian response reports E[x]'s prediction (the first statistic's
+  node). Its node card explains the learning rate and shows no ν slider
+  (ν follows the parents). Categorical and ef HGF fits run on the GPU
+  when it is chosen (`fitting_test`: on Metal, the same optimum as the
+  CPU's f64 to 1e-3).
 - [ ] Consider allowing real-time sources and define a model for them
   (e.g. sensor data, think about including LSL streams with liblsl.dart).
 - [ ] Allow custom agents / models and parameters, to be able to e.g.
@@ -2486,8 +2571,8 @@ fitting, export) reads it.
    (skwasm's render thread, through a service worker), a readable
    pipeline on phones, and one viewport mixin for the canvases.
 
-In parallel (not blocking): vector node kinds on the GPU, a faster dp
-candidate search.
+In parallel (not blocking): dp-state on the GPU (ef-state and
+categorical run there since 2026-11-18), a faster dp candidate search.
 
 #### Builder: performance and usability (2026-11-18): done
 
@@ -3363,7 +3448,9 @@ fixes and runnable repros are in [upstream/README.md](upstream/README.md)
   - [ ] [P11](upstream/README.md#p11) `binary_parameters` ignored; docstring
         says `3n + 2` nodes (it's `2n + 2`).
   - [ ] [P12](upstream/README.md#p12) categorical α = ±∞ on missing
-        observations.
+        observations, and the surprise scores the empty cells. Fixed in
+        hgf.dart (`NetworkFixes.categoricalMissing`, on by default,
+        2026-11-18).
   - [x] [P13](upstream/README.md#p13) `dirichlet_kullback_leibler` NaN once
         Σα > 171 (Γ overflows). Fixed upstream in #475.
   - [ ] [P14](upstream/README.md#p14) dp-state ignores `observed`: missing
@@ -3495,11 +3582,12 @@ upstream (#480) and ported (`ehgfMgfCorrection` removed; fixtures at
 weights run on the GPU; the macOS build hook makes `dart test` and
 `flutter test` work with the bundled wgpu-native; a CI job runs the
 WebGPU suite on SwiftShader. ef-state runs on the GPU (2026-11-18: vector
-slots and multi-column inputs in the trial IR; ν from the update's gain).
-Phase 7b's open items: categorical and dp-state on the GPU, sampler
-ensembles on worker isolates, tuning, and hardware coverage. Categorical
-and dp-state on the GPU and a
-faster dp candidate search can run alongside.
+slots and multi-column inputs in the trial IR; ν from the update's gain),
+and so does categorical-state (2026-11-18, with P12 fixed in hgf.dart:
+`NetworkFixes.categoricalMissing`); the playground has an HGF-learning
+ef preset that can be fitted. Phase 7b's open items: dp-state on the GPU,
+sampler ensembles on worker isolates, tuning, and hardware coverage.
+dp-state on the GPU and a faster dp candidate search can run alongside.
 
 ```sh
 cd hgf.dart

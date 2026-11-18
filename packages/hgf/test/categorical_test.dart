@@ -253,7 +253,8 @@ void main() {
       final u = oneHot(10, 3);
       final observed = Float64List(10)..fillRange(0, 10, 1.0);
       observed[4] = 0.0;
-      final net = Network()..addCategoricalState(nCategories: 3);
+      final net = Network(fixes: NetworkFixes.none)
+        ..addCategoricalState(nCategories: 3);
       final traj = net.inputData(u, observed: observed, fields: allFields)!;
       final alpha = traj.vectorAt(0, VectorField.alpha, 4);
       expect(alpha.every((a) => a.isInfinite), isTrue);
@@ -262,6 +263,66 @@ void main() {
       expect(kl[6].isFinite, isTrue);
       // The binary HGFs see no prediction error on that trial.
       expect(traj.series(1, NodeField.valuePredictionError)[4], 0.0);
+    });
+
+    test('NetworkFixes.categoricalMissing keeps alpha (P12)', () {
+      final u = oneHot(10, 3);
+      // Trial 4's cells hold an observation the fixed node must ignore.
+      final observed = Float64List(10)..fillRange(0, 10, 1.0);
+      observed[4] = 0.0;
+      Trajectories run(NetworkFixes fixes) =>
+          (Network(fixes: fixes)..addCategoricalState(nCategories: 3))
+              .inputData(u, observed: observed, fields: allFields)!;
+      final fixed = run(NetworkFixes.recommended);
+      final upstream = run(NetworkFixes.none);
+      expect(
+        fixed.vectorAt(0, VectorField.alpha, 4),
+        fixed.vectorAt(0, VectorField.alpha, 3),
+      );
+      final kl = fixed.series(0, NodeField.klDivergence);
+      final s = fixed.series(0, NodeField.surprise);
+      expect(kl[4], 0.0);
+      expect(s[4], 0.0);
+      expect(kl.every((v) => v.isFinite), isTrue);
+      // The next α doesn't depend on the old one; its KL divergence does.
+      expect(
+        fixed.vectorAt(0, VectorField.alpha, 5),
+        upstream.vectorAt(0, VectorField.alpha, 5),
+      );
+      expect(kl[5], isNot(upstream.series(0, NodeField.klDivergence)[5]));
+      for (final t in [0, 1, 2, 3, 6, 9]) {
+        expect(kl[t], upstream.series(0, NodeField.klDivergence)[t]);
+        expect(s[t], upstream.series(0, NodeField.surprise)[t]);
+      }
+      // The mean is the binary HGFs' probabilities either way, and they
+      // are unaffected.
+      expect(
+        fixed.vectorSeries(0, VectorField.mean),
+        upstream.vectorSeries(0, VectorField.mean),
+      );
+      for (var i = 1; i < 8; i++) {
+        expectSameSeries(fixed, i, upstream, i, 'fixed vs upstream');
+      }
+      // BatchNetwork matches Network bit for bit with the fix.
+      final batch = BatchNetwork(
+        Network(fixes: NetworkFixes.recommended)
+          ..addCategoricalState(nCategories: 3),
+        2,
+      );
+      var total = 0.0;
+      for (final v in s) {
+        total += v;
+      }
+      final got = batch.surprise(
+        u,
+        const CategoricalSurprise(),
+        observed: observed,
+      );
+      expect(got, [total, total]);
+      expect(
+        batch.getVector(1, 0, VectorField.alpha),
+        fixed.vectorAt(0, VectorField.alpha, 9),
+      );
     });
 
     test('step() reproduces inputData()', () {

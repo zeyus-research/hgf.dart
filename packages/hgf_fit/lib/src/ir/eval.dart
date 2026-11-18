@@ -208,8 +208,8 @@ final class _Compiler {
 /// (`TrialCompiler.slotOfVar`, [initialSlots]).
 final class IrReverse {
   factory IrReverse(Network network, GpuResponse response, {int chunk = 64}) {
-    // ξ and ν of ef-state nodes don't reach the likelihood.
-    final tc = TrialCompiler(network, response, efState: false);
+    // ef-state ξ and ν and categorical α don't reach the likelihood.
+    final tc = TrialCompiler(network, response, vectorState: false);
     final ssa = tc.compileSsa(const _TokenSource());
     final nIn = network.inputIdxs.length, nCols = network.nInputColumns;
     final c = _Compiler();

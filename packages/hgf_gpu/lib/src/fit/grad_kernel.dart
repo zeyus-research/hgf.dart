@@ -61,7 +61,12 @@ final class GradKernel {
     if (mode == GradMode.reverseCheckpoint && checkpoint < 2) {
       throw ArgumentError.value(checkpoint, 'checkpoint', 'Must be ≥ 2');
     }
-    final c = TrialCompiler(network, response, directions: k);
+    final c = TrialCompiler(
+      network,
+      response,
+      directions: k,
+      vectorState: false,
+    );
     final source = _Source(network.nInputColumns);
     final trial = c.compile(source, seeds: k > 0 ? params.toSet() : const {});
     final slotOfVar = trial.slotOfVar;

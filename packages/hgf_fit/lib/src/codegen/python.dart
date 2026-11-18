@@ -88,6 +88,18 @@ final class PythonExport {
         '(NetworkFixes.constantNoiseVariance): its noise updates differ.',
       );
     }
+    final built = plan.build();
+    if (plan.fixes.categoricalMissing &&
+        built.inputIdxs.any(
+          (i) => built.kindOf(i) == NodeKind.categoricalState,
+        )) {
+      _warnings.add(
+        'pyhgf sets a categorical node\'s α to ±∞ on a missing observation '
+        'and scores its empty cells in the surprise; hgf.dart keeps α and '
+        'scores 0 there (NetworkFixes.categoricalMissing). Series without '
+        'missing observations agree.',
+      );
+    }
     if (plan.maxPosteriorPrecision != 1e10) {
       _warnings.add(
         'hgf.dart caps posterior precisions at '

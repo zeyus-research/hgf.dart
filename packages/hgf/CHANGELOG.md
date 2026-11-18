@@ -1,5 +1,12 @@
 ## Unreleased
 
+- `NetworkFixes.categoricalMissing` (P12, on by default): an unobserved
+  categorical node keeps its α and records a KL divergence and a surprise
+  of 0. pyhgf makes α ±∞ there (the KL NaN on that trial and the next) and
+  scores the empty cells' binary surprise, which `CategoricalSurprise`
+  fits counted. `Network`, `BatchNetwork`, `CategoricalSurprise`'s
+  gradients; in `NetworkFixes.toJson` as `categorical_missing` (a saved
+  network without the key keeps the old behaviour).
 - The relaxed eHGF update always re-predicts with the MGF terms
   `Σ κ²/(2π̂)`, as pyhgf does since #480 (P1 fixed upstream), so
   `Network.ehgfMgfCorrection`, its spec and JSON keys and

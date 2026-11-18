@@ -186,6 +186,8 @@ void main() {
       // Only the input: no node kind with a surprise.
       'dp': 1,
       'ef': 1,
+      // The ef node, the six nodes above its statistics, surprise.
+      'ef_hgf': 8,
       // Choice probabilities, option values, cumulative payoff, and the
       // four hidden nodes (the inputs show through the values).
       'igt': 7,

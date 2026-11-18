@@ -790,7 +790,114 @@ List<FitCase> fitCases() {
       ],
     ));
   }
+  {
+    // A categorical input (node 0) over three categories: binary nodes
+    // 1–3, their value parents 4–6, the shared volatility parent 7. The
+    // agent reports the category it expects (softmax over μ̂ᵏ^β), missing
+    // two responses.
+    final rows = categoricalRows(200, 3, math.Random(13));
+    final model = HgfModel(
+      network: Network()..addCategoricalState(nCategories: 3),
+      response: const CategoricalSoftmaxReadout(),
+      parameters: [
+        Parameter(
+          'omega',
+          targets: [
+            for (final i in [4, 5, 6]) NodeTarget(i, NodeField.tonicVolatility),
+          ],
+          prior: const Normal(-4, 2),
+        ),
+        Parameter.response('inverseTemperature', prior: const LogNormal(0, 1)),
+      ],
+    );
+    final responses =
+        model
+            .simulate(
+              [Subject(inputs: rows)],
+              [
+                [-3.0, 2.0],
+              ],
+              math.Random(2),
+            )
+            .single
+          ..[5] = double.nan;
+    responses[120] = double.nan;
+    cases.add((
+      name: 'categorical: softmax over 3 categories (ω, β), missed responses',
+      model: model,
+      subjects: [Subject(inputs: rows, responses: responses)],
+      points: [
+        [-3.0, 2.0],
+        [-5.0, 0.7],
+      ],
+    ));
+  }
+  {
+    // Four categories, scored by the categorical surprise, missing on
+    // some trials (NetworkFixes.categoricalMissing: they score 0), with
+    // time steps; mean-field eHGF updates (the 3-category case above runs
+    // the default unbounded ones: with four volatility children, the
+    // shared parent's unbounded posterior made SwiftShader, the browser
+    // suite's and CI's WebGPU, lose its GPU process while compiling).
+    final rng = math.Random(14);
+    const n = 150;
+    final rows = categoricalRows(n, 4, rng);
+    final observed = Float64List(n)..fillRange(0, n, 1.0);
+    for (final t in [0, 30, 31, 97]) {
+      observed[t] = 0.0;
+      rows[4 * t + 2] = 1.0; // cells a missing trial must ignore
+    }
+    final steps = Float64List.fromList([
+      for (var t = 0; t < n; t++) 0.5 + rng.nextDouble(),
+    ]);
+    final model = HgfModel(
+      network: Network(
+        volatilityUpdates: VolatilityUpdates.eHGF,
+        meanFieldUpdates: true,
+      )..addCategoricalState(nCategories: 4),
+      response: const ObservationSurprise(CategoricalSurprise()),
+      parameters: [
+        Parameter(
+          'omega',
+          targets: [
+            for (final i in [5, 6, 7, 8])
+              NodeTarget(i, NodeField.tonicVolatility),
+          ],
+          prior: const Normal(-4, 2),
+        ),
+        Parameter.node(
+          'omegaVol',
+          9,
+          NodeField.tonicVolatility,
+          prior: const Normal(-4, 2),
+        ),
+      ],
+    );
+    cases.add((
+      name:
+          'categorical: surprise over 4 categories, eHGF mean-field, '
+          'missing, time steps',
+      model: model,
+      subjects: [Subject(inputs: rows, observed: observed, timeSteps: steps)],
+      points: [
+        [-4.0, -4.0],
+        [-2.5, -6.0],
+      ],
+    ));
+  }
   return cases;
+}
+
+/// [n] one-hot rows over [k] categories: category 0 is likelier in the
+/// first half, the last one in the second.
+Float64List categoricalRows(int n, int k, math.Random rng) {
+  final out = Float64List(n * k);
+  for (var t = 0; t < n; t++) {
+    final favoured = t < n ~/ 2 ? 0 : k - 1;
+    final c = rng.nextDouble() < 0.6 ? favoured : rng.nextInt(k);
+    out[t * k + c] = 1.0;
+  }
+  return out;
 }
 
 /// Evaluates every case's points for every subject on the CPU and on
