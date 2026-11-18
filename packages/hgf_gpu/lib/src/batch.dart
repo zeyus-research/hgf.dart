@@ -174,6 +174,11 @@ final class GpuBatch {
   void setInitial(int node, NodeField field, List<double> values) =>
       _setSlot(kernel.slot(node, field), values);
 
+  /// Initial value of ef-state node [node]'s expected sufficient statistic
+  /// [k] (`VectorField.xis`), per element.
+  void setInitialXis(int node, int k, List<double> values) =>
+      _setSlot(kernel.xisSlot(node, k), values);
+
   void setValueCoupling(int parent, int child, List<double> values) =>
       _setSlot(kernel.valueCouplingSlot(parent, child), values);
 
@@ -185,13 +190,14 @@ final class GpuBatch {
   void setResponseParameter(int j, List<double> values) =>
       _setSlot(kernel.responseParameterSlot(j), values);
 
-  /// Filters [data] (one row of [HgfKernel.nInputs] values per trial,
-  /// shared by every element, or `[trial][input][element]` with
+  /// Filters [data] (one row of [HgfKernel.nColumns] values per trial,
+  /// shared by every element, or `[trial][column][element]` with
   /// [HgfKernel.perElementData]) from the initial state and returns each
   /// element's total response; infinite where the element's state stopped
   /// being finite.
   ///
-  /// [observed] (0/1, the layout of [data]) is required by kernels compiled
+  /// [observed] (0/1, one per trial and input node, and element with
+  /// [HgfKernel.perElementData]) is required by kernels compiled
   /// with [HgfKernel.observedMask]; [timeSteps] (one per trial) by those
   /// compiled with [HgfKernel.timeSteps], which ignore [timeStep];
   /// [responses] (one per trial, or `[trial][element]` with
@@ -233,15 +239,19 @@ final class GpuBatch {
       );
     }
     final b = batchSize;
-    final width = kernel.nInputs * (kernel.perElementData ? b : 1);
+    final width = kernel.nColumns * (kernel.perElementData ? b : 1);
     if (data.length % width != 0) {
       throw ArgumentError('data length must be a multiple of $width');
     }
     final nTime = data.length ~/ width;
     final sw = Stopwatch()..start();
 
-    if (observed != null && observed.length != data.length) {
-      throw ArgumentError('observed must have the shape of data');
+    final maskWidth = kernel.nInputs * (kernel.perElementData ? b : 1);
+    if (observed != null && observed.length != nTime * maskWidth) {
+      throw ArgumentError(
+        'observed must have one flag per trial and input node'
+        '${kernel.perElementData ? ' and element' : ''}',
+      );
     }
     if (timeSteps != null && timeSteps.length != nTime) {
       throw ArgumentError('timeSteps needs one entry per trial ($nTime)');
@@ -346,11 +356,20 @@ final class GpuBatch {
 
   /// The final value of [field] of [node] per element, after [surprise].
   /// Only the fields a dispatch stores are current: the means and
-  /// precisions (expected and posterior) of every node.
-  Future<Float64List> read(int node, NodeField field) async {
+  /// precisions (expected and posterior) of every node, and an ef-state
+  /// node's [NodeField.nus].
+  Future<Float64List> read(int node, NodeField field) =>
+      _readSlot(kernel.slot(node, field));
+
+  /// The final expected sufficient statistic [k] (`VectorField.xis`) of
+  /// ef-state node [node] per element, after [surprise].
+  Future<Float64List> readXis(int node, int k) =>
+      _readSlot(kernel.xisSlot(node, k));
+
+  Future<Float64List> _readSlot(int slot) async {
     final raw = await backend.read(
       _stateBuffer,
-      offset: kernel.slot(node, field) * batchSize * 4,
+      offset: slot * batchSize * 4,
       bytes: batchSize * 4,
     );
     return Float64List.fromList(raw);

@@ -208,14 +208,15 @@ final class _Compiler {
 /// (`TrialCompiler.slotOfVar`, [initialSlots]).
 final class IrReverse {
   factory IrReverse(Network network, GpuResponse response, {int chunk = 64}) {
-    final tc = TrialCompiler(network, response);
+    // ξ and ν of ef-state nodes don't reach the likelihood.
+    final tc = TrialCompiler(network, response, efState: false);
     final ssa = tc.compileSsa(const _TokenSource());
-    final nIn = network.inputIdxs.length;
+    final nIn = network.inputIdxs.length, nCols = network.nInputColumns;
     final c = _Compiler();
     // Per-trial inputs.
     final dt = c.reg['dt'] = c.fresh();
     final logT = c.reg['logT'] = c.fresh();
-    final inputs = [for (var q = 0; q < nIn; q++) c.reg['@in$q'] = c.fresh()];
+    final inputs = [for (var q = 0; q < nCols; q++) c.reg['@in$q'] = c.fresh()];
     final observed = [for (var q = 0; q < nIn; q++) c.reg['@ob$q'] = c.fresh()];
     final present = c.reg['@rp'] = c.fresh();
     final resp = c.reg['@r'] = c.fresh();
@@ -281,6 +282,7 @@ final class IrReverse {
       initialSlots: tc.initialSlots(),
       slotOfVar: tc.slotOfVar,
       nIn: nIn,
+      nCols: nCols,
       usesResponses: response.usesResponses,
       code: Int32List.fromList(c.code),
       primalLength: primal,
@@ -309,6 +311,7 @@ final class IrReverse {
     required this.initialSlots,
     required this.slotOfVar,
     required this.nIn,
+    required this.nCols,
     required this.usesResponses,
     required Int32List code,
     required int primalLength,
@@ -351,7 +354,9 @@ final class IrReverse {
   /// The network's initial slots.
   final List<double> initialSlots;
   final Map<String, int> slotOfVar;
-  final int nIn;
+
+  /// Input nodes (observed flags per trial) and data columns per trial.
+  final int nIn, nCols;
   final bool usesResponses;
 
   /// Registers per element.
@@ -409,7 +414,7 @@ final class IrReverse {
         if (i < m) {
           final s = subjects[subjectOf[e0 + i]];
           subj[i] = s;
-          len[i] = nIn == 0 ? 0 : s.inputs.length ~/ nIn;
+          len[i] = nCols == 0 ? 0 : s.inputs.length ~/ nCols;
         } else {
           subj[i] = null;
           len[i] = 0;
@@ -536,7 +541,7 @@ final class IrReverse {
         if (i < m) {
           final s = subjects[subjectOf[e0 + i]];
           subj[i] = s;
-          len[i] = nIn == 0 ? 0 : s.inputs.length ~/ nIn;
+          len[i] = nCols == 0 ? 0 : s.inputs.length ~/ nCols;
         } else {
           subj[i] = null;
           len[i] = 0;
@@ -810,8 +815,10 @@ final class IrReverse {
       final dt = ts == null ? 1.0 : ts[t];
       regs[_dt * w + i] = dt;
       regs[_logT * w + i] = dt == 1.0 ? 0.0 : math.log(dt);
+      for (var c = 0; c < nCols; c++) {
+        regs[_in[c] * w + i] = on ? s.inputs[t * nCols + c] : 0.0;
+      }
       for (var q = 0; q < nIn; q++) {
-        regs[_in[q] * w + i] = on ? s.inputs[t * nIn + q] : 0.0;
         final o = on ? s.observed : null;
         regs[_ob[q] * w + i] = o == null ? (on ? 1.0 : 0.0) : o[t * nIn + q];
       }

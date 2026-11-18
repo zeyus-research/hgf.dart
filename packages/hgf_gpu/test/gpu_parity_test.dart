@@ -67,6 +67,9 @@ void main() {
     expect(failures, isEmpty, reason: failures.join('\n'));
   });
 
+  // SwiftShader (CI, and `dart test`'s --disable-gpu) compiles every fit
+  // case's kernels in software: some take over a minute (see ROADMAP,
+  // "ef-state on the GPU"), so the fit tests get twice the gpu tag's time.
   test('fit passes: f32 GPU values and gradients match f64 CPU', () async {
     if (backend == null) {
       markTestSkipped('No WebGPU adapter in this browser');
@@ -76,7 +79,7 @@ void main() {
     final failures = await checkFitCases(fitter, log: print);
     expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
     expect(failures, isEmpty, reason: failures.take(20).join('\n'));
-  });
+  }, timeout: const Timeout.factor(2));
 
   test('fit passes in reverse mode, split into dispatches: f32 GPU values '
       'and gradients match f64 CPU', () async {
@@ -92,7 +95,7 @@ void main() {
     final failures = await checkFitCases(fitter, log: print);
     expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
     expect(failures, isEmpty, reason: failures.take(20).join('\n'));
-  });
+  }, timeout: const Timeout.factor(2));
 
   test('hgf_deep fixtures: batchUpdate and predict match f64 CPU', () async {
     if (backend == null) {

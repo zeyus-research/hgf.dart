@@ -74,7 +74,13 @@ final class FitKernel {
     // Tangent directions in the kernel (none in reverse mode, whose job
     // layout still carries dx/dy for the k parameters).
     final kt = reverse ? 0 : k;
-    final c = TrialCompiler(model.network, response, directions: kt);
+    // ξ and ν of ef-state nodes don't reach the likelihood.
+    final c = TrialCompiler(
+      model.network,
+      response,
+      directions: kt,
+      efState: false,
+    );
     // The slot variable each parameter sets (the last one wins, as on the
     // CPU).
     final paramOf = <String, int>{};
@@ -95,9 +101,12 @@ final class FitKernel {
         paramOf[v] = i;
       }
     }
-    final nIn = model.network.inputIdxs.length;
+    final source = _FitSource(
+      model.network.nInputColumns,
+      model.network.inputIdxs.length,
+    );
     final trial = c.compile(
-      _FitSource(nIn),
+      source,
       seeds: kt > 0 ? paramOf.keys.toSet() : const {},
     );
     final slotOfVar = trial.slotOfVar;
@@ -294,7 +303,7 @@ final class FitKernel {
               paramOf,
               k,
               checkpoint,
-              nIn,
+              source,
               workgroupSize,
             )
           : null,
@@ -305,7 +314,8 @@ final class FitKernel {
       directions: k,
       initial: c.initialSlots(),
       workgroupSize: workgroupSize,
-      nInputs: nIn,
+      nInputs: model.network.inputIdxs.length,
+      nColumns: model.network.nInputColumns,
       usesResponses: response.usesResponses,
     );
   }
@@ -318,10 +328,10 @@ final class FitKernel {
     Map<String, int> paramOf,
     int k,
     int cp,
-    int nIn,
+    TrialSource source,
     int workgroupSize,
   ) {
-    final ssa = c.compileSsa(_FitSource(nIn));
+    final ssa = c.compileSsa(source);
     final slotOfVar = trial.slotOfVar;
     final nC = loads.length;
     final total = c.totalSlot;
@@ -478,6 +488,7 @@ final class FitKernel {
     required this.initial,
     required this.workgroupSize,
     required this.nInputs,
+    required this.nColumns,
     required this.usesResponses,
   });
 
@@ -514,7 +525,9 @@ final class FitKernel {
   final List<double> initial;
 
   final int workgroupSize;
-  final int nInputs;
+
+  /// Input nodes (observed flags per trial) and data columns per trial.
+  final int nInputs, nColumns;
   final bool usesResponses;
 
   /// Slots of the tangent buffer per element and direction.
@@ -526,15 +539,15 @@ final class FitKernel {
 GpuResponse gpuResponseOf(ResponseModel response) => irResponseOf(response);
 
 final class _FitSource implements TrialSource {
-  _FitSource(this.nIn);
+  _FitSource(this.nCols, this.nIn);
 
-  final int nIn;
-
-  @override
-  String input(int c) => 'bitcast<f32>(data[inOff + t * ${nIn}u + ${c}u])';
+  final int nCols, nIn;
 
   @override
-  String observed(int c) => 'maskAt(obsOff, t * ${nIn}u + ${c}u)';
+  String input(int c) => 'bitcast<f32>(data[inOff + t * ${nCols}u + ${c}u])';
+
+  @override
+  String observed(int q) => 'maskAt(obsOff, t * ${nIn}u + ${q}u)';
 
   @override
   String responsePresent() => 'respPresent(respOff, t)';

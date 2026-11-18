@@ -1335,10 +1335,14 @@ rest is the sampler's own host work per chain and leapfrog step.
   falls back to it), as do the vector kinds' responses
   (`CategoricalSoftmaxReadout`, categorical and dp surprises), which come
   with the vector node kinds below.
-- [ ] Vector node kinds on the GPU (ef-state first). dp-state's
-  data-dependent branching is the hard one. (The CPU batch runs ef-state
-  and categorical since 2026-11-10; `GpuFitter` falls back to it for
-  them.)
+- [ ] Vector node kinds on the GPU. dp-state's data-dependent branching
+  is the hard one. (The CPU batch runs ef-state and categorical since
+  2026-11-10; `GpuFitter` falls back to it for categorical and dp.)
+  - [x] ef-state (2026-11-18): fixed and HGF learning, any dimension,
+    beside scalar inputs. See "ef-state on the GPU" below.
+  - [ ] categorical-state (with `CategoricalSoftmaxReadout` and the
+    categorical surprise).
+  - [ ] dp-state.
 - [ ] Platform coverage still to measure:
   - Intel GPUs, and Android (Vulkan) and iOS (Metal) devices through
     wgpu-native (Apple M3 Pro through Metal: measured 2026-11-12, see
@@ -1857,6 +1861,68 @@ IR (GPU kernels, CPU reverse mode, exact Hessians).
   install names like `flutter test` does; the build hook now makes room in
   wgpu-native's header (see Phase 9's notes), so both work without
   `bundle: false`.
+
+#### ef-state on the GPU (2026-11-18): done
+
+- **The trial IR** (`hgf_fit/lib/src/ir/trial.dart`, so `HgfKernel`,
+  `FitKernel`, `GradKernel` and the CPU's `IrReverse`) runs ef-state
+  nodes: `predictionErrorEfFixed` (ξ ← ξ + (t(x) − ξ)/(1 + ν) where
+  observed), `predictionErrorEfDynamic` (t(x) and the observed flag to the
+  parents tracking each statistic) and `posteriorEfDynamic` (ν, then ξ).
+  Each ef node has slots for its ξ (`d + d(d+1)/2`) and ν, after the
+  volatility edges. `TrialCompiler(efState: false)` leaves ξ and ν out:
+  no response reads them, so the likelihood kernels (`FitKernel`,
+  `IrReverse`) skip them; with HGF learning the statistics still reach
+  their parents.
+- **Multi-column inputs:** a trial's row is `nInputColumns` wide and
+  observed flags are one per input node, as `Network` and `HgfModel` had
+  them: `TrialSource.input(column)` and `observed(inputNode)`; `GpuFitter`
+  uploads subjects that way, `HgfKernel.nColumns` and `nInputs` give the
+  two widths, and `GpuBatch` checks its mask against `nInputs`. An ef
+  input's first column is also its scalar mean, as on the CPU.
+- **ν in f32:** pyhgf's ν is the mean of δ/Δ, the statistic node's
+  prediction error over its value parent's change of mean. In f32 an
+  observation often rounds to its prediction (δ = 0, then Δ = 0) where
+  f64 still resolves both (`ef_mvn2_hgf2`, element 3, trial 238: 1.027
+  against 1.02699997…), and 0/0 made ξ NaN for good. That parent's only
+  child is the statistic's node (the IR checks it, else
+  `UnsupportedError`), so its update is linear in δ, Δ = K δ, and its
+  posterior (standard, eHGF or unbounded with one expansion) also writes K
+  (`valueMeanGain`, shared with `valueMeanWpe`): the kernel takes δ/Δ as
+  1/K, the same value wherever δ ≠ 0. A first try, Δ from the update's
+  increment instead of `μ − μ̂`, removed the cancellation but not the
+  0/0. Unobserved, the CPU stores ν = 0/0 (NaN) and nothing reads it
+  before it is set again; the kernel keeps the last ν (ξ is the same).
+- **Tests:** `gpu_check` now also compares every ef node's final ξ and ν
+  (ν per element perturbed) with `BatchNetwork`, and lone ef nodes run
+  without a total. All 11 ef fixtures pass on Metal: totals and ξ within
+  3.2e-6 relative (`ef_two_nodes_hgf1`), ν within 2.2e-6 (SwiftShader in
+  Chrome: 1.1e-6 and 1.9e-6). Two ef models in the shared fit cases (a
+  bivariate HGF-1 with missing observations and time steps; a continuous
+  input beside a univariate HGF-1 ef input, each missing on its own
+  trials): IR reverse = forward in f64, exact Hessians = central
+  differences, and on the GPU (forward and reverse mode) values within
+  4e-7 and gradients within 1.4e-6 of f64. naga validates ef kernels under
+  every update mode and kernel option.
+- **SwiftShader compile times** (Chrome's software WebGPU, which the
+  browser suite and the `gpu-web` CI job use): a bivariate HGF-2 case
+  (16 nodes, unbounded updates) made the suite lose Chrome's GPU process,
+  since its 47 KiB likelihood kernel took 74 s to compile and its 112 KiB
+  forward kernel ~150 s. Size isn't the driver: the HGF-1 case's 96 KiB
+  reverse sweep compiles in 0.9 s, the mixed case's 91 KiB one in 83 s;
+  both slow kernels have unbounded posteriors (Lambert W's loop, which
+  SwiftShader may unroll). Open: find what SwiftShader chokes on, and
+  whether hardware WebGPU in Chrome and Firefox is affected. The shared
+  bivariate case is HGF-1 for now and the mixed case runs eHGF updates
+  (which also covers ν's gain under eHGF in fits); with them the browser
+  suite's reverse-mode fit test took 7:55 of its 8 minutes on an M3 Pro,
+  so both fit tests now get twice the time. On Metal the native fit
+  suites ran in 15 s with the HGF-2 case in them.
+- **Speed** (`benchmark/bin/fit_ef_gpu.dart`, M3 Pro, 320 trials, CPU on
+  one isolate in f64): a 1-d HGF-2 ef node (7 nodes) at 2000 elements
+  220 → 1.6 ms per likelihood pass (135×), 16384: 2.0 s → 6.4 ms; a 2-d
+  one (16 nodes) at 16384: 5.0 s → 7.2 ms, with gradients 12.2 s →
+  214 ms (57×).
 
 ### Phase 8: App -> HGF GUI modelling
 
@@ -3428,9 +3494,11 @@ upstream (#480) and ported (`ehgfMgfCorrection` removed; fixtures at
 `4db3b093`); hgf_deep's weight-belief rule, `updateInputLayer` and sample
 weights run on the GPU; the macOS build hook makes `dart test` and
 `flutter test` work with the bundled wgpu-native; a CI job runs the
-WebGPU suite on SwiftShader. Phase 7b's open items: vector node kinds on
-the GPU (they need vector slots and multi-column inputs in the trial IR),
-sampler ensembles on worker isolates, tuning, and hardware coverage. Vector node kinds on the GPU and a
+WebGPU suite on SwiftShader. ef-state runs on the GPU (2026-11-18: vector
+slots and multi-column inputs in the trial IR; ν from the update's gain).
+Phase 7b's open items: categorical and dp-state on the GPU, sampler
+ensembles on worker isolates, tuning, and hardware coverage. Categorical
+and dp-state on the GPU and a
 faster dp candidate search can run alongside.
 
 ```sh

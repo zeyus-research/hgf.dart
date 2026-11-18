@@ -1,5 +1,15 @@
 ## Unreleased
 
+- ef-state nodes in the kernels (`HgfKernel`, `FitKernel`, so `GpuFitter`
+  no longer falls back to the CPU for them): fixed and HGF learning, any
+  dimension, beside scalar inputs. A trial's data row is
+  `Network.nInputColumns` wide (`HgfKernel.nColumns`) and observed flags
+  are one per input node (`nInputs`), as on the CPU; `GpuFitter` and
+  `GpuBatch` take subjects and masks in that layout. `GpuBatch` reads and
+  sets ξ (`readXis`, `setInitialXis`) and ν (`NodeField.nus`). ν's δ/Δ
+  is taken as 1/K, K the gain of the update of the node that scales it
+  (in f32 an observation often rounds to its prediction, δ = Δ = 0). All
+  eleven ef fixtures match f64 on Metal (totals and ξ ~3e-6, ν ~2e-6).
 - hgf_deep's newer learning options on the GPU, in `GpuDeepNetwork`
   (`batchUpdate`, `trainEpoch`) and `GpuDeepEnsemble.fit`: the weight-belief
   rule (`LearningKind.synapticUncertainty` with `synapticUncertainty:`; the

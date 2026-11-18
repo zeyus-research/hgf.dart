@@ -18,8 +18,9 @@ import 'fit_kernel.dart';
 /// mode; the priors and transforms are added on the host in `f64`.
 ///
 /// Passes that need `f64` ([Pass.precise]: finite differences, Hessians,
-/// the values `fitMap` reports) and models without a GPU kernel (vector
-/// nodes, custom couplings or response models) run on the CPU: on [cpu]
+/// the values `fitMap` reports) and models without a GPU kernel
+/// (categorical and dp-state nodes, custom couplings or response models)
+/// run on the CPU: on [cpu]
 /// if given, else on the calling isolate. So `laplace` and the final
 /// estimates of `fitMap` match the CPU's to `f64` accuracy at the optimum
 /// the GPU found.
@@ -79,7 +80,7 @@ final class GpuFitter implements PassRunner {
   String? fallbackReason;
 
   final _models = <(Network, ResponseModel, String, bool, int), _Model?>{};
-  final _subjectData = Expando<Map<(int, bool), _SubjectData>>();
+  final _subjectData = Expando<Map<(int, int, bool), _SubjectData>>();
   bool _disposed = false;
 
   @override
@@ -165,7 +166,7 @@ final class GpuFitter implements PassRunner {
     // of 8, so similar lengths share a kernel).
     var checkpoint = 0;
     if (gradients && gradientMode != GpuGradientMode.forward) {
-      final t = _maxTime(subjects, model.network.inputIdxs.length);
+      final t = _maxTime(subjects, model.network.nInputColumns);
       checkpoint = math.max(8, (math.sqrt(t).ceil() + 7) ~/ 8 * 8);
     }
     final key = (model.network, model.response, sig, gradients, checkpoint);
@@ -198,20 +199,27 @@ final class GpuFitter implements PassRunner {
     return _models[key] = m;
   }
 
-  /// The longest series among [subjects] (trials).
-  static int _maxTime(List<Subject> subjects, int nIn) {
+  /// The longest series among [subjects] (trials of [nCols] columns).
+  static int _maxTime(List<Subject> subjects, int nCols) {
     var t = 0;
     for (final s in subjects) {
-      t = math.max(t, nIn == 0 ? 0 : s.inputs.length ~/ nIn);
+      t = math.max(t, nCols == 0 ? 0 : s.inputs.length ~/ nCols);
     }
     return t;
   }
 
   _SubjectData _data(List<Subject> subjects, HgfModel model) {
+    final nCols = model.network.nInputColumns;
     final nIn = model.network.inputIdxs.length;
     final uses = model.response.usesResponses;
     final byLayout = _subjectData[subjects] ??= {};
-    return byLayout[(nIn, uses)] ??= _SubjectData(backend, subjects, nIn, uses);
+    return byLayout[(nCols, nIn, uses)] ??= _SubjectData(
+      backend,
+      subjects,
+      nCols,
+      nIn,
+      uses,
+    );
   }
 
   /// Releases the GPU buffers (the backend stays open).
@@ -225,25 +233,30 @@ final class GpuFitter implements PassRunner {
 }
 
 /// The subjects' series on the GPU: one data buffer and a subject table.
+/// Inputs have [nCols] columns per trial, observed flags one per input
+/// node ([nIn]).
 final class _SubjectData {
   factory _SubjectData(
     GpuBackend backend,
     List<Subject> subjects,
+    int nCols,
     int nIn,
     bool usesResponses,
   ) {
     var words = 0;
     var maxTime = 0;
     for (final s in subjects) {
-      if (s.inputs.length % nIn != 0) {
+      if (s.inputs.length % nCols != 0) {
         throw ArgumentError(
-          '$s: ${s.inputs.length} inputs is not a multiple of $nIn input '
-          'nodes',
+          '$s: ${s.inputs.length} inputs is not a multiple of $nCols input '
+          'columns',
         );
       }
-      final nTime = s.inputs.length ~/ nIn;
-      if (s.observed case final o? when o.length != s.inputs.length) {
-        throw ArgumentError('$s: observed must have the shape of inputs');
+      final nTime = s.inputs.length ~/ nCols;
+      if (s.observed case final o? when o.length != nTime * nIn) {
+        throw ArgumentError(
+          '$s: observed must have one flag per trial and input node',
+        );
       }
       if (s.timeSteps case final ts? when ts.length != nTime) {
         throw ArgumentError('$s: timeSteps must have one entry per trial');
@@ -274,11 +287,11 @@ final class _SubjectData {
 
     for (var j = 0; j < subjects.length; j++) {
       final s = subjects[j];
-      final nTime = s.inputs.length ~/ nIn;
+      final nTime = s.inputs.length ~/ nCols;
       table
         ..[j * subjectStride] = nTime
         ..[j * subjectStride + 1] = put(s.inputs, s.inputs.length)
-        ..[j * subjectStride + 2] = put(s.observed, s.inputs.length)
+        ..[j * subjectStride + 2] = put(s.observed, nTime * nIn)
         ..[j * subjectStride + 3] = put(s.timeSteps, nTime)
         ..[j * subjectStride + 4] = usesResponses
             ? put(s.responses, nTime)

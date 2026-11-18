@@ -62,8 +62,7 @@ final class GradKernel {
       throw ArgumentError.value(checkpoint, 'checkpoint', 'Must be ≥ 2');
     }
     final c = TrialCompiler(network, response, directions: k);
-    final nIn = network.inputIdxs.length;
-    final source = _Source(nIn);
+    final source = _Source(network.nInputColumns);
     final trial = c.compile(source, seeds: k > 0 ? params.toSet() : const {});
     final slotOfVar = trial.slotOfVar;
     final loads = slotOfVar.keys.where(trial.carried.contains).toList();
@@ -382,15 +381,15 @@ final class GradJob {
 }
 
 final class _Source implements TrialSource {
-  _Source(this.nIn);
+  _Source(this.nCols);
 
-  final int nIn;
-
-  @override
-  String input(int c) => 'data[t * ${nIn}u + ${c}u]';
+  final int nCols;
 
   @override
-  String observed(int c) => '1.0f';
+  String input(int c) => 'data[t * ${nCols}u + ${c}u]';
+
+  @override
+  String observed(int q) => '1.0f';
 
   @override
   String responsePresent() => 'true';

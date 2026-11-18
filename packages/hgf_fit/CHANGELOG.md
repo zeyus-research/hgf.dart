@@ -1,5 +1,13 @@
 ## Unreleased
 
+- ef-state nodes in the trial IR (so in `IrReverse` and the GPU
+  kernels): the sufficient statistics to the tracking parents, ν and ξ
+  (`TrialCompiler.efState`: off in the likelihood kernels, which never
+  read them). Inputs span `Network.nInputColumns` columns:
+  `TrialSource.input` takes a column, `TrialSource.observed` an input
+  node. Two ef-state models in the shared fit cases (a bivariate HGF-1
+  with missing observations and time steps; a continuous input beside an
+  ef-state one).
 - The trial IR follows pyhgf #478 (input drift and noise prediction error
   without Δt, t·α on value messages from state children), so `IrReverse`
   and the GPU kernels match `Network` with `timeSteps`. The Python

@@ -675,6 +675,121 @@ List<FitCase> fitCases() {
       ],
     ));
   }
+  {
+    // ef-state, bivariate, HGF-1 learning: five statistics, each tracked by
+    // a node (1 + 2s) with a value parent (2 + 2s). Two columns per trial,
+    // one observed flag. (HGF-2's 16 nodes make kernels that SwiftShader,
+    // the browser suite's WebGPU on CI, takes minutes to compile.)
+    final rng = math.Random(11);
+    const n = 180;
+    final x = walk(n, rng), y = walk(n, rng);
+    final inputs = Float64List(2 * n);
+    for (var t = 0; t < n; t++) {
+      inputs[2 * t] = 0.5 * x[t];
+      inputs[2 * t + 1] = 0.3 * (x[t] + y[t]);
+    }
+    final observed = Float64List(n)..fillRange(0, n, 1.0);
+    for (final t in [0, 17, 18, 90, 151]) {
+      observed[t] = 0.0;
+    }
+    final steps = Float64List.fromList([
+      for (var t = 0; t < n; t++) t % 3 == 0 ? 0.5 : 1.0,
+    ]);
+    final model = HgfModel(
+      network: Network()..addEfState(dimension: 2, learning: EfLearning.hgf1),
+      response: const ObservationSurprise(TotalGaussianSurprise()),
+      parameters: [
+        Parameter(
+          'omega1',
+          targets: [
+            for (var s = 0; s < 5; s++)
+              NodeTarget(1 + 2 * s, NodeField.tonicVolatility),
+          ],
+          prior: const Normal(-4, 2),
+        ),
+        Parameter(
+          'omega2',
+          targets: [
+            for (var s = 0; s < 5; s++)
+              NodeTarget(2 + 2 * s, NodeField.tonicVolatility),
+          ],
+          prior: const Normal(-6, 2),
+        ),
+        Parameter.node(
+          'pi1',
+          1,
+          NodeField.precision,
+          prior: const LogNormal(0, 1),
+        ),
+      ],
+    );
+    cases.add((
+      name:
+          'ef-state 2-d HGF-1: total surprise, missing observations, time '
+          'steps',
+      model: model,
+      subjects: [Subject(inputs: inputs, observed: observed, timeSteps: steps)],
+      points: [
+        [-4.0, -6.0, 1.0],
+        [-2.5, -5.0, 2.0],
+      ],
+    ));
+  }
+  {
+    // A continuous input (node 0, with nodes 1 and 2 above) beside a
+    // univariate ef-state input with HGF-1 learning (node 3; statistics
+    // tracked by 4 and 6 under 5 and 7): columns [u, x], observed flags
+    // per input node, each missing on its own trials. eHGF updates (the
+    // bivariate case above runs the default, unbounded ones).
+    final rng = math.Random(12);
+    const n = 160;
+    final u = walk(n, rng), v = walk(n, rng);
+    final inputs = Float64List(2 * n);
+    final observed = Float64List(2 * n)..fillRange(0, 2 * n, 1.0);
+    for (var t = 0; t < n; t++) {
+      inputs[2 * t] = u[t];
+      inputs[2 * t + 1] = 0.4 * v[t];
+    }
+    for (final t in [3, 40, 41]) {
+      observed[2 * t] = 0.0;
+    }
+    for (final t in [0, 41, 99]) {
+      observed[2 * t + 1] = 0.0;
+    }
+    final model = HgfModel(
+      network: Network(volatilityUpdates: VolatilityUpdates.eHGF)
+        ..addNodes(precision: 2)
+        ..addNodes(valueChildren: [0], tonicVolatility: -3)
+        ..addNodes(volatilityChildren: [1], tonicVolatility: -4)
+        ..addEfState(learning: EfLearning.hgf1),
+      response: const ObservationSurprise(TotalGaussianSurprise()),
+      parameters: [
+        Parameter.node(
+          'omega2',
+          1,
+          NodeField.tonicVolatility,
+          prior: const Normal(-3, 2),
+        ),
+        Parameter(
+          'omegaEf',
+          targets: [
+            NodeTarget(5, NodeField.tonicVolatility),
+            NodeTarget(7, NodeField.tonicVolatility),
+          ],
+          prior: const Normal(-4, 2),
+        ),
+      ],
+    );
+    cases.add((
+      name: 'mixed inputs: continuous beside ef-state HGF-1, missing per input',
+      model: model,
+      subjects: [Subject(inputs: inputs, observed: observed)],
+      points: [
+        [-3.0, -4.0],
+        [-2.0, -2.5],
+      ],
+    ));
+  }
   return cases;
 }
 

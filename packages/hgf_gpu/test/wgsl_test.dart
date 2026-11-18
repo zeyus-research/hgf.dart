@@ -37,8 +37,15 @@ void main() {
   });
 
   test('unsupported node kinds and couplings throw', () {
-    final ef = Network()..addEfState();
-    expect(() => HgfKernel(ef), throwsUnsupportedError);
+    final categorical = Network()..addCategoricalState(nCategories: 3);
+    expect(() => HgfKernel(categorical), throwsUnsupportedError);
+    // ef-state learning whose rate-scaling node has another child.
+    final shared = Network()..addEfState(learning: EfLearning.hgf1);
+    expect(HgfKernel(shared).nColumns, 1);
+    final extra = Network()
+      ..addEfState(learning: EfLearning.hgf1)
+      ..addNodes(valueParents: [2]);
+    expect(() => HgfKernel(extra), throwsUnsupportedError);
     final custom = Network()
       ..addNodes()
       ..addNodes(
@@ -75,6 +82,54 @@ void main() {
       }
     }
   }, skip: naga ? false : 'naga not installed');
+
+  test('ef-state networks: columns, slots and valid WGSL', () {
+    final dir = Directory.systemTemp.createTempSync('hgf_ef_wgsl');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    var k = 0;
+    for (final mode in VolatilityUpdates.values) {
+      final nets = [
+        Network(volatilityUpdates: mode)..addEfState(dimension: 3, nus: 2),
+        Network(volatilityUpdates: mode)
+          ..addEfState(dimension: 2, learning: EfLearning.hgf2),
+        Network(volatilityUpdates: mode)
+          ..addNodes()
+          ..addNodes(valueChildren: [0])
+          ..addEfState(nNodes: 2, learning: EfLearning.hgf3),
+      ];
+      for (final net in nets) {
+        for (final options in [(false, false, false), (true, true, true)]) {
+          final kernel = HgfKernel(
+            net,
+            perElementData: options.$1,
+            observedMask: options.$2,
+            timeSteps: options.$3,
+          );
+          expect(kernel.nColumns, net.nInputColumns);
+          expect(kernel.nInputs, net.inputIdxs.length);
+          for (final i in [
+            for (var i = 0; i < net.nNodes; i++)
+              if (net.kindOf(i) == NodeKind.efState) i,
+          ]) {
+            final xis = net.getInitialVector(i, VectorField.xis);
+            expect(kernel.xisLength(i), xis.length);
+            for (var q = 0; q < xis.length; q++) {
+              expect(kernel.initial[kernel.xisSlot(i, q)], xis[q]);
+            }
+            expect(
+              kernel.initial[kernel.slot(i, NodeField.nus)],
+              net.getInitial(i, NodeField.nus),
+            );
+          }
+          if (!naga) continue;
+          final f = File('${dir.path}/e${k++}.wgsl')
+            ..writeAsStringSync(kernel.source);
+          final r = Process.runSync('naga', [f.path]);
+          expect(r.exitCode, 0, reason: '$mode $options\n${r.stderr}');
+        }
+      }
+    }
+  });
 
   test('fit kernels: every update mode, response and tangent width', () {
     final dir = Directory.systemTemp.createTempSync('hgf_fit_wgsl');

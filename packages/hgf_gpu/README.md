@@ -57,13 +57,15 @@ small dependent steps); 1024 medium networks train ~200× faster than one
 core runs them (`melos run bench:gpu-ensemble`).
 
 Status: see Phase 7 in `docs/ROADMAP.md`.
-- Supported: continuous, binary and constant nodes; standard, eHGF and
+- Supported: continuous, binary, constant and ef-state nodes (fixed and
+  HGF learning, any dimension; `GpuBatch.readXis`); standard, eHGF and
   unbounded updates; named couplings; missing observations; time steps.
 - Responses: observation surprises (`TotalGaussianSurprise`,
   `FirstLevelGaussianSurprise`, `FirstLevelBinarySurprise`) and readouts
   with fitted parameters (`GaussianReadout`, `BinarySoftmaxReadout`).
 - Precision: f32. Totals match f64 to ~1e-6 relative and gradients to ~1e-5.
-- Not yet: vector node kinds, custom couplings or response models.
+- Not yet: categorical and dp-state nodes, custom couplings or response
+  models (`GpuFitter` runs those on the CPU).
 - Deep networks: `batchUpdate`, `trainEpoch` (SGD, Adam, or the
   weight-belief rule `LearningKind.synapticUncertainty`) and `predict`,
   every layer kind, volatility update and setting `hgf_deep` has

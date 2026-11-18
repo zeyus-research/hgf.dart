@@ -174,12 +174,17 @@ abstract final class F32 {
 
 /// Where a trial's observations and response come from (WGSL
 /// expressions, valid inside the trial loop where `t` is the trial).
+///
+/// A trial's row has `Network.nInputColumns` columns: one per scalar input
+/// node, `dimension` for an ef-state input. Observed flags have one per
+/// input node.
 abstract interface class TrialSource {
   /// Observation of input column [c] (`f32`).
   String input(int c);
 
-  /// Whether column [c] is observed (`f32`, 0 or 1).
-  String observed(int c);
+  /// Whether input node [q] (the `q`-th of `Network.inputIdxs`) is
+  /// observed (`f32`, 0 or 1).
+  String observed(int q);
 
   /// Whether this trial has a response (`bool`).
   String responsePresent();
@@ -224,15 +229,26 @@ final class CompiledTrial {
 /// directions for the slot variables in `seeds` and everything they reach.
 ///
 /// The slot layout: every node field of [gpuNodeFields] (`field * n +
-/// node`), the value edges, the volatility edges, the response's
-/// parameters ([GpuResponse.defaults]), then the running total, its Kahan
-/// compensation, the non-finite flag and the result (`resultSlot`).
+/// node`), the value edges, the volatility edges, each ef-state node's
+/// expected sufficient statistics ξ and learning rate ν ([xisSlot],
+/// [nusSlot]), the response's parameters ([GpuResponse.defaults]), then
+/// the running total, its Kahan compensation, the non-finite flag and the
+/// result (`resultSlot`).
+///
+/// With [efState] false, ef-state nodes keep ξ and ν at their initial
+/// values: no response reads them, so a likelihood doesn't depend on them
+/// (with HGF learning, the sufficient statistics still reach the parents
+/// that track them). The fitting kernels leave them out.
 ///
 /// Throws [UnsupportedError] for node kinds and update steps without a GPU
-/// kernel (vector-valued nodes, custom couplings).
+/// kernel (categorical and dp-state nodes, custom couplings).
 final class TrialCompiler {
-  TrialCompiler(this.net, this.response, {this.directions = 0})
-    : n = net.nNodes {
+  TrialCompiler(
+    this.net,
+    this.response, {
+    this.directions = 0,
+    this.efState = true,
+  }) : n = net.nNodes {
     net.build();
     for (var i = 0; i < n; i++) {
       switch (net.kindOf(i)) {
@@ -240,20 +256,49 @@ final class TrialCompiler {
             NodeKind.binaryState ||
             NodeKind.constantState:
           break;
+        case NodeKind.efState:
+          // A dp-state cluster has its dp node as value child; dp-state has
+          // no kernel (above), so only input ef-state nodes get here.
+          _checkEfParents(i);
+          efNodes.add(i);
+          if (efState) {
+            for (final p in net.valueParentsOf(i)) {
+              final pp = net.valueParentsOf(p).first;
+              if (net.valueChildrenOf(pp).length != 1 ||
+                  net.volatilityChildrenOf(pp).isNotEmpty) {
+                throw UnsupportedError(
+                  'ef-state node $i: node $pp, which scales its learning '
+                  'rate, has children besides node $p',
+                );
+              }
+              efScaleNodes.add(pp);
+            }
+          }
         default:
           throw UnsupportedError(
             '${net.kindOf(i).pyhgfName} has no GPU kernel yet',
           );
       }
     }
+    var col = 0;
     for (final i in net.inputIdxs) {
-      if (net.nInputColumns != net.inputIdxs.length) {
-        throw UnsupportedError('Multi-column inputs have no GPU kernel yet');
+      switch (net.kindOf(i)) {
+        case NodeKind.continuousState || NodeKind.binaryState:
+          inputColumns.add((col, 1));
+          col++;
+        case NodeKind.efState:
+          final d = efDimension(i);
+          inputColumns.add((col, d));
+          col += d;
+        default:
+          throw UnsupportedError('Input node $i: ${net.kindOf(i).pyhgfName}');
       }
-      if (net.kindOf(i) != NodeKind.continuousState &&
-          net.kindOf(i) != NodeKind.binaryState) {
-        throw UnsupportedError('Input node $i: ${net.kindOf(i).pyhgfName}');
-      }
+    }
+    if (col != net.nInputColumns) {
+      throw StateError(
+        'Input columns: $col, the network has '
+        '${net.nInputColumns}',
+      );
     }
     for (var c = 0; c < n; c++) {
       for (final p in net.valueParentsOf(c)) {
@@ -317,6 +362,15 @@ final class TrialCompiler {
     for (final (p, c) in volatilityEdges) {
       slotOfVar['k${p}_$c'] = s++;
     }
+    for (final i in efNodes) {
+      for (var k = 0; k < efStatistics(i); k++) {
+        slotOfVar['xi${i}_$k'] = s++;
+      }
+      slotOfVar['nu$i'] = s++;
+    }
+    for (final i in efScaleNodes) {
+      slotOfVar['gain$i'] = s++;
+    }
     for (var j = 0; j < response.defaults.length; j++) {
       slotOfVar['rp$j'] = s++;
     }
@@ -329,6 +383,25 @@ final class TrialCompiler {
     }
   }
 
+  /// HGF learning: each sufficient statistic's continuous value parent,
+  /// which has a value parent of its own (whose change scales ν).
+  void _checkEfParents(int i) {
+    final parents = net.valueParentsOf(i);
+    if (parents.isEmpty) return;
+    if (parents.length != efStatistics(i)) {
+      throw StateError('ef-state node $i: one value parent per statistic');
+    }
+    for (final p in parents) {
+      if (net.kindOf(p) != NodeKind.continuousState ||
+          net.valueParentsOf(p).isEmpty) {
+        throw UnsupportedError(
+          'ef-state node $i: parent $p must be a continuous node with a '
+          'value parent',
+        );
+      }
+    }
+  }
+
   final Network net;
   final GpuResponse response;
 
@@ -336,9 +409,60 @@ final class TrialCompiler {
   final int directions;
   final int n;
 
+  /// Whether ef-state nodes update ξ and ν (see the class documentation).
+  final bool efState;
+
   final valueEdges = <(int, int)>[];
   final volatilityEdges = <(int, int)>[];
   final slotOfVar = <String, int>{};
+
+  /// The ef-state nodes, in node order.
+  final efNodes = <int>[];
+
+  /// With [efState]: the nodes whose change of mean Δ scales an ef-state
+  /// node's ν (the value parent of each statistic's node). Each has that
+  /// statistic's node as its only child, so its update is linear in the
+  /// child's prediction error δ, Δ = K δ, and its posterior also writes the
+  /// gain K (`gain`, 0 where the child is unobserved). ν takes δ/Δ as 1/K:
+  /// in f32 an observation often equals its prediction (δ = Δ = 0, so δ/Δ
+  /// would be NaN), where f64 still resolves both.
+  final efScaleNodes = <int>{};
+
+  /// Each input node's first data column and number of columns, in
+  /// `Network.inputIdxs` order.
+  final inputColumns = <(int, int)>[];
+
+  /// The observation dimension of ef-state node [i].
+  int efDimension(int i) => net.vectorLength(i, VectorField.mean);
+
+  /// The number of sufficient statistics of ef-state node [i]
+  /// (`d + d(d+1)/2`).
+  int efStatistics(int i) => net.vectorLength(i, VectorField.xis);
+
+  /// Slot of ef-state node [node]'s expected sufficient statistic [k] (ξ).
+  int xisSlot(int node, int k) {
+    final v = slotOfVar['xi${node}_$k'];
+    if (v == null) throw ArgumentError('No statistic $k of ef-state $node');
+    return v;
+  }
+
+  /// Slot of ef-state node [node]'s learning rate ν.
+  int nusSlot(int node) {
+    final v = slotOfVar['nu$node'];
+    if (v == null) throw ArgumentError('Node $node is not an ef-state node');
+    return v;
+  }
+
+  /// The slot variable of [field] of [node]: a node field of
+  /// [gpuNodeFields], or an ef-state node's [NodeField.nus]; null if it
+  /// has none.
+  String? varOf(int node, NodeField field) {
+    if (gpuNodeFields.contains(field)) return fieldVar(node, field);
+    if (field == NodeField.nus && slotOfVar.containsKey('nu$node')) {
+      return 'nu$node';
+    }
+    return null;
+  }
 
   /// Slot of the running total (then compensation, flag, result).
   late final int totalSlot;
@@ -394,6 +518,13 @@ final class TrialCompiler {
         out[s++] = x;
       }
     }
+    for (final i in efNodes) {
+      for (final x in net.getInitialVector(i, VectorField.xis)) {
+        out[s++] = x;
+      }
+      out[s++] = net.getInitial(i, NodeField.nus);
+    }
+    s += efScaleNodes.length; // gain: written before read
     for (final d in response.defaults) {
       out[s++] = d;
     }
@@ -575,8 +706,17 @@ final class _Pass {
     final inputs = net.inputIdxs;
     for (var q = 0; q < inputs.length; q++) {
       final i = inputs[q];
-      w(i, NodeField.mean, Lit(source.input(q)));
+      final (col, d) = c.inputColumns[q];
+      // An ef-state input's first column is also its scalar mean.
+      w(i, NodeField.mean, Lit(source.input(col)));
       w(i, NodeField.observed, Lit(source.observed(q)));
+      if (kind(i) == NodeKind.efState) {
+        _efObservation[i] = [
+          r(i, NodeField.mean),
+          for (var j = 1; j < d; j++)
+            let('x${i}_$j', Lit(source.input(col + j))),
+        ];
+      }
     }
     for (final (i, step) in seq.updates) {
       _step(i, step);
@@ -725,6 +865,14 @@ final class _Pass {
     return Ref(current[v] ?? v);
   }
 
+  /// Writes a slot variable other than a node field.
+  void _slotWrite(String v, Object e) {
+    final x = ex(e);
+    firstAccessRead.putIfAbsent(v, () => false);
+    written.add(v);
+    set(v, x);
+  }
+
   Ex a(int parent, int child) => _slotRead('a${parent}_$child');
   Ex kap(int parent, int child) => _slotRead('k${parent}_$child');
   Ex rp(int j) => _slotRead('rp$j');
@@ -798,6 +946,12 @@ final class _Pass {
         _posteriorEhgf(i, meanField: true);
       case UpdateStep.posteriorContinuousUnbounded:
         _posteriorUnbounded(i);
+      case UpdateStep.predictionErrorEfFixed:
+        _predictionErrorEfFixed(i);
+      case UpdateStep.predictionErrorEfDynamic:
+        _predictionErrorEfDynamic(i);
+      case UpdateStep.posteriorEfDynamic:
+        _posteriorEfDynamic(i);
       default:
         throw UnsupportedError('${step.name} has no GPU kernel yet');
     }
@@ -1087,15 +1241,31 @@ final class _Pass {
   Ex valueMeanWpe(int i, Ex prec, {required bool meanField}) {
     final children = net.valueChildrenOf(i);
     if (children.isEmpty) return zero;
-    final fn = couplingFn(i);
     return sum([
       for (final ch in children)
-        (_vcAlpha(i, ch) *
-                dg(fn, r(i, NodeField.mean)) *
-                relaxedGain(ch, meanField: meanField) /
-                prec) *
+        valueMeanGain(i, ch, prec, meanField: meanField) *
             (r(ch, NodeField.valuePredictionError) * r(ch, NodeField.observed)),
     ]);
+  }
+
+  /// The mean increment of [i] per unit of value child [ch]'s prediction
+  /// error, at precision [prec].
+  Ex valueMeanGain(int i, int ch, Ex prec, {required bool meanField}) =>
+      _vcAlpha(i, ch) *
+      dg(couplingFn(i), r(i, NodeField.mean)) *
+      relaxedGain(ch, meanField: meanField) /
+      prec;
+
+  /// The gain of [i], which scales an ef-state node's ν
+  /// ([TrialCompiler.efScaleNodes]): its mean increment per unit of its
+  /// only child's prediction error, 0 where the child is unobserved.
+  void _efGain(int i, Ex prec, {required bool meanField}) {
+    final ch = net.valueChildrenOf(i).single;
+    _slotWrite(
+      'gain$i',
+      valueMeanGain(i, ch, prec, meanField: meanField) *
+          r(ch, NodeField.observed),
+    );
   }
 
   /// The standard volatility precision increments of [i] (of its noise
@@ -1168,6 +1338,7 @@ final class _Pass {
     final prec = let('prec', observedOrPredicted(i, hasObs, wpe));
     final vm = let('vm', valueMeanWpe(i, prec, meanField: meanField));
     final volm = let('volm', volatilityMeanWpe(i, prec));
+    if (c.efScaleNodes.contains(i)) _efGain(i, prec, meanField: meanField);
     w(i, NodeField.precision, prec);
     w(i, NodeField.mean, r(i, NodeField.expectedMean) + (vm + volm));
   }
@@ -1200,6 +1371,7 @@ final class _Pass {
     final epi = let('epi', r(i, NodeField.expectedPrecision));
     final vm = let('vm', valueMeanWpe(i, epi, meanField: meanField));
     final volm = let('volm', volatilityMeanWpe(i, epi));
+    if (c.efScaleNodes.contains(i)) _efGain(i, epi, meanField: meanField);
     w(i, NodeField.mean, r(i, NodeField.expectedMean) + vm + volm);
     final hasObs = letCond('hasObs', anyObserved(i));
     final mgf = !meanField;
@@ -1250,6 +1422,8 @@ final class _Pass {
       final vmw = let('vmw', valueMeanWpe(i, pp, meanField: mf));
       final nmw = let('nmw', volatilityMeanWpe(i, pp, noiseOnly: true));
       pm = let('pm', emi + vmw + nmw);
+      // No volatility children, so one expansion: the mean is pm.
+      if (c.efScaleNodes.contains(i)) _efGain(i, pp, meanField: mf);
     }
     final nc = children.length;
     // Per child: observed, coupling, ω̃, previous variance, b, vope.
@@ -1440,6 +1614,79 @@ final class _Pass {
       ),
     );
     w(i, NodeField.mean, pmean);
+  }
+
+  // ---------------------------------------------------------------------------
+  // ef-state
+  // ---------------------------------------------------------------------------
+
+  /// Each ef-state input's observation this trial (its columns).
+  final _efObservation = <int, List<Ex>>{};
+
+  /// t(x) of [i]'s observation: `x`, then the lower triangle of `x xᵀ` row
+  /// by row (`[x, x²]` in one dimension).
+  List<Ex> _efSufficientStatistics(int i) {
+    final x = _efObservation[i]!;
+    return [
+      ...x,
+      for (var row = 0; row < x.length; row++)
+        for (var col = 0; col <= row; col++) x[row] * x[col],
+    ];
+  }
+
+  /// ξ ← ξ + (t(x) − ξ) / (1 + ν) where [on] (the node is observed).
+  void _efMoveXis(int i, Cond on) {
+    final ss = _efSufficientStatistics(i);
+    final rate = let('rate', one / (one + _slotRead('nu$i')));
+    for (var k = 0; k < ss.length; k++) {
+      final xi = _slotRead('xi${i}_$k');
+      _slotWrite('xi${i}_$k', sel(xi, xi + rate * (ss[k] - xi), on));
+    }
+  }
+
+  /// A fixed learning rate (no parents).
+  void _predictionErrorEfFixed(int i) {
+    if (!c.efState) return;
+    _efMoveXis(i, letCond('on', ne(r(i, NodeField.observed), zero)));
+  }
+
+  /// HGF learning: each sufficient statistic becomes the observation of
+  /// the value parent tracking it.
+  void _predictionErrorEfDynamic(int i) {
+    final ss = _efSufficientStatistics(i);
+    final ob = let('ob', r(i, NodeField.observed));
+    final parents = net.valueParentsOf(i);
+    for (var k = 0; k < parents.length; k++) {
+      w(parents[k], NodeField.observed, ob);
+      w(parents[k], NodeField.mean, ss[k]);
+    }
+  }
+
+  /// HGF learning, at the end of the sweep: ν is the mean over the
+  /// statistics of δ/Δ, each parent's prediction error over the change in
+  /// its own value parent's expectation; then ξ moves as with a fixed rate.
+  ///
+  /// Each δ/Δ is 1/K, K the gain of the parent's update, which is linear
+  /// in δ (see [TrialCompiler.efScaleNodes]): the same value where δ ≠ 0;
+  /// where δ = 0 the CPU engines get 0/0.
+  ///
+  /// Unobserved, both changes are 0 and the CPU engines store ν = 0/0
+  /// (NaN), which nothing reads before the next observed trial sets it
+  /// again; the kernel keeps the last ν instead (and divides by 1 there,
+  /// so that no derivative is NaN). ξ and the likelihood are the same.
+  void _posteriorEfDynamic(int i) {
+    if (!c.efState) return;
+    final on = letCond('on', ne(r(i, NodeField.observed), zero));
+    final parents = net.valueParentsOf(i);
+    final ratios = <Ex>[];
+    for (final p in parents) {
+      // δ/Δ = 1/K (TrialCompiler.efScaleNodes).
+      final gain = _slotRead('gain${net.valueParentsOf(p).first}');
+      ratios.add(one / sel(one, gain, on));
+    }
+    final nu = let('nu', sum(ratios) / lit(parents.length.toDouble()));
+    _slotWrite('nu$i', sel(_slotRead('nu$i'), nu, on));
+    _efMoveXis(i, on);
   }
 
   // ---------------------------------------------------------------------------

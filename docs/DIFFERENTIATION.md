@@ -362,8 +362,8 @@ on the VM, dart2js and dart2wasm. The `f32` stand-ins of the WGSL
 their f64 values, so it agrees with `BatchNetwork`'s tangents to 1e-15.
 
 `HgfModel(gradientMode:)` is `auto` by default: reverse mode above
-`reverseAbove` (16) parameters, for models the IR covers (vector node
-kinds, custom couplings and custom responses stay in forward mode,
+`reverseAbove` (16) parameters, for models the IR covers (categorical
+and dp-state nodes, custom couplings and custom responses stay in forward mode,
 `reverseUnsupported` says why). `benchmark/bin/reverse_cpu.dart`, 256
 elements × 320 trials, as multiples of the likelihood:
 

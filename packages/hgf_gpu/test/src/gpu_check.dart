@@ -56,8 +56,15 @@ double _perturbed(Network net, int i, NodeField field, int e) =>
     };
 
 /// One fixture's result: null if it has no GPU kernel (the reason in
-/// [skipped]), else the max relative error and the non-finite mismatches.
-typedef FixtureResult = ({double maxRel, int nonFiniteMismatch, int finite});
+/// [skipped]), else the max relative error (of the totals and of every
+/// ef-state node's final ξ), the non-finite mismatches, and the max relative
+/// error of the ef-state nodes' final ν (0 without any).
+typedef FixtureResult = ({
+  double maxRel,
+  int nonFiniteMismatch,
+  int finite,
+  double nusRel,
+});
 
 Future<FixtureResult?> checkFixture(
   GpuBackend backend,
@@ -99,6 +106,15 @@ Future<FixtureResult?> checkFixture(
   final cpu = BatchNetwork(net, _elements);
   final gpu = await GpuBatch.create(backend, kernel, _elements);
   for (var i = 0; i < net.nNodes; i++) {
+    if (net.kindOf(i) == NodeKind.efState) {
+      // A learning rate per element (with HGF learning, the first trial's).
+      final values = Float64List.fromList([
+        for (var e = 0; e < _elements; e++)
+          net.getInitial(i, NodeField.nus) + 0.5 * e,
+      ]);
+      cpu.setInitial(i, NodeField.nus, values);
+      gpu.setInitial(i, NodeField.nus, values);
+    }
     if (net.kindOf(i) != NodeKind.continuousState) continue;
     for (final f in [NodeField.tonicVolatility, NodeField.mean]) {
       final values = Float64List.fromList([
@@ -111,27 +127,53 @@ Future<FixtureResult?> checkFixture(
   final ResponseFunction response = binary
       ? const FirstLevelBinarySurprise()
       : const TotalGaussianSurprise();
-  final ref = cpu.surprise(
-    data,
-    response,
-    observed: observed,
-    timeSteps: steps,
-  );
+  // A lone ef-state node has no continuous node to score (the CPU's
+  // TotalGaussianSurprise refuses it; the kernel's sums nothing): its ξ are
+  // compared below.
+  final Float64List ref;
+  if (net.nNodes < 2) {
+    cpu.inputData(data, observed: observed, timeSteps: steps);
+    ref = Float64List(_elements);
+  } else {
+    ref = cpu.surprise(data, response, observed: observed, timeSteps: steps);
+  }
   final got = await gpu.surprise(data, observed: observed, timeSteps: steps);
-  gpu.dispose();
-  var maxRel = 0.0, mismatch = 0, finite = 0;
+  double rel(double a, double b) => (a - b).abs() / math.max(a.abs(), 1.0);
+  var maxRel = 0.0, mismatch = 0, finite = 0, nusRel = 0.0;
   for (var e = 0; e < _elements; e++) {
     if (ref[e].isFinite != got[e].isFinite) {
       mismatch++;
     } else if (ref[e].isFinite) {
       finite++;
-      maxRel = math.max(
-        maxRel,
-        (ref[e] - got[e]).abs() / math.max(ref[e].abs(), 1.0),
-      );
+      maxRel = math.max(maxRel, rel(ref[e], got[e]));
     }
   }
-  return (maxRel: maxRel, nonFiniteMismatch: mismatch, finite: finite);
+  for (var i = 0; i < net.nNodes; i++) {
+    if (net.kindOf(i) != NodeKind.efState) continue;
+    for (var k = 0; k < kernel.xisLength(i); k++) {
+      final xi = await gpu.readXis(i, k);
+      for (var e = 0; e < _elements; e++) {
+        maxRel = math.max(
+          maxRel,
+          rel(cpu.getVector(e, i, VectorField.xis)[k], xi[e]),
+        );
+      }
+    }
+    // The CPU leaves ν NaN after an unobserved trial (with HGF learning),
+    // the kernel the last one: compared where the CPU's is finite.
+    final nus = await gpu.read(i, NodeField.nus);
+    for (var e = 0; e < _elements; e++) {
+      final want = cpu.get(e, i, NodeField.nus);
+      if (want.isFinite) nusRel = math.max(nusRel, rel(want, nus[e]));
+    }
+  }
+  gpu.dispose();
+  return (
+    maxRel: maxRel,
+    nonFiniteMismatch: mismatch,
+    finite: finite,
+    nusRel: nusRel,
+  );
 }
 
 /// Checks every fixture on [backend], printing one line each; returns the
@@ -151,11 +193,12 @@ Future<List<String>> checkAll(
     final name = f['name'];
     print(
       '$name: max rel ${r.maxRel.toStringAsExponential(2)}, '
-      '${r.finite} finite, ${r.nonFiniteMismatch} non-finite mismatches',
+      '${r.finite} finite, ${r.nonFiniteMismatch} non-finite mismatches'
+      '${r.nusRel > 0 ? ', ν ${r.nusRel.toStringAsExponential(2)}' : ''}',
     );
     if (outOfRange.contains(name)) continue;
     final tol = sensitive[name] ?? tolerance;
-    if (r.nonFiniteMismatch != 0 || r.maxRel > tol) {
+    if (r.nonFiniteMismatch != 0 || r.maxRel > tol || r.nusRel > tolerance) {
       failures.add('$name: $r');
     }
   }
