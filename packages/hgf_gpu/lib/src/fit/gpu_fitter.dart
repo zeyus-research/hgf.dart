@@ -19,8 +19,7 @@ import 'fit_kernel.dart';
 ///
 /// Passes that need `f64` ([Pass.precise]: finite differences, Hessians,
 /// the values `fitMap` reports) and models without a GPU kernel
-/// (dp-state nodes, custom couplings or response models)
-/// run on the CPU: on [cpu]
+/// (custom couplings or response models) run on the CPU: on [cpu]
 /// if given, else on the calling isolate. So `laplace` and the final
 /// estimates of `fitMap` match the CPU's to `f64` accuracy at the optimum
 /// the GPU found.
@@ -422,7 +421,7 @@ final class _Model {
     final chunk = fitter.trialsPerDispatch <= 0 || nTime == 0
         ? (nTime == 0 ? 1 : nTime)
         : fitter.trialsPerDispatch;
-    final groups = (b + kernel.workgroupSize - 1) ~/ kernel.workgroupSize;
+    final (groups, groupsY) = kernel.workgroups(b);
     final params = Uint32List(4);
     final bindings = [
       _state!,
@@ -432,6 +431,7 @@ final class _Model {
       data.table,
       ?_tangents,
       ?_tape,
+      if (kernel.cooperative) dpProposals(backend),
     ];
     for (var t0 = 0; t0 < (nTime == 0 ? 1 : nTime); t0 += chunk) {
       params
@@ -440,7 +440,7 @@ final class _Model {
         ..[2] = chunk;
       backend
         ..writeUints(_params!, params)
-        ..dispatch(pipeline, bindings, groups);
+        ..dispatch(pipeline, bindings, groups, groupsY);
     }
     final rp = reversePipeline;
     if (rp != null) {
@@ -469,7 +469,7 @@ final class _Model {
           ..[3] = nSeg;
         backend
           ..writeUints(_params!, params)
-          ..dispatch(rp, rb, groups);
+          ..dispatch(rp, rb, groups, groupsY);
       }
     }
     fitter

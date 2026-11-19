@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:hgf_fit/hgf_fit.dart';
 import 'package:hgf_fit/ir.dart' show irResponseOf;
 
+import '../batch.dart' show workgroupsFor;
 import '../ir.dart';
 import '../trial.dart';
 
@@ -81,6 +82,9 @@ final class FitKernel {
       directions: kt,
       vectorState: false,
     );
+    if (c.dpRuns && gradients) {
+      throw UnsupportedError('dp-state likelihoods have no exact gradients');
+    }
     // The slot variable each parameter sets (the last one wins, as on the
     // CPU).
     final paramOf = <String, int>{};
@@ -89,9 +93,8 @@ final class FitKernel {
       for (final t in model.parameters[i].targets) {
         final v = switch (t) {
           NodeTarget(:final node, :final field) =>
-            gpuNodeFields.contains(field)
-                ? TrialCompiler.fieldVar(node, field)
-                : throw UnsupportedError('No GPU slot for $field'),
+            c.varOf(node, field) ??
+                (throw UnsupportedError('No GPU slot for $field of $node')),
           ValueCouplingTarget(:final parent, :final child) =>
             'a${parent}_$child',
           VolatilityCouplingTarget(:final parent, :final child) =>
@@ -138,12 +141,10 @@ final class FitKernel {
     }
     src
       ..writeln(prelude)
-      ..writeln(_fitPrelude)
-      ..writeln('@compute @workgroup_size($workgroupSize)')
-      ..writeln('fn main(@builtin(global_invocation_id) gid: vec3<u32>) {')
-      ..writeln('  let B = params.B;')
-      ..writeln('  let e = gid.x;')
-      ..writeln('  if (e >= B) { return; }')
+      ..writeln(_fitPrelude);
+    if (c.dpRuns) src.writeln(dpPrelude(c, 5));
+    src
+      ..write(kernelEntry(c, workgroupSize))
       ..writeln('  let sj = job[e] * ${subjectStride}u;')
       ..writeln('  let nTime = subj[sj];')
       ..writeln('  let inOff = subj[sj + 1u];')
@@ -261,6 +262,8 @@ final class FitKernel {
       return c.chunkWidth(ch) == 1 ? '' : '[${d % 4}]';
     }
 
+    // A cooperative workgroup's invocations hold the same state.
+    if (c.dpRuns) src.writeln('  if (lid != 0u) { return; }');
     for (final v in loads) {
       src.writeln('  state[${slotOfVar[v]}u * B + e] = $v;');
     }
@@ -313,7 +316,8 @@ final class FitKernel {
       resultSlot: c.resultSlot,
       directions: k,
       initial: c.initialSlots(),
-      workgroupSize: workgroupSize,
+      workgroupSize: c.dpRuns ? dpThreads : workgroupSize,
+      cooperative: c.dpRuns,
       nInputs: model.network.inputIdxs.length,
       nColumns: model.network.nInputColumns,
       usesResponses: response.usesResponses,
@@ -487,6 +491,7 @@ final class FitKernel {
     required this.directions,
     required this.initial,
     required this.workgroupSize,
+    required this.cooperative,
     required this.nInputs,
     required this.nColumns,
     required this.usesResponses,
@@ -525,6 +530,14 @@ final class FitKernel {
   final List<double> initial;
 
   final int workgroupSize;
+
+  /// One workgroup per element ([TrialCompiler.dpRuns]): dispatch
+  /// [workgroups], and bind [dpProposalTable] at binding 5.
+  final bool cooperative;
+
+  /// The workgroups (x, y) for [elements] elements.
+  (int, int) workgroups(int elements) =>
+      workgroupsFor(elements, cooperative ? 1 : workgroupSize);
 
   /// Input nodes (observed flags per trial) and data columns per trial.
   final int nInputs, nColumns;

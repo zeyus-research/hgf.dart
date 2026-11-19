@@ -1,6 +1,7 @@
 import 'package:hgf/hgf.dart'
     show
         CategoricalSurprise,
+        DpSurprise,
         FirstLevelBinarySurprise,
         FirstLevelGaussianSurprise,
         TotalGaussianSurprise;
@@ -51,6 +52,7 @@ GpuResponse irResponseOf(ResponseModel response) => switch (response) {
     FirstLevelGaussianSurprise() => GpuResponse.firstLevelGaussianSurprise,
     FirstLevelBinarySurprise() => GpuResponse.firstLevelBinarySurprise,
     CategoricalSurprise() => GpuResponse.categoricalSurprise,
+    DpSurprise() => GpuResponse.dpSurprise,
     _ => throw UnsupportedError('${function.runtimeType} has no GPU kernel'),
   },
   _ => throw UnsupportedError('${response.runtimeType} has no GPU kernel'),

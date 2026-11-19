@@ -108,6 +108,18 @@ void main() {
     expect(failures, isEmpty, reason: failures.take(20).join('\n'));
   }, timeout: const Timeout.factor(2));
 
+  test('dp-state likelihoods (cooperative kernels) match f64 CPU', () async {
+    if (backend == null) {
+      markTestSkipped('No WebGPU adapter in this browser');
+      return;
+    }
+    final fitter = GpuFitter(backend!, trialsPerDispatch: 37);
+    final err = await checkDpPasses(fitter, nTime: 60);
+    print('dp passes: max error $err');
+    expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
+    expect(err, lessThan(2e-5));
+  });
+
   test('hgf_deep fixtures: batchUpdate and predict match f64 CPU', () async {
     if (backend == null) {
       markTestSkipped('No WebGPU adapter in this browser');

@@ -24,7 +24,7 @@ supersedes its phase list.
     sampling (`Network.sample`), `saveState`/`restoreState`; a dp-state
     surprise (`DpSurprise`, an hgf.dart extension, 2026-11-10).
 - 834 engine tests pass (plus 807 fitting, 120 hgf_deep, 16 widget and
-  155 playground tests; counts of 2026-11-18). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+  156 playground tests; counts of 2026-11-19). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (1 of them against a patched pyhgf, `dp_missing`; 11 ef-state, 7
   categorical, 6 dp-state; since 2026-11-18 the fixtures are at pyhgf
   `4db3b093`, which has the P1 fix),
@@ -79,6 +79,9 @@ supersedes its phase list.
   forward-mode tangents compiled into the kernel. MAP on 2000 agents takes
   89 ms (8 isolates: 332 ms), and NUTS on 200 agents 5.0–5.4 s (34 s),
   on 2000 agents 30 s (319 s).
+  Since 2026-11-19 every node kind has a kernel: ef-state, categorical
+  and dp-state too (dp: one cooperative workgroup per element sharing the
+  20 000-proposal candidate search, ~110× one core from 16 elements up).
 
 - `packages/hgf_deep` (2026-11-09): pyhgf's vectorised `DeepNetwork` (HGF
   neural networks) in f64, matching JAX to 1e-9 on 74 fixtures (28 of them
@@ -1335,15 +1338,14 @@ rest is the sampler's own host work per chain and leapfrog step.
   falls back to it), as do the vector kinds' responses
   (`CategoricalSoftmaxReadout`, categorical and dp surprises), which come
   with the vector node kinds below.
-- [ ] Vector node kinds on the GPU. dp-state's data-dependent branching
-  is the hard one. (The CPU batch runs ef-state and categorical since
-  2026-11-10; `GpuFitter` falls back to it for dp.)
+- [x] Vector node kinds on the GPU (done 2026-11-19).
   - [x] ef-state (2026-11-18): fixed and HGF learning, any dimension,
     beside scalar inputs. See "ef-state on the GPU" below.
   - [x] categorical-state (with `CategoricalSoftmaxReadout` and the
     categorical surprise; 2026-11-18). See "categorical-state on the GPU"
     below.
-  - [ ] dp-state.
+  - [x] dp-state (2026-11-19): one cooperative workgroup per element.
+    See "dp-state on the GPU" below.
 - [ ] Platform coverage still to measure:
   - Intel GPUs, and Android (Vulkan) and iOS (Metal) devices through
     wgpu-native (Apple M3 Pro through Metal: measured 2026-11-12, see
@@ -1996,6 +1998,69 @@ IR (GPU kernels, CPU reverse mode, exact Hessians).
   4.1 ms, with gradients 7.5 s → 10.7 ms (707×). Eight categories (18
   nodes) at 16384: 14.0 s → 16.8 ms, with gradients 25.8 s → 240 ms
   (108×).
+
+#### dp-state on the GPU (2026-11-19): done
+
+- **One cooperative workgroup per element.** A trial that runs the dp
+  steps (`TrialCompiler.dpRuns`: with `vectorState`, or when the response
+  reads the dp subnetwork, i.e. `DpSurprise`) compiles to a kernel with
+  `@workgroup_size(256)` and one workgroup per element (`kernelEntry`;
+  `HgfKernel`/`FitKernel.cooperative`, `workgroups(n)` along x then y).
+  All 256 invocations run the whole trial (the same arithmetic, so the
+  same state) and share pyhgf's candidate search (`dpPrelude`): each
+  holds ~79 of the 20 000 proposals' terms in registers, the min-max
+  scalings and the likelihoods' sum are workgroup reductions, and the
+  1000 largest weights come from a radix select (8-bit digits) on their
+  f32 bits, then the index, so ties go to the larger index as in JAX's
+  stable `argsort`. Barriers need uniform control flow: the search runs
+  on every trial, observed or not, and the step selects its results.
+  Tint (Chrome) and naga accept it. The proposals (μ, σ, 1/σ², log 2πσ²,
+  the self density, the spread) are a 480 KB table uploaded once per
+  backend (`dpProposals`). A likelihood that reads only other nodes skips
+  the dp steps and stays one invocation per element.
+- **The step** (`_predictionErrorDp`): the best open cluster against the
+  candidate in log space (an f32 density underflows 13σ out), and the
+  surprise under the predictive mixture with the base measure's term
+  (`logBaseDensity`, the search's third output); the likelihoods are
+  scaled by the largest before they are summed, so the base density stays
+  finite far from every proposal. No tangents or SSA form: `IrReverse`
+  and `FitKernel(gradients: true)` refuse dp steps.
+- **A cluster carries (m, v), not ξ = [E x, E x²]:** the CPU's
+  `σ = √(E x² − m²)` cancels in f32 (a cluster at 5 with σ 0.3 lost 9e-6
+  relative, close to the parity tolerance); the kernel updates
+  `m ← m + r δ`, `v ← (1 − r)(v + r δ²)` (the same algebra), and the
+  errors fell 20×. So `xisLength` is 1 for a cluster on the GPU.
+- **Faster select for few elements:** one element is latency-bound (each
+  barrier waits for all 256 invocations). Timing variants on the M3 Pro
+  (one element, 3 clusters, 200 trials; 30.5 ms at first): the select's
+  six rounds were half of it (15.3 ms without them), but not by their
+  atomics (31.7 ms without) or their 16-barrier scans (30.5 ms without);
+  4-bit digits and two-level reductions (fewer barriers, more rounds)
+  were slower (47 ms), and a sample cutoff alone too (37 ms). What worked
+  is the CPU's cutoff plus compaction: the 25th largest of the first 256
+  proposals (a random sample) is below the 1000th largest weight with
+  near certainty, so each invocation keeps only its ~7 weights above it
+  (key and index) and the rounds and the final sums loop over those:
+  22.8 ms (409 ms at 256 elements, was 449). Fewer than 1000 above the
+  cutoff (about 1 in 1500 trials) falls back to every weight; forced on
+  every trial, the fixtures give the same results.
+- **Tests:** `gpu_check` scores dp fixtures with `DpSurprise`, α per
+  element, and compares the clusters' final counts, means and sigmas:
+  all six within 4.1e-7 on Metal and 3.1e-7 on SwiftShader. `GpuFitter`'s
+  dp passes (six clusters, α and π_s, missing observations and time
+  steps, whole and split dispatches) are within 2.9e-7 of f64; a
+  Nelder–Mead MAP of two subjects × 100 trials runs 87 of its 88 passes on
+  the GPU in 1.25 s (the CPU on the JIT VM: ~90 s). The playground's dp
+  fits run on the GPU unchanged (a test checks it against the CPU's).
+- **Speed** (`benchmark/bin/fit_dp_gpu.dart`, M3 Pro, 200 trials, one
+  likelihood pass; the CPU on one AOT isolate in f64, timed on 16
+  elements and scaled): 3 clusters, 1 element 162 → 22.6 ms (7×),
+  16 elements 2.6 s → 24 ms (107×), 2048 elements 330 s → 3.2 s (104×);
+  10 clusters, 2048 elements 391 s → 3.6 s (109×). So ~110× from 16
+  elements up (~7.7 µs per element-trial), and a lone subject's
+  Nelder–Mead fit 7× faster per pass. The CPU's "order of magnitude
+  needs fewer proposals" (dp fitting, 2026-11-10) is met on the GPU
+  without diverging from pyhgf.
 
 ### Phase 8: App -> HGF GUI modelling
 
@@ -3585,9 +3650,11 @@ WebGPU suite on SwiftShader. ef-state runs on the GPU (2026-11-18: vector
 slots and multi-column inputs in the trial IR; ν from the update's gain),
 and so does categorical-state (2026-11-18, with P12 fixed in hgf.dart:
 `NetworkFixes.categoricalMissing`); the playground has an HGF-learning
-ef preset that can be fitted. Phase 7b's open items: dp-state on the GPU,
-sampler ensembles on worker isolates, tuning, and hardware coverage.
-dp-state on the GPU and a faster dp candidate search can run alongside.
+ef preset that can be fitted. 2026-11-19: dp-state runs on the GPU too
+(one cooperative workgroup per element sharing the candidate search), so
+every node kind has a kernel and the playground's dp fits run there.
+Phase 7b's open items: sampler ensembles on worker isolates, tuning, and
+hardware coverage.
 
 ```sh
 cd hgf.dart

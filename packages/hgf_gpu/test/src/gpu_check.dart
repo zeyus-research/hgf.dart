@@ -92,19 +92,22 @@ Future<FixtureResult?> checkFixture(
       : Float64List.fromList([
           for (final x in fixture['time_steps']! as List<Object?>) _decode(x),
         ]);
-  final bool binary, categorical;
+  final bool binary, categorical, dp;
   try {
     net = spec.build()..build();
     binary = net.inputIdxs.every((i) => net.kindOf(i) == NodeKind.binaryState);
     categorical = net.inputIdxs.any(
       (i) => net.kindOf(i) == NodeKind.categoricalState,
     );
+    dp = net.inputIdxs.any((i) => net.kindOf(i) == NodeKind.dpState);
     kernel = HgfKernel(
       net,
       response: binary
           ? GpuResponse.firstLevelBinarySurprise
           : categorical
           ? GpuResponse.categoricalSurprise
+          : dp
+          ? GpuResponse.dpSurprise
           : GpuResponse.totalGaussianSurprise,
       observedMask: observed != null,
       timeSteps: steps != null,
@@ -129,6 +132,15 @@ Future<FixtureResult?> checkFixture(
       cpu.setInitial(i, NodeField.nus, values);
       gpu.setInitial(i, NodeField.nus, values);
     }
+    if (net.kindOf(i) == NodeKind.dpState) {
+      // A concentration per element.
+      final values = Float64List.fromList([
+        for (var e = 0; e < _elements; e++)
+          net.getInitial(i, NodeField.alpha) * (1 + e),
+      ]);
+      cpu.setInitial(i, NodeField.alpha, values);
+      gpu.setInitial(i, NodeField.alpha, values);
+    }
     if (net.kindOf(i) != NodeKind.continuousState) continue;
     for (final f in [NodeField.tonicVolatility, NodeField.mean]) {
       final values = Float64List.fromList([
@@ -142,6 +154,8 @@ Future<FixtureResult?> checkFixture(
       ? const FirstLevelBinarySurprise()
       : categorical
       ? const CategoricalSurprise()
+      : dp
+      ? const DpSurprise()
       : const TotalGaussianSurprise();
   // A lone ef-state node has no continuous node to score (the CPU's
   // TotalGaussianSurprise refuses it; the kernel's sums nothing): its ξ are
@@ -162,6 +176,22 @@ Future<FixtureResult?> checkFixture(
     } else if (ref[e].isFinite) {
       finite++;
       maxRel = math.max(maxRel, rel(ref[e], got[e]));
+    }
+  }
+  for (var i = 0; i < net.nNodes; i++) {
+    if (net.kindOf(i) != NodeKind.dpState) continue;
+    // The clusters: their counts, expected means and sigmas.
+    for (final f in const [
+      VectorField.n,
+      VectorField.expectedMeans,
+      VectorField.expectedSigmas,
+    ]) {
+      for (var k = 0; k < kernel.vectorLength(i, f); k++) {
+        final got = await gpu.readVector(i, f, k);
+        for (var e = 0; e < _elements; e++) {
+          maxRel = math.max(maxRel, rel(cpu.getVector(e, i, f)[k], got[e]));
+        }
+      }
     }
   }
   for (var i = 0; i < net.nNodes; i++) {

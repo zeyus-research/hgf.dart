@@ -382,6 +382,29 @@ void main() {
     expect(pg.network.getInitial(0, NodeField.alpha), alpha.estimate);
   });
 
+  test('dp: the Nelder-Mead fit runs on the GPU when there is one', () async {
+    final pg = Playground(presetId: 'dp', nTrials: 60);
+    Fitting fitting(FitDevice device) => Fitting(
+      pg,
+      spawnWorkers: _inline,
+      config: FitConfig(device: device, restarts: 0),
+    );
+    final gpu = fitting(FitDevice.gpu);
+    await gpu.fit();
+    expect(gpu.error, isNull);
+    final r = gpu.result!;
+    if (r.where != 'the GPU') {
+      markTestSkipped('No GPU: ${r.deviceNote}');
+      return;
+    }
+    expect(r.deviceNote, isNull);
+    final cpu = fitting(FitDevice.cpu);
+    await cpu.fit();
+    final want = cpu.result!.estimates.single.estimate;
+    // f32 values move Nelder-Mead's simplex a little.
+    expect(r.estimates.single.estimate, closeTo(want, 0.05 * want));
+  });
+
   testWidgets('dp offers MAP only, ef explains why it can\'t be fitted', (
     tester,
   ) async {

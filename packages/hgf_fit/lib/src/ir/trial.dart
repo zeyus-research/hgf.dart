@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:hgf/hgf.dart' hide digamma, lambertW0, logAddExp;
 
@@ -50,6 +51,10 @@ sealed class GpuResponse {
   /// binary nodes' predictions (0 where it is unobserved, with
   /// `NetworkFixes.categoricalMissing`).
   static const categoricalSurprise = _ObservationResponse('categorical');
+
+  /// `DpSurprise`: each dp-state input's observation under its predictive
+  /// mixture (0 where it is unobserved).
+  static const dpSurprise = _ObservationResponse('dp');
 
   /// Parameter defaults, in slot order.
   List<double> get defaults => const [];
@@ -265,7 +270,8 @@ final class CompiledTrial {
 /// binary nodes). The fitting kernels leave them out.
 ///
 /// Throws [UnsupportedError] for node kinds and update steps without a GPU
-/// kernel (dp-state nodes, custom couplings).
+/// kernel (custom couplings), and for dp-state steps with tangents or in
+/// SSA form.
 final class TrialCompiler {
   TrialCompiler(
     this.net,
@@ -281,8 +287,7 @@ final class TrialCompiler {
             NodeKind.constantState:
           break;
         case NodeKind.efState:
-          // A dp-state cluster has its dp node as value child; dp-state has
-          // no kernel (below), so only input ef-state nodes get here.
+          // A dp-state node's clusters have no parents (checked below).
           _checkEfParents(i);
           efNodes.add(i);
           if (vectorState) {
@@ -298,16 +303,18 @@ final class TrialCompiler {
               _addGain(i, b, 'sets its α');
             }
           }
-        default:
-          throw UnsupportedError(
-            '${net.kindOf(i).pyhgfName} has no GPU kernel yet',
-          );
+        case NodeKind.dpState:
+          _checkDpClusters(i);
+          dpNodes.add(i);
+          dpClusters.addAll(net.valueParentsOf(i));
       }
     }
     var col = 0;
     for (final i in net.inputIdxs) {
       switch (net.kindOf(i)) {
-        case NodeKind.continuousState || NodeKind.binaryState:
+        case NodeKind.continuousState ||
+            NodeKind.binaryState ||
+            NodeKind.dpState:
           inputColumns.add((col, 1));
           col++;
         case NodeKind.efState:
@@ -373,6 +380,9 @@ final class TrialCompiler {
         if (which == 'categorical' && categoricalNodes.isEmpty) {
           throw ArgumentError('CategoricalSurprise needs a categorical input');
         }
+        if (which == 'dp' && dpNodes.isEmpty) {
+          throw ArgumentError('DpSurprise needs a dp-state input');
+        }
         if (which == 'first' &&
             (n < 2 ||
                 net.kindOf(0) != NodeKind.continuousState ||
@@ -386,6 +396,13 @@ final class TrialCompiler {
           throw ArgumentError('FirstLevelBinarySurprise needs binary inputs');
         }
     }
+    dpRuns =
+        dpNodes.isNotEmpty &&
+        (vectorState ||
+            response == GpuResponse.dpSurprise ||
+            _readNodes.any(
+              (i) => dpNodes.contains(i) || dpClusters.contains(i),
+            ));
     var s = 0;
     for (var f = 0; f < gpuNodeFields.length; f++) {
       for (var i = 0; i < n; i++) {
@@ -399,9 +416,10 @@ final class TrialCompiler {
       slotOfVar['k${p}_$c'] = s++;
     }
     for (final i in efNodes) {
-      for (var k = 0; k < efStatistics(i); k++) {
+      for (var k = 0; k < vectorLength(i, VectorField.xis); k++) {
         slotOfVar['xi${i}_$k'] = s++;
       }
+      if (dpClusters.contains(i)) slotOfVar['xv$i'] = s++;
       slotOfVar['nu$i'] = s++;
     }
     for (final i in categoricalNodes) {
@@ -413,6 +431,16 @@ final class TrialCompiler {
       }
       slotOfVar['kl$i'] = s++;
       slotOfVar['su$i'] = s++;
+    }
+    for (final i in dpNodes) {
+      for (final stem in _dpVectorVars) {
+        for (var k = 0; k < dpClusterCount(i); k++) {
+          slotOfVar['$stem${i}_$k'] = s++;
+        }
+      }
+      for (final f in _dpScalarFields) {
+        slotOfVar['${_extraVar[f]}$i'] = s++;
+      }
     }
     for (final i in gainNodes) {
       slotOfVar['gain$i'] = s++;
@@ -426,6 +454,25 @@ final class TrialCompiler {
   void _checkNode(int node) {
     if (node < 0 || node >= n) {
       throw ArgumentError.value(node, 'node', 'No such node');
+    }
+    _readNodes.add(node);
+  }
+
+  /// The nodes the response reads.
+  final _readNodes = <int>{};
+
+  /// A dp-state node's clusters: univariate ef-state nodes without parents
+  /// (as `Network.build` checks), with the dp node as their only child.
+  void _checkDpClusters(int i) {
+    for (final p in net.valueParentsOf(i)) {
+      if (net.kindOf(p) != NodeKind.efState ||
+          net.valueChildrenOf(p).length != 1 ||
+          net.volatilityChildrenOf(p).isNotEmpty) {
+        throw UnsupportedError(
+          'dp-state node $i: cluster $p must be an ef-state node with the dp '
+          'node as its only child',
+        );
+      }
     }
   }
 
@@ -501,6 +548,23 @@ final class TrialCompiler {
   /// The categorical-state nodes, in node order.
   final categoricalNodes = <int>[];
 
+  /// The dp-state nodes, in node order, and their clusters.
+  final dpNodes = <int>[];
+  final dpClusters = <int>{};
+
+  /// Whether the trial runs the dp-state steps: with [vectorState], or when
+  /// the response reads a dp node or its clusters (`DpSurprise`). They are
+  /// a subnetwork of their own, which nothing else reads.
+  ///
+  /// A trial that runs them needs a cooperative kernel: one workgroup of
+  /// [dpThreads] invocations per element, which all run the trial and
+  /// share the candidate search ([dpPrelude]). The kernel declares `lid`
+  /// (`local_invocation_index`).
+  late final bool dpRuns;
+
+  /// The number of clusters of dp-state node [i].
+  int dpClusterCount(int i) => net.valueParentsOf(i).length;
+
   /// With [vectorState]: the nodes whose change of mean Δ sets an ef-state
   /// node's ν (the value parent of each statistic's node) or a categorical
   /// node's α (the value parent of each category's binary node). Each has
@@ -531,9 +595,19 @@ final class TrialCompiler {
   /// [VectorField.mean]; 0 for the others.
   int vectorLength(int node, VectorField field) =>
       switch ((net.kindOf(node), field)) {
-        (NodeKind.efState, VectorField.xis) => efStatistics(node),
+        // A dp cluster carries E x and its variance (see `_dpClusterLearn`).
+        (NodeKind.efState, VectorField.xis) =>
+          dpClusters.contains(node) ? 1 : efStatistics(node),
         (NodeKind.categoricalState, VectorField.alpha || VectorField.mean) =>
           categoryCount(node),
+        (
+          NodeKind.dpState,
+          VectorField.n ||
+              VectorField.expectedMeans ||
+              VectorField.expectedSigmas ||
+              VectorField.activated,
+        ) =>
+          dpClusterCount(node),
         _ => 0,
       };
 
@@ -543,9 +617,29 @@ final class TrialCompiler {
     VectorField.mean: 'cx',
   };
 
+  /// A dp-state node's vectors' slot stems, in slot order.
+  static const _dpVectors = {
+    VectorField.n: 'dn',
+    VectorField.expectedMeans: 'dm',
+    VectorField.expectedSigmas: 'ds',
+    VectorField.activated: 'da',
+  };
+  static final _dpVectorVars = _dpVectors.values;
+
+  /// A dp-state node's scalar fields beyond [gpuNodeFields], in slot order.
+  static const _dpScalarFields = [
+    NodeField.alpha,
+    NodeField.sensoryPrecision,
+    NodeField.nTotal,
+    NodeField.nActiveCluster,
+    NodeField.surprise,
+  ];
+
   /// Slot of entry [k] of [node]'s vector [field] (see [vectorLength]).
   int vectorSlot(int node, VectorField field, int k) {
-    final stem = _vectorVar[field];
+    final stem = net.kindOf(node) == NodeKind.dpState
+        ? _dpVectors[field]
+        : _vectorVar[field];
     final v = stem == null ? null : slotOfVar['$stem${node}_$k'];
     if (v == null) throw ArgumentError('No GPU slot for $field[$k] of $node');
     return v;
@@ -561,12 +655,18 @@ final class TrialCompiler {
     NodeField.nus: 'nu',
     NodeField.klDivergence: 'kl',
     NodeField.surprise: 'su',
+    NodeField.alpha: 'dal',
+    NodeField.sensoryPrecision: 'dsp',
+    NodeField.nTotal: 'dnt',
+    NodeField.nActiveCluster: 'dna',
   };
 
   /// The slot variable of [field] of [node]: a node field of
-  /// [gpuNodeFields], an ef-state node's [NodeField.nus], or a categorical
-  /// node's [NodeField.klDivergence] or [NodeField.surprise]; null if it
-  /// has none.
+  /// [gpuNodeFields], an ef-state node's [NodeField.nus], a categorical
+  /// node's [NodeField.klDivergence] or [NodeField.surprise], or a dp-state
+  /// node's [NodeField.alpha], [NodeField.sensoryPrecision],
+  /// [NodeField.nTotal], [NodeField.nActiveCluster] or
+  /// [NodeField.surprise]; null if it has none.
   String? varOf(int node, NodeField field) {
     if (gpuNodeFields.contains(field)) return fieldVar(node, field);
     final v = '${_extraVar[field]}$node';
@@ -635,8 +735,14 @@ final class TrialCompiler {
       }
     }
     for (final i in efNodes) {
-      for (final x in net.getInitialVector(i, VectorField.xis)) {
-        out[s++] = x;
+      final xis = net.getInitialVector(i, VectorField.xis);
+      if (dpClusters.contains(i)) {
+        out[s++] = xis[0];
+        out[s++] = xis[1] - xis[0] * xis[0];
+      } else {
+        for (final x in xis) {
+          out[s++] = x;
+        }
       }
       out[s++] = net.getInitial(i, NodeField.nus);
     }
@@ -649,6 +755,16 @@ final class TrialCompiler {
       }
       out[s++] = net.getInitial(i, NodeField.klDivergence);
       out[s++] = net.getInitial(i, NodeField.surprise);
+    }
+    for (final i in dpNodes) {
+      for (final f in _dpVectors.keys) {
+        for (final x in net.getInitialVector(i, f)) {
+          out[s++] = x;
+        }
+      }
+      for (final f in _dpScalarFields) {
+        out[s++] = net.getInitial(i, f);
+      }
     }
     s += gainNodes.length; // gain: written before read
     for (final d in response.defaults) {
@@ -1083,8 +1199,10 @@ final class _Pass {
         _predictionErrorCategorical(i);
       case UpdateStep.posteriorCategorical:
         _posteriorCategorical(i);
-      default:
-        throw UnsupportedError('${step.name} has no GPU kernel yet');
+      case UpdateStep.predictionDp:
+        _predictionDp(i);
+      case UpdateStep.predictionErrorDp:
+        _predictionErrorDp(i);
     }
     close();
   }
@@ -1776,8 +1894,10 @@ final class _Pass {
     }
   }
 
-  /// A fixed learning rate (no parents).
+  /// A fixed learning rate (no parents). A dp-state node's clusters learn
+  /// whenever the dp steps run.
   void _predictionErrorEfFixed(int i) {
+    if (c.dpClusters.contains(i)) return _dpClusterLearn(i);
     if (!c.vectorState) return;
     _efMoveXis(i, letCond('on', ne(r(i, NodeField.observed), zero)));
   }
@@ -1922,6 +2042,144 @@ final class _Pass {
   }
 
   // ---------------------------------------------------------------------------
+  // dp-state
+  // ---------------------------------------------------------------------------
+
+  /// Steps without tangents or an SSA form: their outputs are counts and
+  /// discrete choices (`HgfModel.hasExactGradients` is false for them).
+  void _dpOnly(String step) {
+    if (k > 0 || ssa) {
+      throw UnsupportedError('$step has no tangents or reverse mode');
+    }
+  }
+
+  /// Each cluster's expected mean and standard deviation, from its
+  /// sufficient statistics `ξ = [E x, E x²]`.
+  void _predictionDp(int c0) {
+    if (!c.dpRuns) return;
+    _dpOnly('dirichlet_node_prediction');
+    final clusters = net.valueParentsOf(c0);
+    for (var j = 0; j < clusters.length; j++) {
+      final p = clusters[j];
+      _slotWrite('dm${c0}_$j', _slotRead('xi${p}_0'));
+      _slotWrite('ds${c0}_$j', call('sqrt', [_slotRead('xv$p')]));
+    }
+  }
+
+  /// A cluster's fixed-rate step on `(m, v)`, its mean and variance, where
+  /// the CPU engines move `ξ = [E x, E x²]` and take `v = E x² − m²`:
+  /// `m ← m + r δ`, `v ← (1 − r) v + r (1 − r) δ²` with `δ = x − m` and
+  /// `r = 1 / (1 + ν)` (the same algebra), so that `v` doesn't cancel in
+  /// `f32` (where `E x²` and `m²` agree to a few digits, it lost ~1e-5).
+  void _dpClusterLearn(int i) {
+    if (!c.dpRuns) return;
+    final on = letCond('on', ne(r(i, NodeField.observed), zero));
+    final rate = let('rate', one / (one + _slotRead('nu$i')));
+    final m = _slotRead('xi${i}_0'), v = _slotRead('xv$i');
+    final d = let('dx', r(i, NodeField.mean) - m);
+    _slotWrite('xi${i}_0', sel(m, m + rate * d, on));
+    _slotWrite('xv$i', sel(v, (one - rate) * (v + rate * d * d), on));
+  }
+
+  /// `log N(x; m, s)`.
+  static Ex _normLogPdf(Ex x, Ex m, Ex s) {
+    final d = x - m;
+    return Lit('-0.918938533f', -0.9189385332046727) -
+        log(s) -
+        Lit('0.5f', 0.5) * (d * d) / (s * s);
+  }
+
+  static const _logZero = Lit('-3.4e38f', -3.4e38);
+
+  /// The dp-state node's assignment (`Network`'s `_predictionErrorDp`):
+  /// the most likely open cluster against a new one at the candidate
+  /// ([dpPrelude]'s cooperative search), and the observation's surprise
+  /// under the predictive mixture (`dpSurprise`). Compared in log space,
+  /// so a density that underflows `f32` still orders.
+  ///
+  /// The candidate search runs on every trial, observed or not: its
+  /// barriers need every invocation of the workgroup. Unobserved, nothing
+  /// changes and the surprise is 0.
+  void _predictionErrorDp(int c0) {
+    if (!c.dpRuns) return;
+    _dpOnly('dirichlet_node_prediction_error');
+    final clusters = net.valueParentsOf(c0);
+    final kc = clusters.length;
+    final on = letCond('on', ne(r(c0, NodeField.observed), zero));
+    final x = let('x', r(c0, NodeField.mean));
+    final alpha = _slotRead('dal$c0'), nTotal = _slotRead('dnt$c0');
+    final nActive = _slotRead('dna$c0');
+    final means = [for (var j = 0; j < kc; j++) _slotRead('dm${c0}_$j')];
+    final sigmas = [for (var j = 0; j < kc; j++) _slotRead('ds${c0}_$j')];
+    final counts = [for (var j = 0; j < kc; j++) _slotRead('dn${c0}_$j')];
+    final open = [for (var j = 0; j < kc; j++) _slotRead('da${c0}_$j')];
+    final args = [x, _slotRead('dsp$c0'), ...means, ...sigmas];
+    line('let dpc = dpCandidate$kc(lid, ${args.map((a) => a.w).join(', ')});');
+    final cm = let('cm', const Ref('dpc.x'));
+    final cs = let('cs', const Ref('dpc.y'));
+    flag(~on | (isFinite(cm) & isFinite(cs)));
+
+    // Each cluster's log weight n_j · open_j plus its log density (log 0
+    // where the weight is 0); the first largest is the best.
+    final terms = <Ex>[], has = <Cond>[];
+    for (var j = 0; j < kc; j++) {
+      final wj = let('w$j', counts[j] * open[j]);
+      has.add(letCond('h$j', gt(wj, zero)));
+      terms.add(
+        let(
+          'l$j',
+          sel(
+            _logZero,
+            log(max(wj, F32.minNormal)) + _normLogPdf(x, means[j], sigmas[j]),
+            has[j],
+          ),
+        ),
+      );
+    }
+    var best = terms.first;
+    Ex bestIdx = zero;
+    for (var j = 1; j < kc; j++) {
+      final up = letCond('u$j', gt(terms[j], best));
+      best = let('b$j', sel(best, terms[j], up));
+      bestIdx = let('bi$j', sel(bestIdx, lit(j.toDouble()), up));
+    }
+    final logAlpha = let('la', log(alpha));
+    final takeBest = letCond('tb', ge(best, logAlpha + _normLogPdf(x, cm, cs)));
+
+    // The surprise: −log of the mixture, the new-cluster term weighed by
+    // the base measure's predictive density (dpc.z, its log).
+    final base = let('lb', logAlpha + const Ref('dpc.z'));
+    var hi = base;
+    for (var j = 0; j < kc; j++) {
+      hi = let('hi$j', max(hi, terms[j]));
+    }
+    final mix = sum([
+      exp(base - hi),
+      for (var j = 0; j < kc; j++) sel(zero, exp(terms[j] - hi), has[j]),
+    ]);
+    final surprise = log(alpha + nTotal) - hi - log(mix);
+    _slotWrite('su$c0', sel(zero, surprise, on));
+
+    final opens = letCond('op', on & ~takeBest);
+    for (var j = 0; j < kc; j++) {
+      final p = clusters[j];
+      final chosen = letCond('c$j', on & takeBest & eq(bestIdx, j));
+      final opened = letCond('o$j', opens & eq(nActive, j));
+      w(p, NodeField.mean, sel(r(p, NodeField.mean), x, on));
+      w(p, NodeField.observed, sel(zero, one, chosen));
+      _slotWrite(
+        'dn${c0}_$j',
+        sel(sel(counts[j], counts[j] + one, chosen), one, opened),
+      );
+      _slotWrite('da${c0}_$j', sel(open[j], one, opened));
+      _slotWrite('xi${p}_0', sel(_slotRead('xi${p}_0'), cm, opened));
+      _slotWrite('xv$p', sel(_slotRead('xv$p'), cs * cs, opened));
+    }
+    _slotWrite('dna$c0', sel(nActive, nActive + one, opens));
+    _slotWrite('dnt$c0', sel(nTotal, nTotal + one, on));
+  }
+
+  // ---------------------------------------------------------------------------
   // Response
   // ---------------------------------------------------------------------------
 
@@ -1961,6 +2219,8 @@ final class _Pass {
           r(1, NodeField.expectedMean),
           r(1, NodeField.expectedPrecision),
         );
+      case _ObservationResponse(:final which) when which == 'dp':
+        s = sum([for (final i in c.dpNodes) _slotRead('su$i')]);
       case _ObservationResponse(:final which) when which == 'categorical':
         // As the categorical posterior sums the node's surprise.
         s = sum([
@@ -2240,4 +2500,318 @@ fn lambertW0(z: f32) -> f32 {
   }
   return w;
 }
+''';
+
+/// Invocations per workgroup of a cooperative (dp-state) kernel: one
+/// workgroup per element ([TrialCompiler.dpRuns]).
+const int dpThreads = 256;
+
+/// The rank (from the top, 0-based) of the sampled weight [dpPrelude]
+/// takes as its cutoff.
+const int _dpSampleRank = 24;
+
+/// Proposals per invocation in [dpPrelude]'s search.
+const int _dpPer = (dpProposalCount + dpThreads - 1) ~/ dpThreads;
+
+/// The table [dpPrelude] reads at its binding: per proposal (`[field][j]`,
+/// [dpProposalCount] each) μ, σ, 1/σ², `log(2π σ²)`, its density at its
+/// own mean, and its spread weight, from [DpProposals.instance] in `f32`.
+Float32List dpProposalTable() {
+  final p = DpProposals.instance;
+  const n = dpProposalCount;
+  final out = Float32List(6 * n);
+  for (var j = 0; j < n; j++) {
+    out[j] = p.mu[j];
+    out[n + j] = p.sigma[j];
+    out[2 * n + j] = 1.0 / p.sigma2[j];
+    out[3 * n + j] = p.logNorm[j];
+    out[4 * n + j] = p.selfDensity[j];
+    out[5 * n + j] = p.spread[j];
+  }
+  return out;
+}
+
+/// The cooperative candidate search of a trial with dp-state steps
+/// ([TrialCompiler.dpRuns]): `dpCandidateK(lid, x, sensoryPrecision,
+/// means..., sigmas...)` for each dp node's cluster count `K`, returning
+/// the candidate's mean and standard deviation and the log of the base
+/// measure's predictive density at `x` (`DpScratch.logBaseDensity`). Reads
+/// [dpProposalTable] at [binding].
+///
+/// `get_candidate`'s steps, spread over the workgroup's [dpThreads]
+/// invocations (each holds ~79 proposals' terms in registers): the
+/// min-max scalings and the sum of the likelihoods are workgroup
+/// reductions, and the [dpCandidatesKept] largest weights are found by a
+/// radix select on their bits (`f32` bits of non-negative numbers order
+/// like the numbers), then on the index, so ties go to the larger index as
+/// in JAX's stable `argsort`. The likelihoods are scaled by the largest
+/// one before they are summed (their ratios are the same), so they don't
+/// underflow `f32` far from every proposal. Every invocation must call it,
+/// in uniform control flow, and every invocation gets the result.
+String dpPrelude(TrialCompiler c, int binding) {
+  const n = dpProposalCount, t = dpThreads, per = _dpPer;
+  final out = StringBuffer('''
+const DP_N = ${n}u;
+const DP_T = ${t}u;
+const DP_PER = ${per}u;
+@group(0) @binding($binding) var<storage, read> dpProp: array<f32>;
+var<workgroup> dpA: array<vec4<f32>, $t>;
+var<workgroup> dpB: array<f32, $t>;
+var<workgroup> dpU: array<u32, $t>;
+var<workgroup> dpHist: array<atomic<u32>, 256>;
+var<workgroup> dpPick: vec2<u32>;
+struct DpMax { a: vec4<f32>, b: f32 }
+fn dpMax(lid: u32, a: vec4<f32>, b: f32) -> DpMax {
+  dpA[lid] = a;
+  dpB[lid] = b;
+  workgroupBarrier();
+  for (var s = DP_T / 2u; s > 0u; s >>= 1u) {
+    if (lid < s) {
+      dpA[lid] = max(dpA[lid], dpA[lid + s]);
+      dpB[lid] = max(dpB[lid], dpB[lid + s]);
+    }
+    workgroupBarrier();
+  }
+  let out = DpMax(dpA[0], dpB[0]);
+  workgroupBarrier();
+  return out;
+}
+fn dpSum(lid: u32, a: vec4<f32>) -> vec4<f32> {
+  dpA[lid] = a;
+  workgroupBarrier();
+  for (var s = DP_T / 2u; s > 0u; s >>= 1u) {
+    if (lid < s) { dpA[lid] = dpA[lid] + dpA[lid + s]; }
+    workgroupBarrier();
+  }
+  let out = dpA[0];
+  workgroupBarrier();
+  return out;
+}
+// One round of the top-k select over the candidates' keys (weight bits,
+// index): among those that agree with prefix under mask, counts the digits
+// (8 bits at shift of the weight bits, word 0, or of the index, word 1)
+// and returns the digit at which need proposals are reached from the top,
+// and how many have a larger one.
+fn dpRound(lid: u32, ck: ptr<function, array<u32, DP_PER>>,
+    cj: ptr<function, array<u32, DP_PER>>, nk: u32,
+    prefix: vec2<u32>, mask: vec2<u32>, word: u32, shift: u32,
+    need: u32) -> vec2<u32> {
+  atomicStore(&dpHist[lid], 0u);
+  workgroupBarrier();
+  for (var i = 0u; i < nk; i++) {
+    let key = vec2<u32>((*ck)[i], (*cj)[i]);
+    if (all((key & mask) == (prefix & mask))) {
+      let d = (select(key.x, key.y, word == 1u) >> shift) & 255u;
+      atomicAdd(&dpHist[d], 1u);
+    }
+  }
+  workgroupBarrier();
+  // dpU[d]: proposals with a digit of d or more.
+  dpU[lid] = atomicLoad(&dpHist[lid]);
+  workgroupBarrier();
+  for (var o = 1u; o < 256u; o <<= 1u) {
+    let add = select(0u, dpU[min(lid + o, 255u)], lid + o < 256u);
+    workgroupBarrier();
+    dpU[lid] += add;
+    workgroupBarrier();
+  }
+  let above = select(0u, dpU[min(lid + 1u, 255u)], lid < 255u);
+  if (dpU[lid] >= need && above < need) { dpPick = vec2<u32>(lid, above); }
+  workgroupBarrier();
+  return dpPick;
+}
+fn dpKey(j: u32, sp: f32, lo: vec2<f32>, scale: vec2<f32>, total: f32,
+    q: f32, iso: f32, e: f32) -> u32 {
+  let p = e / total;
+  let lik = select(select(0.0f, pow(p, sp), p > 0.0f), p, sp == 1.0f);
+  let s = (vec2<f32>(q, iso) - lo) / scale;
+  let w = s.x * s.y * dpProp[5u * DP_N + j] * lik;
+  return select(0u, bitcast<u32>(w), w > 0.0f);
+}
+fn dpFinish(lid: u32, sp: f32, ext: DpMax,
+    rv: ptr<function, array<f32, DP_PER>>,
+    qv: ptr<function, array<f32, DP_PER>>,
+    lv: ptr<function, array<f32, DP_PER>>) -> vec3<f32> {
+  let rLo = -ext.a.x;
+  let rScale = ext.a.y + ext.a.x;
+  let qLo = -ext.a.z;
+  let qScale = ext.a.w + ext.a.z;
+  var part = 0.0f;
+  for (var r = 0u; r < DP_PER; r++) {
+    if (lid + r * DP_T < DP_N) {
+      let e = exp((*lv)[r] - ext.b);
+      (*lv)[r] = e;
+      part += e;
+    }
+  }
+  let total = dpSum(lid, vec4<f32>(part, 0.0f, 0.0f, 0.0f)).x;
+  // A weight's key: its f32 bits, which order like the (non-negative)
+  // weights.
+  let lo = vec2<f32>(rLo, qLo);
+  let scale = vec2<f32>(rScale, qScale);
+  // The candidates: the weights at or above a cutoff below the kept-th
+  // largest with near certainty, the ${_dpSampleRank + 1}th largest of the
+  // first DP_T proposals (a random sample; it fails about 1 in 1500
+  // times, and then every weight is a candidate). The select then reads
+  // ~${(dpProposalCount * (_dpSampleRank + 1) / (dpThreads + 1)).round()} of them, not all.
+  let own = dpKey(lid, sp, lo, scale, total, (*rv)[0], (*qv)[0], (*lv)[0]);
+  dpU[lid] = own;
+  workgroupBarrier();
+  var rank = 0u;
+  for (var i = 0u; i < DP_T; i++) {
+    let v = dpU[i];
+    rank += select(0u, 1u, v > own || (v == own && i > lid));
+  }
+  if (rank == ${_dpSampleRank}u) { dpPick = vec2<u32>(own, 0u); }
+  workgroupBarrier();
+  let cutoff = dpPick.x;
+  var ck: array<u32, DP_PER>;
+  var cj: array<u32, DP_PER>;
+  var nk = 0u;
+  for (var r = 0u; r < DP_PER; r++) {
+    let j = lid + r * DP_T;
+    if (j < DP_N) {
+      let key = dpKey(j, sp, lo, scale, total, (*rv)[r], (*qv)[r], (*lv)[r]);
+      if (key >= cutoff) {
+        ck[nk] = key;
+        cj[nk] = j;
+        nk++;
+      }
+    }
+  }
+  let reached = dpSum(lid, vec4<f32>(f32(nk), 0.0f, 0.0f, 0.0f)).x;
+  if (reached < $dpCandidatesKept.0f) {
+    nk = 0u;
+    for (var r = 0u; r < DP_PER; r++) {
+      let j = lid + r * DP_T;
+      if (j < DP_N) {
+        ck[nk] = dpKey(j, sp, lo, scale, total, (*rv)[r], (*qv)[r], (*lv)[r]);
+        cj[nk] = j;
+        nk++;
+      }
+    }
+  }
+  var prefix = vec2<u32>(0u, 0u);
+  var need = ${dpCandidatesKept}u;
+''');
+  const rounds = [
+    ('0u, 0u', 0, 24),
+    ('0xff000000u, 0u', 0, 16),
+    ('0xffff0000u, 0u', 0, 8),
+    ('0xffffff00u, 0u', 0, 0),
+    ('0xffffffffu, 0u', 1, 8),
+    ('0xffffffffu, 0xff00u', 1, 0),
+  ];
+  for (final (mask, word, shift) in rounds) {
+    out.writeln(
+      '  let p${word}_$shift = dpRound(lid, &ck, &cj, nk, prefix, '
+      'vec2<u32>($mask), ${word}u, ${shift}u, need);',
+    );
+    out.writeln(
+      '  prefix.${word == 0 ? 'x' : 'y'} |= p${word}_$shift.x << ${shift}u;',
+    );
+    out.writeln('  need -= p${word}_$shift.y;');
+  }
+  out.write('''
+  var acc = vec4<f32>();
+  for (var i = 0u; i < nk; i++) {
+    let j = cj[i];
+    let key = ck[i];
+    if (key > prefix.x || (key == prefix.x && j >= prefix.y)) {
+      let w = bitcast<f32>(key);
+      acc += vec4<f32>(w, w * dpProp[j], w * dpProp[DP_N + j], 0.0f);
+    }
+  }
+  let s = dpSum(lid, acc);
+  return vec3<f32>(s.y / s.x, s.z / s.x, ext.b + log(total / f32(DP_N)));
+}
+''');
+  final counts = {for (final i in c.dpNodes) c.dpClusterCount(i)}.toList()
+    ..sort();
+  for (final k in counts) {
+    final ks = List.generate(k, (i) => i);
+    out
+      ..writeln(
+        'fn dpCandidate$k(lid: u32, x: f32, sp: f32, '
+        '${[for (final i in ks) 'm$i: f32', for (final i in ks) 's$i: f32'].join(', ')}) -> vec3<f32> {',
+      )
+      ..writeln('  // Each cluster\'s log(2π σ²), density at its mean, 1/σ².');
+    for (final i in ks) {
+      out
+        ..writeln('  let iv$i = 1.0f / (s$i * s$i);')
+        ..writeln('  let ln$i = log(6.28318531f * s$i * s$i);')
+        ..writeln('  let own$i = exp(-0.5f * ln$i);');
+    }
+    out.write('''
+  var rv: array<f32, DP_PER>;
+  var qv: array<f32, DP_PER>;
+  var lv: array<f32, DP_PER>;
+  var ext = vec4<f32>(-3.4e38f);
+  var lmax = -3.4e38f;
+  for (var r = 0u; r < DP_PER; r++) {
+    let j = lid + r * DP_T;
+    if (j < DP_N) {
+      let mu = dpProp[j];
+      let ivj = dpProp[2u * DP_N + j];
+      let lnj = dpProp[3u * DP_N + j];
+      let sd = dpProp[4u * DP_N + j];
+''');
+    for (final i in ks) {
+      out.writeln('      let d$i = mu - m$i;');
+    }
+    // Specificity: the proposal's density at its mean against the
+    // clusters'; isolation: per cluster, its density at its own mean
+    // against that plus the proposal's there.
+    out
+      ..writeln(
+        '      let pre = '
+        '${[for (final i in ks) 'exp(-0.5f * (ln$i + d$i * d$i * iv$i))'].join(' +\n          ')};',
+      )
+      ..writeln(
+        '      let iso = '
+        '${[for (final i in ks) 'own$i / (own$i + exp(-0.5f * (lnj + d$i * d$i * ivj)))'].join(' *\n          ')};',
+      )
+      ..write('''
+      let q = sd / (sd + pre);
+      let dx = x - mu;
+      let l = -0.5f * (lnj + dx * dx * ivj);
+      rv[r] = q;
+      qv[r] = iso;
+      lv[r] = l;
+      ext = max(ext, vec4<f32>(-q, q, -iso, iso));
+      lmax = max(lmax, l);
+    }
+  }
+  return dpFinish(lid, sp, dpMax(lid, ext, lmax), &rv, &qv, &lv);
+}
+''');
+  }
+  return out.toString();
+}
+
+/// The kernel's entry point up to the element index `e` (returning past
+/// the batch size `B`, which [paramsB] reads): one invocation per element
+/// in workgroups of [workgroupSize], or for a trial with dp-state steps
+/// ([TrialCompiler.dpRuns]) one workgroup of [dpThreads] per element,
+/// along x then y (`lid` is the invocation's index in it).
+String kernelEntry(
+  TrialCompiler c,
+  int workgroupSize, {
+  String paramsB = 'params.B',
+}) => c.dpRuns
+    ? '''
+@compute @workgroup_size($dpThreads)
+fn main(@builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+    @builtin(local_invocation_index) lid: u32) {
+  let B = $paramsB;
+  let e = wid.y * nwg.x + wid.x;
+  if (e >= B) { return; }
+'''
+    : '''
+@compute @workgroup_size($workgroupSize)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let B = $paramsB;
+  let e = gid.x;
+  if (e >= B) { return; }
 ''';

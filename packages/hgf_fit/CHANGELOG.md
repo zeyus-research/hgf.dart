@@ -1,5 +1,18 @@
 ## Unreleased
 
+- dp-state nodes in the trial IR, for the GPU kernels (no tangents or SSA
+  form, so `IrReverse` and gradients refuse them): the clusters' means and
+  sigmas, the assignment compared in log space, and the surprise under
+  the predictive mixture. The candidate search is a cooperative WGSL
+  function (`dpPrelude`, one workgroup of `dpThreads` per element;
+  `kernelEntry` writes either kind of entry point, `dpProposalTable` the
+  proposals in f32). A cluster carries its mean and variance, updated as
+  `v ← (1 − r)(v + r δ²)`, where the CPU subtracts `E x²` and `m²` (20×
+  more accurate in f32). `TrialCompiler.dpRuns`, `dpNodes`,
+  `dpClusters`; `GpuResponse.dpSurprise` (`irResponseOf` maps
+  `DpSurprise`); `varOf` and `vectorSlot` address a dp node's α, sensory
+  precision, counts and clusters, and `FitKernel` parameters may target
+  any of them.
 - categorical-state nodes in the trial IR (so in `IrReverse` and the GPU
   kernels): the indicators to the binary nodes, and with
   `TrialCompiler.vectorState` α, the probabilities, the KL divergence

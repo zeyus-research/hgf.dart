@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:hgf/hgf.dart';
 
+import 'batch.dart' show dpProposals, workgroupsFor;
 import 'trial.dart';
 
 export 'trial.dart'
@@ -48,7 +49,7 @@ final class HgfKernel {
   /// a missed one.
   ///
   /// Throws [UnsupportedError] for node kinds and update steps without a
-  /// GPU kernel (dp-state nodes, custom couplings).
+  /// GPU kernel (custom couplings).
   factory HgfKernel(
     Network network, {
     GpuResponse response = GpuResponse.totalGaussianSurprise,
@@ -84,17 +85,14 @@ final class HgfKernel {
     }
     if (response.usesResponses) {
       src.writeln(
-        '@group(0) @binding($binding) var<storage, read> resp: array<u32>;',
+        '@group(0) @binding(${binding++}) var<storage, read> resp: '
+        'array<u32>;',
       );
     }
     final total = c.totalSlot;
-    src
-      ..writeln(prelude)
-      ..writeln('@compute @workgroup_size($workgroupSize)')
-      ..writeln('fn main(@builtin(global_invocation_id) gid: vec3<u32>) {')
-      ..writeln('  let B = params.B;')
-      ..writeln('  let e = gid.x;')
-      ..writeln('  if (e >= B) { return; }');
+    src.writeln(prelude);
+    if (c.dpRuns) src.writeln(dpPrelude(c, binding));
+    src.write(kernelEntry(c, workgroupSize));
     if (!timeSteps) {
       src
         ..writeln('  let dt = params.dt;')
@@ -147,7 +145,19 @@ final class HgfKernel {
           'su$i',
         ])
           if (trial.written.contains(v)) v,
+      // A dp node's clusters' expected means and sigmas, and its surprise.
+      for (final i in c.dpNodes)
+        for (final v in [
+          for (var k = 0; k < c.dpClusterCount(i); k++) ...[
+            'dm${i}_$k',
+            'ds${i}_$k',
+          ],
+          'su$i',
+        ])
+          if (trial.written.contains(v)) v,
     };
+    // A cooperative workgroup's invocations hold the same state.
+    if (c.dpRuns) src.writeln('  if (lid != 0u) { return; }');
     for (final v in slotOfVar.keys.where(stored.contains)) {
       src.writeln('  state[${slotOfVar[v]}u * B + e] = $v;');
     }
@@ -168,7 +178,8 @@ final class HgfKernel {
       perElementData: perElementData,
       observedMask: observedMask,
       timeSteps: timeSteps,
-      workgroupSize: workgroupSize,
+      workgroupSize: c.dpRuns ? dpThreads : workgroupSize,
+      cooperative: c.dpRuns,
       loaded: loads.length,
       stored: stored.length,
     );
@@ -185,6 +196,7 @@ final class HgfKernel {
     required this.observedMask,
     required this.timeSteps,
     required this.workgroupSize,
+    required this.cooperative,
     required this.loaded,
     required this.stored,
   }) : _c = compiler;
@@ -225,6 +237,14 @@ final class HgfKernel {
   final bool timeSteps;
   final int workgroupSize;
 
+  /// One workgroup per element (a network with dp-state nodes): dispatch
+  /// [workgroups], and bind [dpProposals] after the other buffers.
+  final bool cooperative;
+
+  /// The workgroups (x, y) for [elements] elements.
+  (int, int) workgroups(int elements) =>
+      workgroupsFor(elements, cooperative ? 1 : workgroupSize);
+
   /// How many slots a dispatch loads and stores (diagnostic).
   final int loaded, stored;
 
@@ -246,8 +266,11 @@ final class HgfKernel {
   /// categories' probabilities); 0 for the others.
   int vectorLength(int node, VectorField field) => _c.vectorLength(node, field);
 
-  /// The number of sufficient statistics of ef-state node [node].
-  int xisLength(int node) => _c.efStatistics(node);
+  /// The number of sufficient statistics of ef-state node [node] in the
+  /// kernel: 1 for a dp-state node's cluster, which carries its mean (ξ₀)
+  /// and its variance (the dp node's [VectorField.expectedSigmas] squared)
+  /// instead of `E x²`.
+  int xisLength(int node) => _c.vectorLength(node, VectorField.xis);
 
   /// Slot of the value coupling `parent → child`.
   int valueCouplingSlot(int parent, int child) =>

@@ -60,16 +60,22 @@ Status: see Phase 7 in `docs/ROADMAP.md`.
 - Supported: continuous, binary, constant, ef-state (fixed and HGF
   learning, any dimension; `GpuBatch.readXis`) and categorical-state
   nodes (α, probabilities, KL divergence and surprise:
-  `GpuBatch.readVector`, `read`); standard, eHGF and unbounded updates;
-  named couplings; missing observations; time steps.
+  `GpuBatch.readVector`, `read`), and dp-state nodes (pyhgf's 20 000
+  cluster proposals per trial, searched by a workgroup of 256 invocations
+  per element; the clusters' counts, means and sigmas:
+  `GpuBatch.readVector`); standard, eHGF and unbounded updates; named
+  couplings; missing observations; time steps.
 - Responses: observation surprises (`TotalGaussianSurprise`,
   `FirstLevelGaussianSurprise`, `FirstLevelBinarySurprise`,
-  `CategoricalSurprise`) and readouts with fitted parameters
+  `CategoricalSurprise`, `DpSurprise`) and readouts with fitted parameters
   (`GaussianReadout`, `BinarySoftmaxReadout`, `SoftmaxReadout`,
   `CategoricalSoftmaxReadout`, `ExprReadout`).
 - Precision: f32. Totals match f64 to ~1e-6 relative and gradients to ~1e-5.
-- Not yet: dp-state nodes, custom couplings or response models
-  (`GpuFitter` runs those on the CPU).
+- Not yet: custom couplings or response models (`GpuFitter` runs those
+  on the CPU). A dp-state likelihood has no gradients (its assignments
+  are discrete), so it is fitted derivative-free (Nelder–Mead); on an
+  Apple M3 Pro a pass over 2048 elements × 200 trials is ~105× faster than
+  one CPU core (`benchmark/bin/fit_dp_gpu.dart`).
 - Deep networks: `batchUpdate`, `trainEpoch` (SGD, Adam, or the
   weight-belief rule `LearningKind.synapticUncertainty`) and `predict`,
   every layer kind, volatility update and setting `hgf_deep` has

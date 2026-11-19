@@ -1,5 +1,18 @@
 ## Unreleased
 
+- dp-state nodes in the kernels (`HgfKernel`, `FitKernel`, so `GpuFitter`
+  runs `DpSurprise` fits on the GPU; Nelder–Mead, as the likelihood has no
+  gradients). A network whose trial runs the dp steps compiles to a
+  cooperative kernel (`cooperative`): one workgroup of 256 invocations per
+  element (`workgroups(n)`, along x then y), which all run the trial and
+  share pyhgf's candidate search over its 20 000 proposals (bound after
+  the other buffers from `dpProposals(backend)`, uploaded once per
+  backend). `GpuBatch.readVector` reads a dp node's cluster counts,
+  expected means and sigmas, `read` its surprise; `setInitial` sets α
+  and the sensory precision per element. All six dp fixtures match f64
+  within 4.1e-7 (Metal and SwiftShader). A likelihood that reads only
+  other nodes skips the dp steps (and stays one invocation per element).
+  `benchmark/bin/fit_dp_gpu.dart`.
 - categorical-state nodes in the kernels (`HgfKernel`, `FitKernel`, so
   `GpuFitter` runs categorical models on the GPU), with
   `CategoricalSurprise` and `CategoricalSoftmaxReadout` (exact gradients,

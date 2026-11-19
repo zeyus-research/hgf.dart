@@ -28,21 +28,21 @@ const int dpCandidatesKept = 1000;
 /// the parts of their weights that depend on nothing else.
 final class DpProposals {
   DpProposals._(this.mu, this.sigma)
-    : _sigma2 = Float64List(mu.length),
-      _logNorm = Float64List(mu.length),
-      _selfDensity = Float64List(mu.length),
-      _spread = Float64List(mu.length) {
+    : sigma2 = Float64List(mu.length),
+      logNorm = Float64List(mu.length),
+      selfDensity = Float64List(mu.length),
+      spread = Float64List(mu.length) {
     final n = mu.length;
     for (var j = 0; j < n; j++) {
       final s2 = sigma[j] * sigma[j];
-      _sigma2[j] = s2;
-      _logNorm[j] = math.log(_twoPi * s2);
+      sigma2[j] = s2;
+      logNorm[j] = math.log(_twoPi * s2);
       // pdf(μ_j; μ_j, σ_j): the proposal's density at its own mean.
-      _selfDensity[j] = math.exp((_logNorm[j] + 0.0 / s2) * -0.5);
+      selfDensity[j] = math.exp((logNorm[j] + 0.0 / s2) * -0.5);
       // Cluster spread: pdf(1/σ²; 0, 5), wide clusters preferred.
-      _spread[j] = jaxNormPdf(1.0 / s2, 0.0, 5.0);
+      spread[j] = jaxNormPdf(1.0 / s2, 0.0, 5.0);
     }
-    _minMaxScale(_spread);
+    _minMaxScale(spread);
   }
 
   static DpProposals? _instance;
@@ -63,10 +63,13 @@ final class DpProposals {
     return DpProposals._(mu, sigma);
   }
 
-  /// Proposal means and standard deviations.
+  /// Proposal means and standard deviations (don't modify them).
   final Float64List mu, sigma;
 
-  final Float64List _sigma2, _logNorm, _selfDensity, _spread;
+  /// Per proposal: σ², `log(2π σ²)`, its density at its own mean, and its
+  /// spread weight (`pdf(1/σ²; 0, 5)`, min-max scaled to [0, 1]). What the
+  /// GPU kernels upload with [mu] and [sigma] (don't modify them).
+  final Float64List sigma2, logNorm, selfDensity, spread;
 }
 
 const double _twoPi = 2.0 * math.pi;
@@ -159,7 +162,7 @@ final class DpScratch {
 /// standard deviation [sd].
 @pragma('vm:unsafe:no-bounds-checks')
 void _clusterRows(DpProposals p, DpScratch s, int i, double m, double sd) {
-  final mu = p.mu, sigma2 = p._sigma2, logNorm = p._logNorm;
+  final mu = p.mu, sigma2 = p.sigma2, logNorm = p.logNorm;
   final n = mu.length, base = i * n;
   final rowPre = s._rowPre, rowIso = s._rowIso;
   final s2 = sd * sd, ln = math.log(_twoPi * s2);
@@ -207,8 +210,8 @@ void _clusterRows(DpProposals p, DpScratch s, int i, double m, double sd) {
     throw RangeError('Clusters [$start, ${start + count}) out of range');
   }
   final p = DpProposals.instance;
-  final mu = p.mu, sigma = p.sigma, sigma2 = p._sigma2, logNorm = p._logNorm;
-  final self = p._selfDensity, spread = p._spread;
+  final mu = p.mu, sigma = p.sigma, sigma2 = p.sigma2, logNorm = p.logNorm;
+  final self = p.selfDensity, spread = p.spread;
   final pre = s._pre, iso = s._iso, w = s._w, ll = s._ll;
   final rowPre = s._rowPre, rowIso = s._rowIso;
   // Every per-proposal list has this length (checked once here, so the

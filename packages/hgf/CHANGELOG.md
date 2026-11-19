@@ -1,5 +1,8 @@
 ## Unreleased
 
+- `DpProposals` (with `dpProposalCount`, `dpCandidatesKept`) is exported,
+  its derived columns (`sigma2`, `logNorm`, `selfDensity`, `spread`)
+  public: the GPU kernels upload the same proposals.
 - `NetworkFixes.categoricalMissing` (P12, on by default): an unobserved
   categorical node keeps its α and records a KL divergence and a surprise
   of 0. pyhgf makes α ±∞ there (the KL NaN on that trial and the next) and

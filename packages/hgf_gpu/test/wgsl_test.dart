@@ -37,10 +37,6 @@ void main() {
   });
 
   test('unsupported node kinds and couplings throw', () {
-    final dp = Network()
-      ..addDpState(batchSize: 2)
-      ..addEfState(nNodes: 2, valueChildren: [0]);
-    expect(() => HgfKernel(dp), throwsUnsupportedError);
     // A categorical node whose binary node's parent has another child.
     final shared = Network()
       ..addCategoricalState(nCategories: 2)
@@ -209,6 +205,106 @@ void main() {
         }
       }
     }
+  });
+
+  test('dp-state networks: cooperative kernels, slots and valid WGSL', () {
+    final dir = Directory.systemTemp.createTempSync('hgf_dp_wgsl');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    // Two dp nodes (3 and 5 clusters) after a continuous HGF.
+    Network build() => Network()
+      ..addNodes()
+      ..addNodes(valueChildren: [0])
+      ..addDpState(batchSize: 3, alpha: 0.5)
+      ..addEfState(nNodes: 3, valueChildren: [2], nus: 4)
+      ..addDpState(batchSize: 5, sensoryPrecision: 2)
+      ..addEfState(nNodes: 5, valueChildren: [6]);
+    final net = build()..build();
+    var k = 0;
+    for (final options in [(false, false, false), (true, true, true)]) {
+      final kernel = HgfKernel(
+        net,
+        response: GpuResponse.dpSurprise,
+        perElementData: options.$1,
+        observedMask: options.$2,
+        timeSteps: options.$3,
+      );
+      expect(kernel.cooperative, isTrue);
+      expect(kernel.workgroupSize, 256);
+      expect(kernel.workgroups(70000), (35000, 2));
+      expect(kernel.nColumns, 3);
+      for (final (dp, clusters) in [(2, 3), (6, 5)]) {
+        expect(
+          kernel.initial[kernel.slot(dp, NodeField.alpha)],
+          net.getInitial(dp, NodeField.alpha),
+        );
+        expect(
+          kernel.initial[kernel.slot(dp, NodeField.sensoryPrecision)],
+          net.getInitial(dp, NodeField.sensoryPrecision),
+        );
+        for (final f in [
+          VectorField.n,
+          VectorField.expectedMeans,
+          VectorField.expectedSigmas,
+          VectorField.activated,
+        ]) {
+          expect(kernel.vectorLength(dp, f), clusters);
+          final v = net.getInitialVector(dp, f);
+          for (var q = 0; q < clusters; q++) {
+            expect(kernel.initial[kernel.vectorSlot(dp, f, q)], v[q]);
+          }
+        }
+        // A cluster carries its mean only (and its variance).
+        final cluster = dp + 1;
+        expect(kernel.xisLength(cluster), 1);
+        expect(
+          kernel.initial[kernel.xisSlot(cluster, 0)],
+          net.getInitialVector(cluster, VectorField.xis)[0],
+        );
+      }
+      if (!naga) continue;
+      final f = File('${dir.path}/d${k++}.wgsl')
+        ..writeAsStringSync(kernel.source);
+      final r = Process.runSync('naga', [f.path]);
+      expect(r.exitCode, 0, reason: '$options\n${r.stderr}');
+    }
+    // A likelihood that reads only the HGF skips the dp steps.
+    FitKernel fit(ResponseModel response, {bool gradients = false}) =>
+        FitKernel(
+          HgfModel(
+            network: build(),
+            response: response,
+            parameters: [
+              Parameter.node(
+                'alpha',
+                2,
+                NodeField.alpha,
+                prior: const LogNormal(-2, 2),
+              ),
+              Parameter.node(
+                'omega',
+                1,
+                NodeField.tonicVolatility,
+                prior: const Normal(-4, 2),
+              ),
+            ],
+          ),
+          gradients: gradients,
+        );
+    expect(
+      fit(const ObservationSurprise(FirstLevelGaussianSurprise())).cooperative,
+      isFalse,
+    );
+    final dpFit = fit(const ObservationSurprise(DpSurprise()));
+    expect(dpFit.cooperative, isTrue);
+    expect(dpFit.workgroups(3), (3, 1));
+    expect(
+      () => fit(const ObservationSurprise(DpSurprise()), gradients: true),
+      throwsUnsupportedError,
+    );
+    if (!naga) return;
+    final f = File('${dir.path}/fit.wgsl')..writeAsStringSync(dpFit.source);
+    final r = Process.runSync('naga', [f.path]);
+    expect(r.exitCode, 0, reason: '${r.stderr}');
   });
 
   test('fit kernels: every update mode, response and tangent width', () {

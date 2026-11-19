@@ -13,6 +13,8 @@ export 'src/coupling.dart'
         ExprCoupling,
         couplingText,
         parseCoupling;
+export 'src/dirichlet_process.dart'
+    show DpProposals, dpCandidatesKept, dpProposalCount;
 export 'src/expr.dart';
 export 'src/math.dart'
     show

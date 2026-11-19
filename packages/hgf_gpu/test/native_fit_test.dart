@@ -8,6 +8,7 @@ library;
 
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:hgf/hgf.dart';
 import 'package:hgf_fit/hgf_fit.dart';
@@ -206,6 +207,53 @@ void main() {
     final failures = await checkFitCases(fitter, log: print);
     expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
     expect(failures, isEmpty, reason: failures.take(20).join('\n'));
+  });
+
+  test('dp-state likelihoods and a Nelder-Mead MAP on the GPU', () async {
+    final backend = _backend();
+    if (backend == null) {
+      markTestSkipped('wgpu-native not available');
+      return;
+    }
+    for (final perDispatch in [0, 37]) {
+      final fitter = GpuFitter(backend, trialsPerDispatch: perDispatch);
+      final err = await checkDpPasses(fitter);
+      print('dp passes ($perDispatch trials per dispatch): max error $err');
+      expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
+      expect(err, lessThan(2e-5));
+    }
+    final fitter = GpuFitter(backend);
+    final model = dpModel(), subjects = dpSubjects(100);
+    final sw = Stopwatch()..start();
+    final fit = await fitter.fitMap(
+      model,
+      subjects,
+      optimizer: const NelderMead(),
+    );
+    // On the JIT VM the CPU takes ~90 s for the same fit (M3 Pro).
+    print(
+      'dp MAP, 2 subjects × 100 trials: ${sw.elapsedMilliseconds} ms '
+      '(${fitter.gpuPasses} GPU, ${fitter.cpuPasses} CPU passes)',
+    );
+    expect(fitter.gpuPasses, greaterThan(fitter.cpuPasses));
+    // The optimum beats the start and a large α on the f64 CPU objective.
+    for (var s = 0; s < subjects.length; s++) {
+      double nlp(List<double> x) {
+        final out = Float64List(1);
+        model.negLogPosterior(
+          [subjects[s]],
+          Int32List(1),
+          model.toUnconstrained(x),
+          out,
+        );
+        return out[0];
+      }
+
+      final r = fit.results[s];
+      expect(r.negLogPosterior, closeTo(nlp(r.x), 1e-9));
+      expect(r.negLogPosterior, lessThanOrEqualTo(nlp(model.start())));
+      expect(r.negLogPosterior, lessThan(nlp([10.0, r.x[1]])));
+    }
   });
 
   for (final perDispatch in [0, 37]) {

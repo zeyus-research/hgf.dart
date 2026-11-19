@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:hgf/hgf.dart';
 
+import 'trial.dart' show dpProposalTable;
 import 'wgsl.dart';
 
 /// A GPU buffer owned by a [GpuBackend].
@@ -89,6 +90,33 @@ abstract interface class GpuBackend {
 
   void release(GpuBuffer buffer);
 }
+
+/// The workgroups `(x, y)` that cover [elements] elements at [perGroup]
+/// elements per workgroup: along x up to 65535, then rows of them along y
+/// (kernels with one workgroup per element read both, see `kernelEntry`).
+(int, int) workgroupsFor(int elements, int perGroup) {
+  final groups = (elements + perGroup - 1) ~/ perGroup;
+  if (groups <= _maxGroups) return (groups < 1 ? 1 : groups, 1);
+  if (perGroup != 1) {
+    throw ArgumentError('$elements elements need more than $_maxGroups groups');
+  }
+  final y = (groups + _maxGroups - 1) ~/ _maxGroups;
+  if (y > _maxGroups) throw ArgumentError('Too many elements: $elements');
+  return ((groups + y - 1) ~/ y, y);
+}
+
+const int _maxGroups = 65535;
+
+/// [dpProposalTable] on [backend], uploaded once (kernels with dp-state
+/// steps bind it).
+GpuBuffer dpProposals(GpuBackend backend) => _dpProposals[backend] ??= () {
+  final table = dpProposalTable();
+  final buffer = backend.storage(table.length * 4);
+  backend.writeUints(buffer, Uint32List.view(table.buffer));
+  return buffer;
+}();
+
+final _dpProposals = Expando<GpuBuffer>();
 
 /// At or above: the kernel's non-finite marker (3.4e38 in `f32`).
 const double _f32Max = 3.3e38;
@@ -299,7 +327,7 @@ final class GpuBatch {
     backend.copy(_initialBuffer, 0, _stateBuffer, 0, kernel.nSlots * b * 4);
     final upload = sw.elapsedMicroseconds / 1e3;
 
-    final groups = (b + kernel.workgroupSize - 1) ~/ kernel.workgroupSize;
+    final (groups, groupsY) = kernel.workgroups(b);
     final chunk = trialsPerDispatch <= 0 ? nTime : trialsPerDispatch;
     var dispatches = 0;
     final params = Uint32List(4);
@@ -313,14 +341,20 @@ final class GpuBatch {
       paramsF[3] = timeStep;
       backend
         ..write(_paramsBuffer, paramsF)
-        ..dispatch(_pipeline, [
-          _stateBuffer,
-          _dataBuffer!,
-          _paramsBuffer,
-          ?_maskBuffer,
-          ?_stepsBuffer,
-          ?_respBuffer,
-        ], groups);
+        ..dispatch(
+          _pipeline,
+          [
+            _stateBuffer,
+            _dataBuffer!,
+            _paramsBuffer,
+            ?_maskBuffer,
+            ?_stepsBuffer,
+            ?_respBuffer,
+            if (kernel.cooperative) dpProposals(backend),
+          ],
+          groups,
+          groupsY,
+        );
       dispatches++;
     }
     // No idle(): mapping the results waits for the work, and each wait is a
