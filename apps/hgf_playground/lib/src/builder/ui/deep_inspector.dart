@@ -48,7 +48,11 @@ const _expression = '__expression__';
 enum _Template {
   classifier('Classifier', 'features → 8 tanh → a binary target'),
   regression('Regression', 'features → 16 tanh → a continuous target'),
-  filter('Continuous filter', 'observations ← a volatile level (no training)');
+  filter('Continuous filter', 'observations ← a volatile level (no training)'),
+  volatilityFilter(
+    'Continuous HGF',
+    'observations ← a level ← its volatility (no training)',
+  );
 
   const _Template(this.label, this.hint);
   final String label, hint;
@@ -70,6 +74,22 @@ enum _Template {
       layers: const [
         DocLayer(size: 1, kind: LayerKind.continuous),
         DocLayer(size: 1, kind: LayerKind.continuous, tonicVolatility: -2),
+      ],
+      features: const [],
+      targets: const [],
+      categories: () => null,
+    ),
+    volatilityFilter => d.copyWith(
+      layers: const [
+        DocLayer(size: 1, kind: LayerKind.continuous),
+        DocLayer(size: 1, kind: LayerKind.continuous, tonicVolatility: -2),
+        DocLayer(
+          size: 1,
+          kind: LayerKind.continuous,
+          name: 'volatility',
+          tonicVolatility: -4,
+          volatilityChildren: 1,
+        ),
       ],
       features: const [],
       targets: const [],
@@ -526,13 +546,28 @@ class DeepLayerPanel extends StatelessWidget {
 
   void _set(DocLayer l) => model.setLayer(index, l);
 
+  /// What layer [i] of continuous network [d] does, from its children.
+  static String _continuousRole(DocDeep d, int i) {
+    if (i == 0) {
+      return 'The observed layer: each node reads an observation column. '
+          'Its value parent predicts the observations; a volatility parent '
+          'would learn the observation noise.';
+    }
+    final value = d.valueChildOf(i), vol = d.volatilityChildOf(i);
+    final parts = [
+      if (value != null) 'the mean of ${d.layerName(value)}',
+      if (vol != null) 'the volatility of ${d.layerName(vol)}',
+    ];
+    return 'A level of the filter: it predicts ${parts.join(' and ')}, and '
+        'learns from the prediction errors coming up.';
+  }
+
   @override
   Widget build(BuildContext context) {
     final d = deep, l = d.layers[index];
     final theme = Theme.of(context);
     final n = d.layers.length;
     final isTarget = index == 0, isFeatures = index == n - 1;
-    final hidden = !isTarget && !isFeatures;
     final cont = d.isContinuous;
     final sizeFollows = cont
         ? isTarget && d.targets.isNotEmpty
@@ -540,10 +575,7 @@ class DeepLayerPanel extends StatelessWidget {
               isTarget && (d.targets.isNotEmpty || d.categories != null);
     final child = index > 0 ? d.layers[index - 1] : null;
     final role = cont
-        ? (isTarget
-              ? 'The observed layer: each node reads an observation column.'
-              : 'A level above the observations: it predicts the layer '
-                    'below and learns from its prediction errors.')
+        ? _continuousRole(d, index)
         : isTarget
         ? 'The target layer (y): clamped on the targets while training, '
               'predicted afterwards.'
@@ -554,7 +586,7 @@ class DeepLayerPanel extends StatelessWidget {
               'and the weights, and learns from the errors coming up.';
     return SectionCard(
       title: d.layerName(index),
-      action: hidden
+      action: model.canRemoveLayer(index)
           ? IconButton(
               tooltip: 'Remove this layer (Delete)',
               icon: const Icon(Icons.delete_outline),
@@ -651,13 +683,7 @@ class DeepLayerPanel extends StatelessWidget {
               onSubmitted: (v) => _set(l.copyWith(tonicVolatility: () => v)),
             ),
         ],
-        if (cont && !isTarget)
-          NumberField(
-            key: ValueKey('omega ${d.id} $index ${l.tonicVolatility}'),
-            label: 'Tonic volatility ω',
-            value: l.tonicVolatility,
-            onSubmitted: (v) => _set(l.copyWith(tonicVolatility: () => v)),
-          ),
+        if (cont) _ContinuousLevel(model: model, deep: d, index: index),
         if (index > 0 && !cont) ...[
           _Switch(
             'Bias (a constant input)',
@@ -877,6 +903,162 @@ class _TrainOn extends StatelessWidget {
           'The other rows are held out: the trained network predicts them '
           'too, and they are scored apart.',
           style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ],
+    );
+  }
+}
+
+/// A continuous level's wiring and parameters: which layer it is the
+/// value and the volatility parent of (hgf_deep's `valueChildren` and
+/// `volatilityChildren`), the coupling strengths, ω, the drift ρ and the
+/// AR(1) coefficient λ; and a button to add a level above it.
+class _ContinuousLevel extends StatelessWidget {
+  const _ContinuousLevel({
+    required this.model,
+    required this.deep,
+    required this.index,
+  });
+
+  final BuilderModel model;
+  final DocDeep deep;
+  final int index;
+
+  void _set(DocLayer l) => model.setLayer(index, l);
+
+  @override
+  Widget build(BuildContext context) {
+    final d = deep, i = index, l = d.layers[i];
+    final small = Theme.of(context).textTheme.bodySmall;
+    final value = d.valueChildOf(i), vol = d.volatilityChildOf(i);
+    final unbounded =
+        d.settings.volatilityUpdates == DeepVolatilityUpdate.unbounded;
+    // A layer has at most one value and one volatility parent, so only the
+    // layers below without another parent of that kind are offered.
+    Map<int?, String> offer({required bool volatility, required int? other}) {
+      return {
+        if (other != null) null: 'nothing',
+        for (var j = 0; j < i; j++)
+          if (d.parentOf(j, volatility: volatility) case final p
+              when p == null || p == i)
+            j: d.layerName(j),
+      };
+    }
+
+    String key(String what, Object? v) => '$what ${d.id} $i $v';
+    final valueChild = value == null ? null : d.layers[value];
+    final volChild = vol == null ? null : d.layers[vol];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (i > 0) ...[
+          Pick<int?>(
+            label: 'Value parent of (predicts its mean)',
+            value: value,
+            items: offer(volatility: false, other: vol),
+            onChanged: (v) {
+              if (v == value) return;
+              _set(d.withChildren(i, value: v, volatility: vol));
+            },
+          ),
+          if (valueChild != null) ...[
+            NumberField(
+              key: ValueKey(key('value coupling', l.valueCoupling)),
+              label: 'Value coupling (empty: 1)',
+              value: l.valueCoupling,
+              onSubmitted: (v) => _set(l.copyWith(valueCoupling: () => v)),
+            ),
+            _Switch(
+              'One-to-one with ${d.layerName(value!)}',
+              !l.fullyConnected,
+              valueChild.size == l.size || !l.fullyConnected
+                  ? (v) => _set(l.copyWith(fullyConnected: !v))
+                  : null,
+              hint: valueChild.size == l.size
+                  ? null
+                  : 'Needs as many nodes as ${d.layerName(value)} '
+                        '(${valueChild.size})',
+            ),
+          ],
+          Pick<int?>(
+            label: 'Volatility parent of (predicts its volatility)',
+            value: vol,
+            items: offer(volatility: true, other: value),
+            onChanged: (v) {
+              if (v == vol) return;
+              var next = d.withChildren(i, value: value, volatility: v);
+              // The unbounded update needs a one-to-one κ: offer it
+              // whenever the sizes allow.
+              if (v != null &&
+                  unbounded &&
+                  d.layers[v].size == l.size &&
+                  l.volatilityFullyConnected == null) {
+                next = next.copyWith(volatilityFullyConnected: () => false);
+              }
+              _set(next);
+            },
+          ),
+          if (volChild != null) ...[
+            NumberField(
+              key: ValueKey(key('kappa', l.volatilityCoupling)),
+              label: 'Volatility coupling κ (empty: 1)',
+              value: l.volatilityCoupling,
+              onSubmitted: (v) => _set(l.copyWith(volatilityCoupling: () => v)),
+            ),
+            _Switch(
+              'One-to-one κ with ${d.layerName(vol!)}',
+              l.volatilityFullyConnected == false,
+              volChild.size == l.size || l.volatilityFullyConnected == false
+                  ? (v) => _set(
+                      l.copyWith(
+                        volatilityFullyConnected: () => v ? false : null,
+                      ),
+                    )
+                  : null,
+              hint: volChild.size != l.size
+                  ? 'Needs as many nodes as ${d.layerName(vol)} '
+                        '(${volChild.size})'
+                  : unbounded
+                  ? 'The unbounded update needs it (or one node each)'
+                  : null,
+            ),
+          ],
+        ],
+        NumberField(
+          key: ValueKey(key('omega', l.tonicVolatility)),
+          label: i == 0
+              ? 'Observation noise ω (empty: 0)'
+              : 'Tonic volatility ω (empty: −4)',
+          value: l.tonicVolatility,
+          onSubmitted: (v) => _set(l.copyWith(tonicVolatility: () => v)),
+        ),
+        NumberField(
+          key: ValueKey(key('drift', l.tonicDrift)),
+          label: 'Drift ρ (empty: 0)',
+          value: l.tonicDrift,
+          onSubmitted: (v) => _set(l.copyWith(tonicDrift: () => v)),
+        ),
+        NumberField(
+          key: ValueKey(key('lambda', l.autoconnectionStrength)),
+          label: i == 0
+              ? 'Autoconnection λ (empty: 0)'
+              : 'Autoconnection λ (empty: 1; below 1 the mean reverts)',
+          value: l.autoconnectionStrength,
+          onSubmitted: (v) => _set(l.copyWith(autoconnectionStrength: () => v)),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Each level is the value or volatility parent of a layer below '
+          'it; dense couplings divide the strength by the level\'s size.',
+          style: small,
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            icon: const Icon(Icons.add),
+            label: const Text('Add a level above'),
+            onPressed: () => model.insertLayer(i),
+          ),
         ),
       ],
     );

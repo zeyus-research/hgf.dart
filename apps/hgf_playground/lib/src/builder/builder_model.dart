@@ -825,26 +825,56 @@ class BuilderModel extends ChangeNotifier {
 
   /// Insert a hidden layer above layer [below] of the open deep network
   /// (a copy of its nearest hidden layer, else 8 tanh nodes), and select
-  /// it.
+  /// it. In a continuous network the new level (as wide as [below]) may
+  /// also go on top, and slots into the chain: it becomes the value parent
+  /// of [below] and takes over [below]'s value parent
+  /// ([DocDeep.insertLevel]).
   void insertLayer(int below) {
     final d = deep;
-    if (d == null || below < 0 || below >= d.layers.length - 1) return;
-    final like = d.layers.skip(1).take(d.layers.length - 2).firstOrNull;
-    final layer = d.isContinuous
-        ? const DocLayer(size: 1, kind: LayerKind.continuous)
-        : like?.copyWith(name: () => null) ??
-              const DocLayer(size: 8, coupling: 'tanh');
+    if (d == null || below < 0) return;
+    final n = d.layers.length;
+    if (d.isContinuous) {
+      if (below >= n) return;
+      _selection = LayerSelection(below + 1);
+      final level = DocLayer(
+        size: d.layers[below].size,
+        kind: LayerKind.continuous,
+      );
+      setDeep(d.id, d.insertLevel(below + 1, level));
+      return;
+    }
+    if (below >= n - 1) return;
+    final like = d.layers.skip(1).take(n - 2).firstOrNull;
+    final layer =
+        like?.copyWith(name: () => null) ??
+        const DocLayer(size: 8, coupling: 'tanh');
     _selection = LayerSelection(below + 1);
     setDeep(d.id, d.copyWith(layers: [...d.layers]..insert(below + 1, layer)));
   }
 
-  /// Remove hidden layer [index] of the open deep network (the target
-  /// and feature layers stay).
+  /// Whether layer [index] of the open deep network can be removed: a
+  /// hidden layer (the target and feature layers stay), or in a
+  /// continuous network any level above the observations while two
+  /// layers remain.
+  bool canRemoveLayer(int index) {
+    final d = deep;
+    if (d == null || index <= 0) return false;
+    final n = d.layers.length;
+    return d.isContinuous ? index < n && n > 2 : index < n - 1;
+  }
+
+  /// Remove layer [index] of the open deep network, if [canRemoveLayer]
+  /// (a continuous network rewires around it: [DocDeep.removeLevel]).
   void removeLayer(int index) {
     final d = deep;
-    if (d == null || index <= 0 || index >= d.layers.length - 1) return;
+    if (d == null || !canRemoveLayer(index)) return;
     _selection = null;
-    setDeep(d.id, d.copyWith(layers: [...d.layers]..removeAt(index)));
+    setDeep(
+      d.id,
+      d.isContinuous
+          ? d.removeLevel(index)
+          : d.copyWith(layers: [...d.layers]..removeAt(index)),
+    );
   }
 
   /// Deep network [id] reading [column] as a feature (or, with [target], a

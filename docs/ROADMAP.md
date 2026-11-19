@@ -23,8 +23,8 @@ supersedes its phase list.
   - surprise and response functions (`Network.surprise`), generative
     sampling (`Network.sample`), `saveState`/`restoreState`; a dp-state
     surprise (`DpSurprise`, an hgf.dart extension, 2026-11-10).
-- 834 engine tests pass (plus 807 fitting, 120 hgf_deep, 16 widget and
-  156 playground tests; counts of 2026-11-19). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
+- 834 engine tests pass (plus 812 fitting, 120 hgf_deep, 16 widget and
+  159 playground tests; counts of 2026-11-19). Parity with float64 pyhgf JAX holds to 1e-9 on 61 fixtures
   (1 of them against a patched pyhgf, `dp_missing`; 11 ef-state, 7
   categorical, 6 dp-state; since 2026-11-18 the fixtures are at pyhgf
   `4db3b093`, which has the P1 fix),
@@ -2624,9 +2624,9 @@ fitting, export) reads it.
    Training deep networks in the builder (on the split's rows) and wiring
    models together (a deep network's predictions as columns the HGF
    inputs read; the exports reading the clock, steps and transforms):
-   done 2026-11-17, see "Deep training and wiring" below. Left: Julia
-   export; continuous layers' couplings and per-layer volatility children
-   in the inspector.
+   done 2026-11-17, see "Deep training and wiring" below. Continuous
+   layers' wiring and couplings in the inspector: done 2026-11-19, see
+   "Continuous levels in the builder" below. Left: Julia export.
 
 9. [x] **Builder: performance and usability** (reported 2026-11-18, done
    2026-11-18, see "Builder: performance and usability" below): dragging
@@ -2938,7 +2938,48 @@ A model document holds an HGF network, deep networks (pyhgf's
 - Left: training and a live preview in the builder, and wiring a deep
   network's predictions into the HGF network (both done, see "Deep
   training and wiring"); continuous layers' couplings and per-layer
-  volatility children in the inspector, Julia.
+  volatility children in the inspector (done, see "Continuous levels in
+  the builder"), Julia.
+
+#### Continuous levels in the builder (2026-11-19): done
+
+A continuous deep network (pyhgf's `kind="continuous"` layers) was a
+chain in the builder: each level the value parent of the one below, with
+only ω editable, and inserting or removing a level silently broke any
+explicit `valueChildren` / `volatilityChildren` (indices into the layer
+list).
+
+- **Document** (`DocDeep`): `valueChildOf(i)` / `volatilityChildOf(i)`
+  resolve hgf_deep's default (no child index: the value parent of the
+  layer below), `parentOf(i, volatility:)` inverts them,
+  `withChildren(i, value:, volatility:)` writes a level's wiring the short
+  way (the default stores no indices, so documents stay as they were).
+  `insertLevel(at, layer)` slots a level into the chain (the value parent
+  of `at − 1`, taking over that layer's value parent; indices above
+  shift); `removeLevel(r)` bridges it (its value parent takes its value
+  child, its volatility parent loses its child; a level left with no
+  child falls back to the default and `checkDeep` reports a clash).
+  `DocLayer.copyWith` now edits the continuous fields (it dropped them).
+- **Builder:** the level panel (`_ContinuousLevel`) picks what a level is
+  the value parent and the volatility parent of (only layers below without
+  another parent of that kind; "nothing" for one of the two), the value
+  coupling and one-to-one value edges, κ and one-to-one κ (set on
+  choosing a volatility child under the unbounded update when the sizes
+  allow, since it needs it), ω (the observation layer's: its noise, empty
+  = 0), the drift ρ and the AR(1) λ, and "Add a level above" (also on top,
+  which the canvas's "+" can't). Any level above the observations can be
+  removed while two layers remain (`canRemoveLayer`); a new level is as
+  wide as the layer it predicts. The canvas draws the actual wiring:
+  value edges solid, volatility edges dashed and tinted, and edges past
+  other levels (a noise parent of the observations) as arcs on the right;
+  the bar's summary names non-adjacent children. A *Continuous HGF*
+  template: observations ← a level ← its volatility.
+- Exports and training needed nothing: they already wrote every
+  continuous field.
+- Tests: hgf_fit `deep_document_test.dart` (resolution, short-form
+  wiring, insert / remove keep every relation and round-trip, `copyWith`);
+  playground `builder_deep_test.dart` (rewiring through the model, the
+  panel at two widths, adding a level from it).
 
 #### Model document (2026-11-16): done
 
@@ -3640,8 +3681,9 @@ simulated together, and events onto a shared clock, a BIDS loader and
 transform caching for whole sessions (2026-11-17), deep networks in the
 builder beside or instead of the HGF network, with Dart and pyhgf exports,
 the data-pipeline steps, and deep networks trained in the builder with their
-predictions wired into the HGF inputs (2026-11-17); next Julia export (after
-upstream settles) or the leftovers of item 8. 2026-11-18: P1 is fixed
+predictions wired into the HGF inputs (2026-11-17), and continuous levels'
+wiring and couplings in the builder (2026-11-19); next Julia export (after
+upstream settles). 2026-11-18: P1 is fixed
 upstream (#480) and ported (`ehgfMgfCorrection` removed; fixtures at
 `4db3b093`); hgf_deep's weight-belief rule, `updateInputLayer` and sample
 weights run on the GPU; the macOS build hook makes `dart test` and

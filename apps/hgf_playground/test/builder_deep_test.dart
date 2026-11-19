@@ -27,6 +27,24 @@ BuilderModel _deepOnly() {
   return m;
 }
 
+BuilderModel _continuousOnly() {
+  final m = _deepOnly();
+  final d = m.document.deepById('deep')!;
+  m.setDeep(
+    'deep',
+    d.copyWith(
+      layers: const [
+        DocLayer(size: 1, kind: LayerKind.continuous),
+        DocLayer(size: 1, kind: LayerKind.continuous, tonicVolatility: -2),
+      ],
+      features: const [],
+      targets: const [],
+      categories: () => null,
+    ),
+  );
+  return m;
+}
+
 void main() {
   group('BuilderModel with deep networks', () {
     test('a deep network alone: no HGF cards, only its own checks', () {
@@ -95,6 +113,37 @@ void main() {
       expect(m.deep!.layers, hasLength(3));
       m.undo();
       expect(m.deep!.layers, hasLength(4));
+    });
+
+    test('continuous levels: insert, rewire and remove keep the chain', () {
+      final m = _continuousOnly()..showDeep('deep');
+      // observations ← level 1; a level on top predicts level 1's
+      // volatility.
+      m.insertLayer(1);
+      var d = m.deep!;
+      expect(d.layers, hasLength(3));
+      expect(m.selectedLayer, 2);
+      m.setLayer(2, d.withChildren(2, value: null, volatility: 1));
+      d = m.deep!;
+      List<(int?, int?)> wiring() => [
+        for (final c in m.deep!.build().configs)
+          (c.valueChild, c.volatilityChild),
+      ];
+      expect(wiring(), [(null, null), (0, null), (null, 1)]);
+      // A level between the observations and level 1 slots into the chain;
+      // the volatility parent follows level 1 up.
+      m.insertLayer(0);
+      expect(wiring(), [(null, null), (0, null), (1, null), (null, 2)]);
+      expect(m.deep!.layers[1].size, m.deep!.layers[0].size);
+      // Any level above the observations can go while two layers remain.
+      expect(m.canRemoveLayer(3), isTrue);
+      expect(m.canRemoveLayer(0), isFalse);
+      m.removeLayer(1);
+      expect(wiring(), [(null, null), (0, null), (null, 1)]);
+      m.removeLayer(2);
+      m.removeLayer(1);
+      expect(m.deep!.layers, hasLength(2), reason: 'two layers stay');
+      expect(m.issues.where((i) => i.isError), isEmpty, reason: '${m.issues}');
     });
 
     test('a renamed deep network keeps its card; the JSON round-trips', () {
@@ -228,5 +277,45 @@ void main() {
       expect(m.selectedLayer, 0);
       expect(find.text('target'), findsWidgets);
     });
+
+    for (final width in [1300.0, 480.0]) {
+      testWidgets('a continuous level\'s wiring in the inspector '
+          '${width.toInt()} wide', (tester) async {
+        tester.view
+          ..physicalSize = Size(width, 900)
+          ..devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final m = _continuousOnly()..showDeep('deep');
+        m.insertLayer(1);
+        final d = m.deep!;
+        m.setLayer(2, d.withChildren(2, value: null, volatility: 1));
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: buildTheme(Brightness.light),
+            home: BuilderPage(model: m),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(DeepCanvas), findsOneWidget);
+        if (width >= 900) {
+          expect(find.byType(DeepLayerPanel), findsOneWidget);
+          expect(
+            find.text('Volatility parent of (predicts its volatility)'),
+            findsOneWidget,
+          );
+          expect(find.text('Volatility coupling κ (empty: 1)'), findsOneWidget);
+          await tester.tap(find.text('Add a level above'));
+          await tester.pumpAndSettle();
+          expect(m.deep!.layers, hasLength(4));
+          expect(m.deep!.valueChildOf(3), 2);
+          // The observation layer: its noise, no wiring.
+          m.select(const LayerSelection(0));
+          await tester.pumpAndSettle();
+          expect(find.text('Observation noise ω (empty: 0)'), findsOneWidget);
+          expect(find.textContaining('Value parent of'), findsNothing);
+        }
+        expect(tester.takeException(), isNull);
+      });
+    }
   });
 }

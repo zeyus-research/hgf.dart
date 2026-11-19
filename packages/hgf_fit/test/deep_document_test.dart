@@ -153,4 +153,90 @@ void main() {
       expect(DocDeep.weightCount(net), (2 + 1) * 8 + (8 + 1) * 1);
     });
   });
+
+  group('continuous levels', () {
+    const c = LayerKind.continuous;
+    // observations ← value level ← (volatility of the value level)
+    final filter = DocDeep(
+      id: 'f',
+      layers: const [
+        DocLayer(size: 2, kind: c),
+        DocLayer(size: 2, kind: c),
+        DocLayer(
+          size: 2,
+          kind: c,
+          volatilityChildren: 1,
+          volatilityFullyConnected: false,
+        ),
+      ],
+    );
+    List<(int?, int?)> wiring(DocDeep d) {
+      final net = d.build();
+      return [for (final k in net.configs) (k.valueChild, k.volatilityChild)];
+    }
+
+    test('children resolve as hgf_deep does', () {
+      expect(wiring(filter), [(null, null), (0, null), (null, 1)]);
+      for (var i = 0; i < 3; i++) {
+        expect((
+          filter.valueChildOf(i),
+          filter.volatilityChildOf(i),
+        ), [(null, null), (0, null), (null, 1)][i]);
+      }
+      expect(filter.parentOf(0), 1);
+      expect(filter.parentOf(1, volatility: true), 2);
+      expect(filter.parentOf(1), isNull);
+    });
+
+    test('withChildren stores the default as no indices', () {
+      expect(filter.withChildren(1, value: 0).valueChildren, isNull);
+      final both = filter.withChildren(2, value: 0, volatility: 1);
+      expect((both.valueChildren, both.volatilityChildren), (0, 1));
+      final noise = filter.withChildren(2, volatility: 0);
+      expect((noise.valueChildren, noise.volatilityChildren), (null, 0));
+    });
+
+    test('inserting a level keeps every relation', () {
+      // Between the observations and the value level: a new value level.
+      final a = filter.insertLevel(1, const DocLayer(size: 2, kind: c));
+      expect(wiring(a), [(null, null), (0, null), (1, null), (null, 2)]);
+      expect(a.layers[2].valueChildren, isNull, reason: 'default chain');
+      // On top: the new level is the value parent of the old top.
+      final b = filter.insertLevel(3, const DocLayer(size: 2, kind: c));
+      expect(wiring(b), [(null, null), (0, null), (null, 1), (2, null)]);
+    });
+
+    test('removing a level bridges the chain', () {
+      final a = filter.insertLevel(1, const DocLayer(size: 2, kind: c));
+      final back = a.removeLevel(1);
+      expect(wiring(back), wiring(filter));
+      expect(back.toJson(), filter.toJson());
+      // Removing the value level drops the volatility parent's child: it
+      // falls back to the default (the value parent of the observations).
+      final top = filter.removeLevel(1);
+      expect(wiring(top), [(null, null), (0, null)]);
+    });
+
+    test('copyWith edits and clears the continuous fields', () {
+      final l = filter.layers[2].copyWith(
+        volatilityCoupling: () => 0.5,
+        volatilityFullyConnected: () => true,
+        tonicDrift: () => 0.1,
+        autoconnectionStrength: () => 0.9,
+      );
+      expect(
+        (
+          l.volatilityCoupling,
+          l.volatilityFullyConnected,
+          l.tonicDrift,
+          l.autoconnectionStrength,
+          l.volatilityChildren,
+        ),
+        (0.5, true, 0.1, 0.9, 1),
+      );
+      final cleared = l.copyWith(tonicDrift: () => null);
+      expect(cleared.tonicDrift, isNull);
+      expect(DocLayer.fromJson(l.toJson()).toJson(), l.toJson());
+    });
+  });
 }

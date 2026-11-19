@@ -5,6 +5,7 @@ import 'package:hgf_fit/document.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../builder_model.dart';
+import 'builder_canvas.dart' show EdgeGeometry;
 import 'canvas_support.dart';
 
 /// At most this many nodes are drawn per layer (the rest as "+n").
@@ -13,7 +14,7 @@ const double _dot = 7, _dotGap = 18, _barHeight = 62, _plus = 12;
 
 /// Where the deep canvas draws each layer and each "insert" button.
 final class DeepGeometry {
-  DeepGeometry(DocDeep d, Size size) {
+  DeepGeometry(DocDeep d, Size size) : width = size.width {
     final n = d.layers.length;
     final gap = n <= 1
         ? 0.0
@@ -32,6 +33,8 @@ final class DeepGeometry {
     }
     height = n == 0 ? 0 : bars.first.bottom + 12;
   }
+
+  final double width;
 
   /// One per layer, by index.
   final bars = <Rect>[];
@@ -176,6 +179,14 @@ String layerSummary(DocDeep d, int i) {
   if (i > 0 && !d.isContinuous) {
     parts.add(l.coupling ?? d.settings.coupling);
   }
+  if (d.isContinuous && i > 0) {
+    final value = d.valueChildOf(i), vol = d.volatilityChildOf(i);
+    if (value != null && value != i - 1) {
+      parts.add('mean of ${d.layerName(value)}');
+    }
+    if (vol != null) parts.add('volatility of ${d.layerName(vol)}');
+    if (l.volatilityFullyConnected == false) parts.add('one-to-one κ');
+  }
   if (!l.fullyConnected) parts.add('one-to-one');
   if (l.volatilityParent == false && l.kind == LayerKind.volatile) {
     parts.add('no volatility level');
@@ -210,35 +221,122 @@ class _DeepPainter extends CustomPainter {
   void _text(Canvas c, Offset at, String s, TextStyle style, {double? max}) =>
       canvasText(s, style, maxWidth: max ?? double.infinity).paint(c, at);
 
+  /// The lines from the nodes of layer [parent] to those of the layer
+  /// just below it, [child]: dense, or one-to-one.
+  void _fan(
+    Canvas canvas,
+    int child,
+    int parent, {
+    required bool oneToOne,
+    bool volatility = false,
+  }) {
+    final g = geometry;
+    final cs = g.dots(deep, child), ps = g.dots(deep, parent);
+    final down = Offset(0, -_dot - 34), up = Offset(0, _dot + 2);
+    final colour = volatility ? scheme.secondary : scheme.outline;
+    final paint = Paint()
+      ..strokeWidth = volatility ? 1.1 : 0.8
+      ..color = colour.withValues(
+        alpha: oneToOne
+            ? 0.45
+            : (1.2 / math.sqrt(cs.length * ps.length)).clamp(0.14, 0.45),
+      );
+    void line(Offset a, Offset b) => volatility
+        ? _dashedLine(canvas, a, b, paint)
+        : canvas.drawLine(a, b, paint);
+    if (oneToOne) {
+      for (var k = 0; k < math.min(cs.length, ps.length); k++) {
+        line(ps[k] + up, cs[k] + down);
+      }
+    } else {
+      for (final p in ps) {
+        for (final c in cs) {
+          line(p + up, c + down);
+        }
+      }
+    }
+  }
+
+  /// A level [parent] predicting layer [child] past the layers between
+  /// them: a curve on the right of the bars, its [lane] further out, with
+  /// an arrowhead at the child.
+  void _arc(
+    Canvas canvas,
+    int child,
+    int parent, {
+    required bool volatility,
+    required int lane,
+  }) {
+    final g = geometry;
+    final from = g.bars[parent].centerRight, to = g.bars[child].centerRight;
+    final out = math.min(
+      math.max(from.dx, to.dx) + 28 + 14 * lane,
+      g.width - 4,
+    );
+    final curve = EdgeGeometry(
+      from,
+      Offset(out, from.dy),
+      Offset(out, to.dy),
+      to,
+    );
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.4
+      ..color = (volatility ? scheme.secondary : scheme.outline).withValues(
+        alpha: 0.75,
+      );
+    canvas.drawPath(volatility ? curve.dashedPath : curve.path, paint);
+    final head = Path()
+      ..moveTo(to.dx, to.dy)
+      ..lineTo(to.dx + 8, to.dy - 4.5)
+      ..lineTo(to.dx + 8, to.dy + 4.5)
+      ..close();
+    canvas.drawPath(head, Paint()..color = paint.color);
+  }
+
+  static void _dashedLine(Canvas canvas, Offset a, Offset b, Paint paint) {
+    final d = b - a, length = d.distance;
+    if (length == 0) return;
+    final step = d / length;
+    for (var t = 0.0; t < length; t += 9) {
+      canvas.drawLine(a + step * t, a + step * math.min(t + 5, length), paint);
+    }
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final g = geometry;
     final n = deep.layers.length;
-    // Connections: parent layer i + 1 predicts layer i.
-    final line = Paint()
-      ..color = scheme.outline.withValues(alpha: 0.35)
-      ..strokeWidth = 0.8;
-    for (var i = 0; i + 1 < n; i++) {
-      final child = g.dots(deep, i), parent = g.dots(deep, i + 1);
-      final down = Offset(0, -_dot - 34), up = Offset(0, _dot + 2);
-      if (!deep.layers[i + 1].fullyConnected) {
-        for (var k = 0; k < math.min(child.length, parent.length); k++) {
-          canvas.drawLine(parent[k] + up, child[k] + down, line);
-        }
-      } else {
-        final fan = Paint()
-          ..color = scheme.outline.withValues(
-            alpha: (1.2 / math.sqrt(child.length * parent.length)).clamp(
-              0.14,
-              0.45,
-            ),
-          )
-          ..strokeWidth = 0.8;
-        for (final p in parent) {
-          for (final c in child) {
-            canvas.drawLine(p + up, c + down, fan);
+    // Connections: parent layer i + 1 predicts layer i; in a continuous
+    // network each level predicts the layers it names (value edges solid,
+    // volatility edges dashed and tinted, past other layers on the side).
+    if (deep.isContinuous) {
+      var arcs = 0;
+      for (var j = 1; j < n; j++) {
+        if (deep.valueChildOf(j) case final c?) {
+          if (c == j - 1) {
+            _fan(canvas, c, j, oneToOne: !deep.layers[j].fullyConnected);
+          } else {
+            _arc(canvas, c, j, volatility: false, lane: arcs++);
           }
         }
+        if (deep.volatilityChildOf(j) case final c?) {
+          if (c == j - 1) {
+            _fan(
+              canvas,
+              c,
+              j,
+              oneToOne: deep.layers[j].volatilityFullyConnected == false,
+              volatility: true,
+            );
+          } else {
+            _arc(canvas, c, j, volatility: true, lane: arcs++);
+          }
+        }
+      }
+    } else {
+      for (var i = 0; i + 1 < n; i++) {
+        _fan(canvas, i, i + 1, oneToOne: !deep.layers[i + 1].fullyConnected);
       }
     }
     // Layers.

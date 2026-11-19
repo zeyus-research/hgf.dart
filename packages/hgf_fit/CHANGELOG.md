@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Continuous deep networks' wiring: `DocDeep.valueChildOf`,
+  `volatilityChildOf` and `parentOf` resolve hgf_deep's default children;
+  `withChildren` writes a level's wiring (no indices for the default);
+  `insertLevel` and `removeLevel` keep every relation while indices shift.
+  `DocLayer.copyWith` edits the continuous-only fields (it dropped them).
 - dp-state nodes in the trial IR, for the GPU kernels (no tangents or SSA
   form, so `IrReverse` and gradients refuse them): the clusters' means and
   sigmas, the assignment compared in log space, and the surprise under

@@ -197,6 +197,92 @@ final class DocDeep {
     return 'hidden ${layers.length - 1 - i}';
   }
 
+  /// The layer that layer [i] of a continuous network is the value parent
+  /// of, with hgf_deep's default resolved (without either child index, a
+  /// layer is the value parent of the one below it).
+  int? valueChildOf(int i) {
+    final l = layers[i];
+    if (l.valueChildren case final v?) return v;
+    return l.volatilityChildren == null && i > 0 ? i - 1 : null;
+  }
+
+  /// The layer that layer [i] of a continuous network is the volatility
+  /// parent of, or `null`.
+  int? volatilityChildOf(int i) => layers[i].volatilityChildren;
+
+  /// The layer whose value (or, with [volatility], volatility) parent is
+  /// layer [i] of a continuous network, or `null`.
+  int? parentOf(int i, {bool volatility = false}) {
+    for (var j = 0; j < layers.length; j++) {
+      final c = volatility ? volatilityChildOf(j) : valueChildOf(j);
+      if (c == i) return j;
+    }
+    return null;
+  }
+
+  /// Layer [i] of a continuous network as the value parent of [value]
+  /// and the volatility parent of [volatility] (either may be `null`, not
+  /// both). Written the short way: hgf_deep's default (the value parent
+  /// of the layer below, nothing else) stores no indices.
+  DocLayer withChildren(int i, {int? value, int? volatility}) {
+    final l = layers[i];
+    final plain = volatility == null && value == i - 1;
+    return l.copyWith(
+      valueChildren: () => plain ? null : value,
+      volatilityChildren: () => volatility,
+    );
+  }
+
+  /// A continuous network with [layer] inserted at index [at] (above
+  /// layer `at - 1`), as a new level in the chain: it becomes the value
+  /// parent of layer `at - 1` and takes that layer's value parent, if
+  /// any, as its own; every child index above it shifts.
+  DocDeep insertLevel(int at, DocLayer layer) {
+    RangeError.checkValueInInterval(at, 1, layers.length, 'at');
+    final below = at - 1;
+    final children = [
+      for (var j = 0; j < layers.length; j++)
+        (valueChildOf(j), volatilityChildOf(j)),
+    ];
+    final owner = parentOf(below);
+    int? shift(int? c) => c == null ? null : (c >= at ? c + 1 : c);
+    final next = <(int?, int?)>[
+      for (final (j, (v, vol)) in children.indexed)
+        (j == owner ? at : shift(v), shift(vol)),
+    ]..insert(at, (below, null));
+    final out = [...layers]..insert(at, layer);
+    return _rewire(out, next);
+  }
+
+  /// A continuous network without layer [r] (not the observations): its
+  /// value parent takes over its value child, and its volatility parent
+  /// loses its child; every child index above it shifts down.
+  DocDeep removeLevel(int r) {
+    RangeError.checkValueInInterval(r, 1, layers.length - 1, 'r');
+    final rValue = valueChildOf(r);
+    int? shift(int? c) => c == null || c == r ? null : (c > r ? c - 1 : c);
+    final next = <(int?, int?)>[
+      for (var j = 0; j < layers.length; j++)
+        if (j != r)
+          (
+            valueChildOf(j) == r ? shift(rValue) : shift(valueChildOf(j)),
+            shift(volatilityChildOf(j)),
+          ),
+    ];
+    final out = [...layers]..removeAt(r);
+    return _rewire(out, next);
+  }
+
+  DocDeep _rewire(List<DocLayer> out, List<(int?, int?)> children) {
+    final d = copyWith(layers: out);
+    return d.copyWith(
+      layers: [
+        for (final (j, (v, vol)) in children.indexed)
+          j == 0 ? out[0] : d.withChildren(j, value: v, volatility: vol),
+      ],
+    );
+  }
+
   DocDeep copyWith({
     String? id,
     String? name,
@@ -478,6 +564,13 @@ final class DocLayer {
     double? Function()? tonicVolatility,
     double? Function()? tonicVolatilityVol,
     Map<LayerField, double>? initial,
+    int? Function()? valueChildren,
+    int? Function()? volatilityChildren,
+    double? Function()? valueCoupling,
+    double? Function()? volatilityCoupling,
+    bool? Function()? volatilityFullyConnected,
+    double? Function()? tonicDrift,
+    double? Function()? autoconnectionStrength,
   }) => DocLayer(
     size: size ?? this.size,
     kind: kind ?? this.kind,
@@ -497,13 +590,21 @@ final class DocLayer {
         ? tonicVolatilityVol()
         : this.tonicVolatilityVol,
     initial: initial ?? this.initial,
-    valueChildren: valueChildren,
-    volatilityChildren: volatilityChildren,
-    valueCoupling: valueCoupling,
-    volatilityCoupling: volatilityCoupling,
-    volatilityFullyConnected: volatilityFullyConnected,
-    tonicDrift: tonicDrift,
-    autoconnectionStrength: autoconnectionStrength,
+    valueChildren: valueChildren != null ? valueChildren() : this.valueChildren,
+    volatilityChildren: volatilityChildren != null
+        ? volatilityChildren()
+        : this.volatilityChildren,
+    valueCoupling: valueCoupling != null ? valueCoupling() : this.valueCoupling,
+    volatilityCoupling: volatilityCoupling != null
+        ? volatilityCoupling()
+        : this.volatilityCoupling,
+    volatilityFullyConnected: volatilityFullyConnected != null
+        ? volatilityFullyConnected()
+        : this.volatilityFullyConnected,
+    tonicDrift: tonicDrift != null ? tonicDrift() : this.tonicDrift,
+    autoconnectionStrength: autoconnectionStrength != null
+        ? autoconnectionStrength()
+        : this.autoconnectionStrength,
   );
 
   Map<String, Object?> toJson() => {
