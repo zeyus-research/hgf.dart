@@ -10,3 +10,4 @@ export 'src/plot/layers.dart';
 export 'src/plot/reduce.dart' show SeriesReducer, finiteRange, niceTicks;
 export 'src/plot/trajectory_plot.dart'
     show PlotGeometry, PlotStyle, TrajectoryPlot, formatTick;
+export 'src/plot/viewport.dart' show PlotViewport, PlotViewportBar;

@@ -338,7 +338,7 @@ class _BuilderPageState extends State<BuilderPage> {
                 const SizedBox(height: 8),
                 _PreviewBar(model: m),
                 SizedBox(
-                  height: panels * h,
+                  height: panels * h + PlotViewportBar.height,
                   child: BuilderPreview(model: m, panelHeight: h),
                 ),
               ],
@@ -637,6 +637,9 @@ class BuilderPreview extends StatefulWidget {
 class _BuilderPreviewState extends State<BuilderPreview> {
   final _hover = ValueNotifier<int?>(null);
 
+  /// The plots' visible trials (rows for a deep network).
+  final _viewport = PlotViewport();
+
   /// The responses and the named outputs, one plot each.
   List<Widget> _extras(BuildContext context, BuilderModel m) {
     if (m.view != BuilderView.pipeline) return const [];
@@ -658,6 +661,7 @@ class _BuilderPreviewState extends State<BuilderPreview> {
             ),
           ],
           hover: _hover,
+          viewport: _viewport,
           revision: m.revision,
           showXAxis: false,
         ),
@@ -668,6 +672,7 @@ class _BuilderPreviewState extends State<BuilderPreview> {
           title: '$key (output)',
           layers: [LineLayer(value, color: colors.category(1))],
           hover: _hover,
+          viewport: _viewport,
           revision: m.revision,
           showXAxis: false,
         ),
@@ -680,6 +685,7 @@ class _BuilderPreviewState extends State<BuilderPreview> {
   @override
   void dispose() {
     _hover.dispose();
+    _viewport.dispose();
     super.dispose();
   }
 
@@ -709,6 +715,7 @@ class _BuilderPreviewState extends State<BuilderPreview> {
         model: m,
         deep: d,
         hover: _hover,
+        viewport: _viewport,
         panelHeight: widget.panelHeight,
       );
     }
@@ -756,6 +763,7 @@ class _BuilderPreviewState extends State<BuilderPreview> {
               style: theme.textTheme.bodySmall?.copyWith(color: muted),
             ),
           ),
+        PlotViewportBar(viewport: _viewport, length: traj.nTime),
         for (final w in _extras(context, m))
           SizedBox(height: widget.panelHeight ?? 64, child: w),
         Expanded(
@@ -765,6 +773,7 @@ class _BuilderPreviewState extends State<BuilderPreview> {
             layout: _layout,
             revision: m.revision,
             hover: _hover,
+            viewport: _viewport,
             panelHeight: widget.panelHeight,
             label: (i) => prettyId(addresses.addressOf(i)),
             extraLayers: {

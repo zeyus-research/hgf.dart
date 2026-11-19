@@ -2,10 +2,13 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'layers.dart';
 import 'reduce.dart';
+import 'viewport.dart';
 
 /// Colours and sizes of a [TrajectoryPlot]; [PlotStyle.of] derives them
 /// from the theme.
@@ -87,8 +90,18 @@ class PlotGeometry {
 /// most two points per pixel column before drawing (see [SeriesReducer]).
 ///
 /// Several plots can share one [hover] notifier to get a linked cursor; it
-/// holds the hovered trial and only repaints the cursor layer.
-class TrajectoryPlot extends StatelessWidget {
+/// holds the hovered trial and only repaints the cursor layer. Likewise a
+/// shared [viewport] zooms and pans them together:
+///
+/// - zoom about the pointer with Ctrl/⌘ + scroll, a trackpad pinch or a
+///   two-finger touch pinch; plain scrolling zooms too unless the plot sits
+///   in a scrollable (which keeps the scroll);
+/// - pan by dragging with the mouse, scrolling sideways (or Shift +
+///   scroll), or the pinch's two fingers;
+/// - double-click (or double-tap) to show every trial again.
+///
+/// The y range fits the visible trials unless [yRange] is set.
+class TrajectoryPlot extends StatefulWidget {
   const TrajectoryPlot({
     super.key,
     required this.layers,
@@ -98,6 +111,7 @@ class TrajectoryPlot extends StatelessWidget {
     this.limit,
     this.revision = 0,
     this.hover,
+    this.viewport,
     this.showXAxis = true,
     this.style,
   });
@@ -108,7 +122,8 @@ class TrajectoryPlot extends StatelessWidget {
   /// Shown at the top left of the plot area.
   final String? title;
 
-  /// The visible trials, as `(first, last)` x coordinates (default: all).
+  /// The visible trials, as `(first, last)` x coordinates (default: all,
+  /// or the [viewport]'s). Fixes the range: the plot doesn't zoom.
   final (double, double)? xRange;
 
   /// The y range (default: fit the layers that [PlotLayer.affectsRange]).
@@ -124,6 +139,9 @@ class TrajectoryPlot extends StatelessWidget {
   /// The hovered trial, shared between plots.
   final ValueNotifier<int?>? hover;
 
+  /// The visible trials, shared between plots; the plot zooms and pans it.
+  final PlotViewport? viewport;
+
   final bool showXAxis;
   final PlotStyle? style;
 
@@ -136,64 +154,229 @@ class TrajectoryPlot extends StatelessWidget {
   }
 
   @override
+  State<TrajectoryPlot> createState() => _TrajectoryPlotState();
+}
+
+class _TrajectoryPlotState extends State<TrajectoryPlot> {
+  /// Touch pointers down on the plot, for a two-finger pinch.
+  final Map<int, Offset> _touches = {};
+
+  /// The pinch's start: the window and the two fingers' trials.
+  (double, double)? _pinchTrials;
+
+  /// Whether the current horizontal drag pans (a mouse) rather than
+  /// scrubbing the hover cursor (touch).
+  bool _panning = false;
+
+  /// The last trackpad scale of a pan-zoom gesture.
+  double _lastScale = 1;
+
+  bool _zoomed = false;
+
+  PlotViewport? get _viewport => widget.xRange == null ? widget.viewport : null;
+
+  @override
+  void initState() {
+    super.initState();
+    _listen(null, _viewport);
+  }
+
+  @override
+  void didUpdateWidget(TrajectoryPlot old) {
+    super.didUpdateWidget(old);
+    final before = old.xRange == null ? old.viewport : null;
+    if (!identical(before, _viewport)) _listen(before, _viewport);
+  }
+
+  @override
+  void dispose() {
+    _viewport?.removeListener(_onViewport);
+    super.dispose();
+  }
+
+  void _listen(PlotViewport? old, PlotViewport? now) {
+    old?.removeListener(_onViewport);
+    now?.addListener(_onViewport);
+    _zoomed = now?.zoomed ?? false;
+  }
+
+  /// Rebuilds only when zooming starts or ends (for the cursor); the
+  /// painters repaint on every change by themselves.
+  void _onViewport() {
+    final z = _viewport?.zoomed ?? false;
+    if (z != _zoomed && mounted) setState(() => _zoomed = z);
+  }
+
+  (double, double) _window(int n) =>
+      widget.xRange ?? PlotViewport.resolve(_viewport?.value, n);
+
+  @override
   Widget build(BuildContext context) {
-    final s = style ?? PlotStyle.of(context);
-    final n = _length;
-    final x = xRange ?? (0.0, math.max(1.0, n - 1.0));
+    final s = widget.style ?? PlotStyle.of(context);
+    final n = widget._length;
+    final vp = _viewport;
     final painter = _DataPainter(
-      layers: layers,
-      title: title,
-      xRange: x,
-      yRange: yRange,
-      limit: limit,
-      revision: revision,
-      showXAxis: showXAxis,
+      layers: widget.layers,
+      title: widget.title,
+      fixedX: widget.xRange,
+      viewport: vp,
+      length: n,
+      yRange: widget.yRange,
+      limit: widget.limit,
+      revision: widget.revision,
+      showXAxis: widget.showXAxis,
       style: s,
     );
-    Widget plot = CustomPaint(
+    final h = widget.hover;
+    final painted = CustomPaint(
       painter: painter,
-      foregroundPainter: hover == null
+      foregroundPainter: h == null
           ? null
           : _HoverPainter(
-              hover: hover!,
+              hover: h,
+              viewport: vp,
               data: painter,
-              layers: layers,
+              layers: widget.layers,
               style: s,
-              showXAxis: showXAxis,
+              showXAxis: widget.showXAxis,
             ),
       size: Size.infinite,
     );
-    final h = hover;
-    if (h != null) {
-      int? trialAt(Offset p, Size size) {
-        final r = PlotGeometry(size, xAxis: showXAxis).plot;
-        if (n == 0 || p.dx < r.left || p.dx > r.right) return null;
-        final t = x.$1 + (p.dx - r.left) / r.width * (x.$2 - x.$1);
-        return t.round().clamp(0, n - 1);
-      }
-
-      final painted = plot;
-      plot = LayoutBuilder(
+    if (h == null && vp == null) return RepaintBoundary(child: painted);
+    final wheelZooms = Scrollable.maybeOf(context) == null;
+    return RepaintBoundary(
+      child: LayoutBuilder(
         builder: (context, box) {
           final size = box.biggest;
-          return MouseRegion(
-            onHover: (e) => h.value = trialAt(e.localPosition, size),
-            onExit: (_) => h.value = null,
+          Rect plotRect() => PlotGeometry(size, xAxis: widget.showXAxis).plot;
+          double xAt(double dx) {
+            final r = plotRect();
+            final (x0, x1) = _window(n);
+            return x0 + (dx - r.left) / r.width * (x1 - x0);
+          }
+
+          int? trialAt(Offset p) {
+            final r = plotRect();
+            if (n == 0 || p.dx < r.left || p.dx > r.right) return null;
+            return xAt(p.dx).round().clamp(0, n - 1);
+          }
+
+          /// Trials per pixel.
+          double scale() {
+            final (x0, x1) = _window(n);
+            return (x1 - x0) / plotRect().width;
+          }
+
+          void setHover(Offset p) => h?.value = trialAt(p);
+
+          Widget child = GestureDetector(
+            onTapDown: h == null ? null : (d) => setHover(d.localPosition),
+            onDoubleTap: vp?.reset,
             // Horizontal drags only, so a plot in a vertical list still
             // scrolls on touch screens.
-            child: GestureDetector(
-              onTapDown: (d) => h.value = trialAt(d.localPosition, size),
-              onHorizontalDragStart: (d) =>
-                  h.value = trialAt(d.localPosition, size),
-              onHorizontalDragUpdate: (d) =>
-                  h.value = trialAt(d.localPosition, size),
-              child: painted,
-            ),
+            onHorizontalDragStart: (d) {
+              _panning =
+                  vp != null && vp.zoomed && d.kind == PointerDeviceKind.mouse;
+              if (!_panning) setHover(d.localPosition);
+            },
+            onHorizontalDragUpdate: (d) {
+              if (_panning) {
+                vp!.pan(-d.delta.dx * scale(), n);
+              } else if (_touches.length < 2) {
+                setHover(d.localPosition);
+              }
+            },
+            onHorizontalDragEnd: (_) => _panning = false,
+            child: painted,
+          );
+          child = MouseRegion(
+            cursor: _zoomed ? SystemMouseCursors.grab : MouseCursor.defer,
+            onHover: h == null ? null : (e) => setHover(e.localPosition),
+            onExit: h == null ? null : (_) => h.value = null,
+            child: child,
+          );
+          if (vp == null || n < 2) return child;
+          return Listener(
+            onPointerSignal: (e) => _signal(e, vp, n, xAt, scale, wheelZooms),
+            onPointerPanZoomStart: (_) => _lastScale = 1,
+            onPointerPanZoomUpdate: (e) {
+              final dx = e.localPanDelta.dx;
+              if (dx != 0) vp.pan(-dx * scale(), n);
+              if (e.scale > 0 && e.scale != _lastScale) {
+                vp.zoom(_lastScale / e.scale, xAt(e.localPosition.dx), n);
+                _lastScale = e.scale;
+              }
+            },
+            onPointerDown: (e) {
+              if (e.kind != PointerDeviceKind.touch) return;
+              _touches[e.pointer] = e.localPosition;
+              if (_touches.length == 2) {
+                final [p, q] = _touches.values.toList();
+                _pinchTrials = (xAt(p.dx), xAt(q.dx));
+                h?.value = null;
+              }
+            },
+            onPointerMove: (e) {
+              if (!_touches.containsKey(e.pointer)) return;
+              _touches[e.pointer] = e.localPosition;
+              final start = _pinchTrials;
+              if (_touches.length != 2 || start == null) return;
+              final [p, q] = _touches.values.toList();
+              // Keep each finger on the trial it started on.
+              final apart = (q.dx - p.dx).abs();
+              if (apart < 12) return;
+              final r = plotRect();
+              final span = (start.$2 - start.$1).abs() / apart * r.width;
+              final first = start.$1 - (p.dx - r.left) / r.width * span;
+              vp.show(first, first + span, n);
+            },
+            onPointerUp: (e) => _lift(e.pointer),
+            onPointerCancel: (e) => _lift(e.pointer),
+            child: child,
           );
         },
-      );
+      ),
+    );
+  }
+
+  void _lift(int pointer) {
+    if (_touches.remove(pointer) != null && _touches.length < 2) {
+      _pinchTrials = null;
     }
-    return RepaintBoundary(child: plot);
+  }
+
+  /// Wheels and web trackpads: zoom (vertical scroll with Ctrl/⌘, or
+  /// without where [wheelZooms]; a pinch) and pan (sideways scroll, or
+  /// Shift + scroll). Claims the event only when it acts, so a list around
+  /// the plot still scrolls.
+  void _signal(
+    PointerSignalEvent e,
+    PlotViewport vp,
+    int n,
+    double Function(double dx) xAt,
+    double Function() scale,
+    bool wheelZooms,
+  ) {
+    final resolver = GestureBinding.instance.pointerSignalResolver;
+    switch (e) {
+      case PointerScrollEvent(:final scrollDelta, :final localPosition):
+        final keys = HardwareKeyboard.instance;
+        final modified = keys.isControlPressed || keys.isMetaPressed;
+        var dx = scrollDelta.dx, dy = scrollDelta.dy;
+        if (keys.isShiftPressed && dx == 0) (dx, dy) = (dy, 0);
+        if (dy != 0 && (modified || wheelZooms)) {
+          resolver.register(e, (_) {
+            vp.zoom(math.exp(dy * 0.0015), xAt(localPosition.dx), n);
+          });
+        } else if (dx != 0 && vp.zoomed && dy == 0) {
+          resolver.register(e, (_) => vp.pan(dx * scale(), n));
+        }
+      case PointerScaleEvent(:final scale, :final localPosition) when scale > 0:
+        resolver.register(e, (_) {
+          vp.zoom(1 / scale, xAt(localPosition.dx), n);
+        });
+      default:
+    }
   }
 }
 
@@ -256,17 +439,29 @@ class _DataPainter extends CustomPainter {
   _DataPainter({
     required this.layers,
     required this.title,
-    required this.xRange,
+    required this.fixedX,
+    required this.viewport,
+    required this.length,
     required this.yRange,
     required this.limit,
     required this.revision,
     required this.showXAxis,
     required this.style,
-  }) : super(repaint: _fontsChanged);
+  }) : super(
+         repaint: viewport == null
+             ? _fontsChanged
+             : Listenable.merge([_fontsChanged, viewport]),
+       );
 
   final List<PlotLayer> layers;
   final String? title;
-  final (double, double) xRange;
+  final (double, double)? fixedX;
+  final PlotViewport? viewport;
+  final int length;
+
+  /// The visible trials now.
+  (double, double) get xRange =>
+      fixedX ?? PlotViewport.resolve(viewport?.value, length);
   final (double, double)? yRange;
   final int? limit;
   final int revision;
@@ -284,18 +479,18 @@ class _DataPainter extends CustomPainter {
     return _px;
   }
 
-  (int, int) _visible(int length) {
-    final first = math.max(0, xRange.$1.floor());
-    var last = math.min(length - 1, xRange.$2.ceil());
+  (int, int) _visible(int length, (double, double) x) {
+    final first = math.max(0, x.$1.floor());
+    var last = math.min(length - 1, x.$2.ceil());
     if (limit != null) last = math.min(last, limit! - 1);
     return (first, last);
   }
 
-  (double, double) _autoY() {
+  (double, double) _autoY((double, double) x) {
     var lo = double.infinity, hi = double.negativeInfinity;
     for (final l in layers) {
       if (!l.affectsRange) continue;
-      final (first, last) = _visible(l.length);
+      final (first, last) = _visible(l.length, x);
       if (last < first) continue;
       final r = l.rangeOver(first, last);
       if (r == null) continue;
@@ -314,8 +509,9 @@ class _DataPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final r = PlotGeometry(size, xAxis: showXAxis).plot;
-    final (y0, y1) = lastY = yRange ?? _autoY();
-    final (x0, x1) = xRange;
+    final x = xRange;
+    final (y0, y1) = lastY = yRange ?? _autoY(x);
+    final (x0, x1) = x;
     final sx = r.width / (x1 - x0), sy = r.height / (y1 - y0);
     double px(double t) => r.left + (t - x0) * sx;
     // Keep pixel coordinates within float32 range for wild values.
@@ -331,11 +527,11 @@ class _DataPainter extends CustomPainter {
       final color = layer.color ?? style.accent;
       switch (layer) {
         case LineLayer():
-          final (first, last) = _visible(layer.length);
+          final (first, last) = _visible(layer.length, x);
           _reducer.line(layer.values, first, last, columns);
           _drawRuns(canvas, px, py, ui.PointMode.polygon, layer.width, color);
         case PointLayer():
-          final (first, last) = _visible(layer.length);
+          final (first, last) = _visible(layer.length, x);
           _reducer.line(layer.values, first, last, columns);
           _drawRuns(
             canvas,
@@ -346,7 +542,7 @@ class _DataPainter extends CustomPainter {
             color,
           );
         case BandLayer():
-          final (first, last) = _visible(layer.length);
+          final (first, last) = _visible(layer.length, x);
           _reducer.envelope(first, last, columns, layer.lower, layer.upper);
           _drawBand(canvas, px, py, color);
         case ReferenceLine():
@@ -362,10 +558,10 @@ class _DataPainter extends CustomPainter {
     }
     final l = limit;
     if (l != null && l > 0) {
-      final x = px(l - 1.0);
+      final at = px(l - 1.0);
       canvas.drawLine(
-        Offset(x, r.top),
-        Offset(x, r.bottom),
+        Offset(at, r.top),
+        Offset(at, r.bottom),
         Paint()
           ..color = style.accent.withValues(alpha: 0.6)
           ..strokeWidth = 1,
@@ -414,6 +610,8 @@ class _DataPainter extends CustomPainter {
     if (!showXAxis) return;
     final xTicks = niceTicks(x0, x1, target: math.max(2, r.width ~/ 90));
     for (final v in xTicks) {
+      // Trials are whole numbers: no ticks between them when zoomed in.
+      if (v != v.roundToDouble()) continue;
       final x = px(v);
       canvas.drawLine(Offset(x, r.top), Offset(x, r.bottom), grid);
       final tp = _text(formatTick(v, 1), style);
@@ -508,7 +706,9 @@ class _DataPainter extends CustomPainter {
   bool shouldRepaint(_DataPainter old) =>
       revision != old.revision ||
       limit != old.limit ||
-      xRange != old.xRange ||
+      fixedX != old.fixedX ||
+      !identical(viewport, old.viewport) ||
+      length != old.length ||
       yRange != old.yRange ||
       title != old.title ||
       style != old.style ||
@@ -519,13 +719,19 @@ class _DataPainter extends CustomPainter {
 class _HoverPainter extends CustomPainter {
   _HoverPainter({
     required this.hover,
+    required this.viewport,
     required this.data,
     required this.layers,
     required this.style,
     required this.showXAxis,
-  }) : super(repaint: hover);
+  }) : super(
+         repaint: viewport == null
+             ? hover
+             : Listenable.merge([hover, viewport]),
+       );
 
   final ValueNotifier<int?> hover;
+  final PlotViewport? viewport;
   final _DataPainter data;
   final List<PlotLayer> layers;
   final PlotStyle style;
@@ -605,6 +811,7 @@ class _HoverPainter extends CustomPainter {
   @override
   bool shouldRepaint(_HoverPainter old) =>
       hover != old.hover ||
+      !identical(viewport, old.viewport) ||
       data != old.data ||
       style != old.style ||
       showXAxis != old.showXAxis;

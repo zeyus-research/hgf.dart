@@ -232,6 +232,44 @@ void main() {
     expect(find.textContaining('trial '), findsWidgets);
     addTearDown(tester.view.reset);
   });
+
+  testWidgets('zoom: the bar zooms every panel, playback follows, a preset '
+      'resets it', (tester) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final pg = Playground(presetId: 'continuous3', nTrials: 400);
+    await tester.pumpWidget(_app(Settings(), pg));
+    await tester.pump();
+    expect(find.text('all 400 trials'), findsOneWidget);
+    await tester.tap(find.byTooltip('Zoom in'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Zoom in'));
+    await tester.pump();
+    final plots = tester.widgetList<TrajectoryPlot>(
+      find.byType(TrajectoryPlot),
+    );
+    final vp = plots.first.viewport!;
+    expect(plots.every((p) => identical(p.viewport, vp)), isTrue);
+    expect(vp.value, isNotNull);
+    expect(vp.value!.$2 - vp.value!.$1, closeTo(399 / 4, 1e-9));
+
+    // Playback from trial 0 moves the window to the cursor.
+    await tester.tap(find.byTooltip('Play trial by trial'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 100));
+    final t = pg.player!.t;
+    expect(vp.value!.$1, lessThanOrEqualTo(t - 1.0));
+    expect(vp.value!.$2, greaterThanOrEqualTo(t - 1.0));
+    await tester.tap(find.byTooltip('Pause'));
+    await tester.pump();
+
+    pg.setPreset('binary3');
+    await tester.pump();
+    expect(vp.value, isNull);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 void _settingsTests() {

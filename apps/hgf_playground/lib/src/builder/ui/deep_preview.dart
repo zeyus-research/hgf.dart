@@ -17,12 +17,16 @@ class DeepPreview extends StatelessWidget {
     required this.model,
     required this.deep,
     required this.hover,
+    this.viewport,
     this.panelHeight,
   });
 
   final BuilderModel model;
   final DocDeep deep;
   final ValueNotifier<int?> hover;
+
+  /// The visible rows, shared by the prediction plots.
+  final PlotViewport? viewport;
   final double? panelHeight;
 
   /// At most this many targets (or categories) are plotted.
@@ -123,6 +127,7 @@ class DeepPreview extends StatelessWidget {
           ],
           yRange: regression ? null : (-0.05, 1.05),
           hover: hover,
+          viewport: viewport,
           revision: model.revision,
           showXAxis: j == n - 1 && r.epochScores.length <= 1,
         ),
@@ -155,6 +160,8 @@ class DeepPreview extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
           ),
         ),
+        if (viewport case final v?)
+          PlotViewportBar(viewport: v, length: rows.length, unit: 'rows'),
         for (final p in panels)
           panelHeight == null
               ? Expanded(child: p)

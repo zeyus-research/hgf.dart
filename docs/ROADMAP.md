@@ -636,9 +636,12 @@ First version done 2026-11-06.
     pyhgf's −4 the unbounded update runs away by trial ~300, at −6 by
     ~2400 (the P17 structure: binary HGFs under a volatility parent).
 - [x] Fitting view (2026-11-07): see Phase 6.
-- [ ] Next: zoom and pan on the time axis;
-      editable structure (add/remove nodes); export as PNG (CSV of the
-      trajectories, fit results and recoveries: done 2026-11-10); a guided "lessons" mode for teaching; measure desktop (GPU)
+- [x] Zoom and pan on the time axis (2026-11-19, see "Zoom and pan on the
+      time axis" under Phase 9). Editable structure (add/remove nodes) is
+      the model builder's (Phase 9).
+- [ ] Next: export as PNG (CSV of the trajectories, fit results and
+      recoveries: done 2026-11-10); a guided "lessons" mode for teaching;
+      measure desktop (GPU)
       frame times (`flutter run --profile --dart-define=HGF_BENCH=10000`);
       if 10k-trial drags must hold 60 fps on Wasm, filter in a web worker
       or the engine needs to get faster there.
@@ -2941,6 +2944,40 @@ A model document holds an HGF network, deep networks (pyhgf's
   volatility children in the inspector (done, see "Continuous levels in
   the builder"), Julia.
 
+#### Zoom and pan on the time axis (2026-11-19): done
+
+Phase 5's open item, and needed for the 120 Hz game sessions (~36k steps
+per 5-minute block), where a whole-series plot shows an envelope only.
+
+- **hgf_widgets:** `PlotViewport` (a `ValueNotifier<(double, double)?>`,
+  null = every trial) is the visible x window of linked plots, shared like
+  the hover cursor; `resolve` keeps a window inside the series (so a
+  shorter series after a data change needs no reset), with a 4-trial
+  minimum span. `TrajectoryPlot(viewport:)` reads it at paint time, so
+  zooming repaints the panels without rebuilding them; the y range refits
+  to the visible trials. Gestures: Ctrl/⌘ + scroll, a trackpad pinch
+  (`PointerScaleEvent` on the web, pan-zoom events on desktop) or a
+  two-finger touch pinch (each finger stays on its trial) zooms about the
+  pointer; plain scroll zooms too unless the plot sits in a `Scrollable`
+  (the phone layouts' lists keep their scroll; the event is claimed
+  through the pointer-signal resolver only when the plot acts); a mouse
+  drag on a zoomed plot, a sideways scroll or Shift + scroll pans; touch
+  drags still scrub the hover cursor; double-click resets. An explicit
+  `xRange` still fixes the range. `PlotViewportBar`: the window as a thumb
+  on a track over the series (drag or tap to pan), zoom out / in, show
+  everything, and "trials a–b of n".
+- **Playground:** the home view's panels and the choice task's share one
+  viewport, with the bar under the playback bar; a new preset resets it,
+  and playback moves the window to keep the cursor in view. The builder's
+  preview (HGF panels, response and outputs) and a deep network's
+  prediction plots (rows) share one too, with the bar above them.
+- Tests: hgf_widgets `viewport_test.dart` (window maths; wheel zoom keeps
+  the trial under the pointer; in a list plain scroll scrolls and Ctrl
+  zooms; mouse drag and sideways scroll pan; touch scrubs, two fingers
+  pinch; a fixed `xRange` ignores it; the bar); playground
+  `playground_test.dart` (every panel shares the bar's viewport, playback
+  follows, a preset resets).
+
 #### Continuous levels in the builder (2026-11-19): done
 
 A continuous deep network (pyhgf's `kind="continuous"` layers) was a
@@ -3682,7 +3719,8 @@ transform caching for whole sessions (2026-11-17), deep networks in the
 builder beside or instead of the HGF network, with Dart and pyhgf exports,
 the data-pipeline steps, and deep networks trained in the builder with their
 predictions wired into the HGF inputs (2026-11-17), and continuous levels'
-wiring and couplings in the builder (2026-11-19); next Julia export (after
+wiring and couplings in the builder (2026-11-19), and zoom and pan on the
+plots' time axis (2026-11-19); next Julia export (after
 upstream settles). 2026-11-18: P1 is fixed
 upstream (#480) and ported (`ehgfMgfCorrection` removed; fixtures at
 `4db3b093`); hgf_deep's weight-belief rule, `updateInputLayer` and sample

@@ -8,6 +8,7 @@ import 'graph/layout.dart';
 import 'graph/network_graph.dart';
 import 'plot/layers.dart';
 import 'plot/trajectory_plot.dart';
+import 'plot/viewport.dart';
 
 /// Series colours, from a colour-vision-checked categorical palette, stepped
 /// separately for light and dark surfaces.
@@ -150,6 +151,7 @@ class HgfTrajectoryView extends StatefulWidget {
     this.revision = 0,
     this.limit,
     this.hover,
+    this.viewport,
     this.showSurprise = true,
     this.showPosterior = false,
     this.label = defaultNodeLabel,
@@ -174,6 +176,10 @@ class HgfTrajectoryView extends StatefulWidget {
 
   /// A shared hover cursor (one is created if null).
   final ValueNotifier<int?>? hover;
+
+  /// The visible trials, shared by the panels and zoomed and panned on any
+  /// of them (one is created if null). See [TrajectoryPlot].
+  final PlotViewport? viewport;
 
   final bool showSurprise;
 
@@ -267,6 +273,7 @@ class HgfTrajectoryView extends StatefulWidget {
 
 class _HgfTrajectoryViewState extends State<HgfTrajectoryView> {
   final ValueNotifier<int?> _ownHover = ValueNotifier(null);
+  final PlotViewport _ownViewport = PlotViewport();
 
   // Series derived from the trajectories (per-category observations,
   // cluster lines), rebuilt when the trajectories or their revision change.
@@ -278,11 +285,13 @@ class _HgfTrajectoryViewState extends State<HgfTrajectoryView> {
   @override
   void dispose() {
     _ownHover.dispose();
+    _ownViewport.dispose();
     super.dispose();
   }
 
   Network get network => widget.network;
   ValueNotifier<int?> get hover => widget.hover ?? _ownHover;
+  PlotViewport get viewport => widget.viewport ?? _ownViewport;
 
   @override
   Widget build(BuildContext context) {
@@ -383,6 +392,7 @@ class _HgfTrajectoryViewState extends State<HgfTrajectoryView> {
     limit: widget.limit,
     revision: widget.revision,
     hover: hover,
+    viewport: viewport,
     showXAxis: xAxis,
   );
 

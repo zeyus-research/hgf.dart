@@ -14,11 +14,15 @@ class ChoiceTaskView extends StatefulWidget {
     super.key,
     required this.playground,
     this.hover,
+    this.viewport,
     this.panelHeight,
   });
 
   final Playground playground;
   final ValueNotifier<int?>? hover;
+
+  /// The visible trials, shared by the panels (one is created if null).
+  final PlotViewport? viewport;
 
   /// Fixed height per panel; by default the panels share the height.
   final double? panelHeight;
@@ -47,6 +51,7 @@ class ChoiceTaskView extends StatefulWidget {
 
 class _ChoiceTaskViewState extends State<ChoiceTaskView> {
   final ValueNotifier<int?> _ownHover = ValueNotifier(null);
+  final PlotViewport _ownViewport = PlotViewport();
 
   // Per option: where it was chosen (a row above the probabilities) and
   // what it paid; rebuilt when the choices change.
@@ -56,6 +61,7 @@ class _ChoiceTaskViewState extends State<ChoiceTaskView> {
   @override
   void dispose() {
     _ownHover.dispose();
+    _ownViewport.dispose();
     super.dispose();
   }
 
@@ -91,6 +97,7 @@ class _ChoiceTaskViewState extends State<ChoiceTaskView> {
     _derive(pg);
     final colors = HgfColors.of(context);
     final hover = widget.hover ?? _ownHover;
+    final viewport = widget.viewport ?? _ownViewport;
     final k = task.options.length;
     final unit = task.unit.isEmpty ? '' : ' (${task.unit})';
     final hidden = pg.hidden;
@@ -107,6 +114,7 @@ class _ChoiceTaskViewState extends State<ChoiceTaskView> {
       limit: pg.player?.t,
       revision: pg.revision,
       hover: hover,
+      viewport: viewport,
       showXAxis: false,
     );
     final panels = <Widget>[
@@ -181,6 +189,7 @@ class _ChoiceTaskViewState extends State<ChoiceTaskView> {
             revision: pg.revision,
             limit: pg.player?.t,
             hover: hover,
+            viewport: viewport,
             showSurprise: false,
             panelHeight: h,
           ),

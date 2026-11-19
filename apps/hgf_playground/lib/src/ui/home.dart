@@ -42,6 +42,10 @@ class _HomePageState extends State<HomePage>
   late final Ticker _ticker = createTicker(_onTick);
   Duration _last = Duration.zero;
   final ValueNotifier<int?> _hover = ValueNotifier(null);
+
+  /// The plots' visible trials; reset when the preset changes.
+  final PlotViewport _viewport = PlotViewport();
+  late String _viewportPreset = pg.preset.id;
   final FrameStats _frames = FrameStats();
   final _scaffold = GlobalKey<ScaffoldState>();
 
@@ -95,12 +99,17 @@ class _HomePageState extends State<HomePage>
     pg.removeListener(_syncTicker);
     _ticker.dispose();
     _hover.dispose();
+    _viewport.dispose();
     _frames.dispose();
     _responses.dispose();
     super.dispose();
   }
 
   void _syncTicker() {
+    if (pg.preset.id != _viewportPreset) {
+      _viewportPreset = pg.preset.id;
+      _viewport.reset();
+    }
     if (pg.playing && !_ticker.isActive) {
       _last = Duration.zero;
       _ticker.start();
@@ -113,6 +122,10 @@ class _HomePageState extends State<HomePage>
     final dt = (elapsed - _last).inMicroseconds / 1e6;
     _last = elapsed;
     pg.tick(dt);
+    // Keep the playback cursor in view when zoomed.
+    if (pg.player?.t case final t?) {
+      _viewport.follow(t - 1.0, pg.trajectories?.nTime ?? 0);
+    }
   }
 
   @override
@@ -171,6 +184,7 @@ class _HomePageState extends State<HomePage>
       return ChoiceTaskView(
         playground: pg,
         hover: _hover,
+        viewport: _viewport,
         panelHeight: panelHeight,
       );
     }
@@ -187,6 +201,7 @@ class _HomePageState extends State<HomePage>
       revision: pg.revision,
       limit: pg.player?.t,
       hover: _hover,
+      viewport: _viewport,
       panelHeight: panelHeight,
       extraLayers: {
         input: [
@@ -222,6 +237,14 @@ class _HomePageState extends State<HomePage>
 
   Widget _status() => PlaybackBar(playground: pg, frames: _frames);
 
+  Widget _zoomBar() => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 4),
+    child: PlotViewportBar(
+      viewport: _viewport,
+      length: pg.trajectories?.nTime ?? 0,
+    ),
+  );
+
   Widget _wide(BuildContext context) => Row(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
@@ -235,6 +258,7 @@ class _HomePageState extends State<HomePage>
           children: [
             _status(),
             if (pg.error != null) _ErrorBanner(pg.error!),
+            _zoomBar(),
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(4, 0, 12, 8),
@@ -260,6 +284,7 @@ class _HomePageState extends State<HomePage>
       children: [
         _status(),
         if (pg.error != null) _ErrorBanner(pg.error!),
+        _zoomBar(),
         SizedBox(
           height: panels * h,
           child: _plots(panelHeight: h),
