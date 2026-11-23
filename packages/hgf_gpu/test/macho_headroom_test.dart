@@ -2,7 +2,7 @@ import 'dart:typed_data';
 
 import 'package:test/test.dart';
 
-import '../hook/macho_headroom.dart';
+import 'package:hgf_gpu/src/hook/macho_headroom.dart';
 
 /// A minimal thin Mach-O 64: one LC_SEGMENT_64 with one section at file
 /// offset [textOffset], then the given extra load commands (cmd, size,

@@ -21,16 +21,16 @@
 // On macOS, `dart test`/`dart run`/`flutter test` rewrite a bundled dylib's
 // install name to its absolute path, which the prebuilt release has too
 // little header room for (install_name_tool aborts). The hook makes room
-// (macho_headroom.dart) and re-signs the library ad hoc.
+// (lib/src/hook/macho_headroom.dart; pub.dev allows only build.dart and
+// link.dart in hook/) and re-signs the library ad hoc.
 
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:code_assets/code_assets.dart';
 import 'package:crypto/crypto.dart';
+import 'package:hgf_gpu/src/hook/macho_headroom.dart';
 import 'package:hooks/hooks.dart';
-
-import 'macho_headroom.dart';
 
 const _version = 'v29.0.1.1';
 
