@@ -1,6 +1,14 @@
 {{flutter_js}}
 {{flutter_build_config}}
-
+_flutter.loader.load({
+  config: {
+    wasmAllowList: {
+      blink: true,
+      webkit: true,
+      gecko: true,
+    },
+  },
+});
 // Not Flutter's default bootstrap: no `serviceWorkerSettings`. Flutter's own
 // service worker is deprecated (it only unregisters itself) and would take
 // the place of coi_sw.js, which makes the page cross-origin isolated where
