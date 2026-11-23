@@ -525,4 +525,11 @@ final class WebGpuBackend implements GpuBackend {
     b.users.clear();
     b.buffer.destroy();
   }
+
+  @override
+  void releasePipeline(GpuPipeline pipeline) {
+    // WebGPU has no destroy() for pipelines: drop the bind groups (which
+    // hold the buffers) so the pipeline goes once its owner lets go.
+    (pipeline as _WebPipeline).groups.clear();
+  }
 }

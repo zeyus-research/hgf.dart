@@ -21,6 +21,7 @@ import 'package:test/test.dart';
 import 'src/deep_gpu_check.dart' as deep;
 import 'src/fit_check.dart';
 import 'src/gpu_check.dart';
+import 'src/lifecycle_check.dart';
 
 const _reader = '''
 import 'dart:io';
@@ -56,6 +57,15 @@ void main() {
         if (deep.gpuDeepSupported(f)) f,
     ];
     backend = await WebGpuBackend.create();
+  });
+
+  test('pipelines and buffers release in either order', () async {
+    if (backend == null) {
+      markTestSkipped('No WebGPU adapter in this browser');
+      return;
+    }
+    final failures = await checkLifecycle(backend!);
+    expect(failures, isEmpty, reason: failures.join('\n'));
   });
 
   test('every supported fixture: f32 GPU totals match f64 CPU', () async {

@@ -382,6 +382,7 @@ final class GradJob {
     for (final b in bindings) {
       if (b != null) backend.release(b);
     }
+    backend.releasePipeline(pipeline);
   }
 }
 

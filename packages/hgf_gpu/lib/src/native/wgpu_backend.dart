@@ -23,12 +23,17 @@ final class _NativeBuffer implements GpuBuffer {
   final WGPUBuffer handle;
   @override
   final int bytes;
+
+  /// The pipelines with cached bind groups on this buffer (kept here rather
+  /// than in the backend, so the backend holds no pipelines).
+  final users = <_NativePipeline>{};
 }
 
 final class _NativePipeline implements GpuPipeline {
   _NativePipeline(this.pipeline, this.layout);
   final WGPUComputePipeline pipeline;
   final WGPUBindGroupLayout layout;
+  bool released = false;
 
   /// Bind groups by the ids of their buffers.
   final groups = <String, (List<int>, WGPUBindGroup)>{};
@@ -444,12 +449,11 @@ final class WgpuBackend implements GpuBackend {
       return _w.wgpuDeviceCreateBindGroup(_device, d);
     });
     p.groups[key] = (ids, group);
-    _pipelines.add(p);
+    for (final b in bindings) {
+      (b as _NativeBuffer?)?.users.add(p);
+    }
     return group;
   }
-
-  /// Pipelines with cached bind groups (to drop those of released buffers).
-  final _pipelines = <_NativePipeline>{};
 
   @override
   void dispatch(
@@ -530,16 +534,34 @@ final class WgpuBackend implements GpuBackend {
   void release(GpuBuffer buffer) {
     _flush();
     final b = buffer as _NativeBuffer;
-    for (final p in _pipelines) {
+    for (final p in b.users) {
       p.groups.removeWhere((_, v) {
         if (!v.$1.contains(b.id)) return false;
         _w.wgpuBindGroupRelease(v.$2);
         return true;
       });
     }
+    b.users.clear();
     final h = b.handle;
     _w
       ..wgpuBufferDestroy(h)
       ..wgpuBufferRelease(h);
+  }
+
+  @override
+  void releasePipeline(GpuPipeline pipeline) {
+    final p = pipeline as _NativePipeline;
+    if (p.released) return;
+    p.released = true;
+    _flush();
+    for (final g in p.groups.values) {
+      _w.wgpuBindGroupRelease(g.$2);
+    }
+    // Buffers' `users` may still name [p]; with no groups left, their
+    // release skips it.
+    p.groups.clear();
+    _w
+      ..wgpuBindGroupLayoutRelease(p.layout)
+      ..wgpuComputePipelineRelease(p.pipeline);
   }
 }

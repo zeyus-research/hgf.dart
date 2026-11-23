@@ -79,9 +79,8 @@ jobs:
     name: GPU kernels on WebGPU (SwiftShader)
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # New (2026-11-18), not yet seen green on a runner: it doesn't block
-    # CI (or the Pages deploy) until it has. Remove once it passes.
-    continue-on-error: true
+    # Passes now
+    # continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: subosito/flutter-action@v2
@@ -112,3 +111,33 @@ jobs:
           fi
         env:
           CHROME_EXECUTABLE: "${{ github.workspace }}/chrome_ci_wrapper.sh"
+
+  gpu-native:
+    name: GPU kernels on wgpu-native (lavapipe)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # New (2026-11-23), not yet seen green on a runner: it doesn't block CI
+    # until it has. Remove once it passes.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      # The runner has no GPU: Mesa's lavapipe is a software Vulkan driver
+      # for wgpu-native (which hgf_gpu's build hook downloads).
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - run: flutter pub get
+      # test:gpu's native half. The tests skip without the library or an
+      # adapter, so a skip fails the step.
+      - name: Kernels on wgpu-native
+        working-directory: packages/hgf_gpu
+        shell: bash
+        run: |
+          set -o pipefail
+          dart test -p vm --tags gpu 2>&1 | tee "$RUNNER_TEMP/gpu.log"
+          if grep -Eq 'wgpu-native not available|No wgpu adapter' "$RUNNER_TEMP/gpu.log"; then
+            echo '::error::wgpu-native found no library or adapter'
+            exit 1
+          fi

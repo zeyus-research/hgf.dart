@@ -1,3 +1,9 @@
+## Unreleased
+
+- Release GPU pipeline after work has been submitted
+- Pipelines are released on dispose
+- CI: New runner for GPU (besides SwiftShader) for native
+
 ## 0.1.0
 
 - dp-state nodes in the kernels (`HgfKernel`, `FitKernel`, so `GpuFitter`

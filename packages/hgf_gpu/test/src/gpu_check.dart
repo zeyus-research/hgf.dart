@@ -57,16 +57,18 @@ double _perturbed(Network net, int i, NodeField field, int e) =>
 
 /// One fixture's result: null if it has no GPU kernel (the reason in
 /// [skipped]), else the max relative error (of the totals, of every
-/// ef-state node's final ξ and of every categorical node's final
-/// probabilities and surprise), the non-finite mismatches, the max relative
-/// error of the ef-state nodes' final ν and the categorical nodes' final α
-/// (0 without any), and the max error of the categorical nodes' final KL
+/// ef-state node's final ξ), the non-finite mismatches, the max relative
+/// error of the ef-state nodes' final ν (0 without any), that of the
+/// categorical nodes' final α, probabilities and surprise
+/// ([categoricalTolerance]; 0 without any), and the max
+/// error of the categorical nodes' final KL
 /// divergence relative to `1 + ln Γ(Σα)` ([klTolerance]).
 typedef FixtureResult = ({
   double maxRel,
   int nonFiniteMismatch,
   int finite,
   double nusRel,
+  double catRel,
   double klRel,
 });
 
@@ -74,6 +76,16 @@ typedef FixtureResult = ({
 /// terms that cancel (ln Γ(Σα) is ~30 where the KL is ~0.1), so in f32 its
 /// error is absolute, a few ulp of ln Γ(Σα).
 const klTolerance = 1e-5;
+
+/// Relative tolerance on the categorical nodes' final α, probabilities and
+/// surprise (computed from α).
+/// α accumulates over the series (it is a sum of pseudo-counts updated
+/// every trial), so its f32 error grows with the series length: ~5e-7 after
+/// 10 trials, 3e-6 after 200, and 1.2e-5 to 2.6e-5 after the fixtures' 300
+/// on an RX 7600 XT. pyhgf's own float32 mode (JAX) is as far off, 1.1e-5
+/// to 1.4e-5 (`tool/parity/gpu_f32_reference.py --fixtures categorical_3
+/// categorical_3_missing categorical_mixed`), so this is f32, not the kernel.
+const categoricalTolerance = 1e-4;
 
 /// The most dp clusters a fixture may have on SwiftShader (Chrome's software
 /// WebGPU, CI's `gpu-web` job). Its compile time and memory grow
@@ -200,6 +212,7 @@ Future<FixtureResult?> checkFixture(
   final got = await gpu.surprise(data, observed: observed, timeSteps: steps);
   double rel(double a, double b) => (a - b).abs() / math.max(a.abs(), 1.0);
   var maxRel = 0.0, mismatch = 0, finite = 0, nusRel = 0.0, klRel = 0.0;
+  var catRel = 0.0;
   for (var e = 0; e < _elements; e++) {
     if (ref[e].isFinite != got[e].isFinite) {
       mismatch++;
@@ -253,9 +266,9 @@ Future<FixtureResult?> checkFixture(
       final p = await gpu.readVector(i, VectorField.mean, k);
       for (var e = 0; e < _elements; e++) {
         final want = cpu.getVector(e, i, VectorField.alpha)[k];
-        if (want.isFinite) nusRel = math.max(nusRel, rel(want, alpha[e]));
-        maxRel = math.max(
-          maxRel,
+        if (want.isFinite) catRel = math.max(catRel, rel(want, alpha[e]));
+        catRel = math.max(
+          catRel,
           rel(cpu.getVector(e, i, VectorField.mean)[k], p[e]),
         );
       }
@@ -274,7 +287,7 @@ Future<FixtureResult?> checkFixture(
           (want - kl[e]).abs() / (1 + logGamma(total).abs()),
         );
       }
-      maxRel = math.max(maxRel, rel(cpu.get(e, i, NodeField.surprise), s[e]));
+      catRel = math.max(catRel, rel(cpu.get(e, i, NodeField.surprise), s[e]));
     }
   }
   gpu.dispose();
@@ -283,6 +296,7 @@ Future<FixtureResult?> checkFixture(
     nonFiniteMismatch: mismatch,
     finite: finite,
     nusRel: nusRel,
+    catRel: catRel,
     klRel: klRel,
   );
 }
@@ -305,7 +319,8 @@ Future<List<String>> checkAll(
     print(
       '$name: max rel ${r.maxRel.toStringAsExponential(2)}, '
       '${r.finite} finite, ${r.nonFiniteMismatch} non-finite mismatches'
-      '${r.nusRel > 0 ? ', ν/α ${r.nusRel.toStringAsExponential(2)}' : ''}'
+      '${r.nusRel > 0 ? ', ν ${r.nusRel.toStringAsExponential(2)}' : ''}'
+      '${r.catRel > 0 ? ', α/p/surprise ${r.catRel.toStringAsExponential(2)}' : ''}'
       '${r.klRel > 0 ? ', KL ${r.klRel.toStringAsExponential(2)}' : ''}',
     );
     if (outOfRange.contains(name)) continue;
@@ -313,6 +328,7 @@ Future<List<String>> checkAll(
     if (r.nonFiniteMismatch != 0 ||
         r.maxRel > tol ||
         r.nusRel > tolerance ||
+        r.catRel > categoricalTolerance ||
         r.klRel > klTolerance) {
       failures.add('$name: $r');
     }

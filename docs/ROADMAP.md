@@ -1,9 +1,7 @@
 # hgf.dart roadmap
 
 Picks up after the feasibility spike (phases 1–3, see
-[FEASIBILITY.md](FEASIBILITY.md)). The original plan lives at
-`~/.claude/plans/so-i-m-associated-with-radiant-cloud.md`; this file
-supersedes its phase list.
+[FEASIBILITY.md](FEASIBILITY.md)).
 
 ## Where things stand (2026-11-10, after MAP, Laplace, NUTS, exact gradients, hierarchical models, worker pools, GPU fitting, the playground's fitting view and settings, HGF neural networks on the CPU and GPU, GPU ensembles of sequential fits, the playground's parameter recovery, fit host isolate and worker, categorical and dp fitting, data import/export, hgf_deep's data loading and model saving, choice tasks, and export to code)
 
@@ -2012,8 +2010,23 @@ IR (GPU kernels, CPU reverse mode, exact Hessians).
     (the kernel is identical before eb255c3).
   - Also fixed: `WebGpuBackend` kept every pipeline that ever had a bind
     group in a set, so none was ever collected; buffers now track their
-    pipelines instead. The fit tests dispose their `GpuFitter`s. The native
-    backend never releases pipelines (no `wgpuComputePipelineRelease`).
+    pipelines instead. The fit tests dispose their `GpuFitter`s.
+  - Native pipelines (2026-11-23): `GpuBackend.releasePipeline` frees a
+    pipeline and its bind groups (wgpu-native: the bind groups, the layout
+    reference and `wgpuComputePipelineRelease`; WebGPU, which has no
+    destroy() for pipelines: drops the bind groups). `GpuBatch`,
+    `GpuFitter`, `GradJob`, `GpuDeepNetwork` and `GpuDeepEnsemble` release
+    theirs on dispose, and the native backend tracks pipelines per buffer
+    like the web one. `test/native_lifecycle_test.dart` (and the browser
+    parity test) compiles, runs and releases in both orders.
+  - Native categorical parity (2026-11-23): `native_parity_test` failed on
+    the RX 7600 XT (not on SwiftShader) for `categorical_3`,
+    `categorical_3_missing`, `categorical_mixed`: final α 1.2e-5 to 2.6e-5
+    relative, over the 1e-5 tolerance. f32, not the kernel: the error grows
+    with the series (5e-7 at 10 trials, 3e-6 at 200), and pyhgf's float32
+    mode is as far off (1.1e-5 to 1.4e-5; `gpu_f32_reference.py
+    --fixtures` now reports categorical α). The categorical α,
+    probabilities and surprise get their own tolerance (1e-4).
   Open: a dp kernel that keeps the barrier part out of the per-trial loop
   (its own dispatch), if SwiftShader matters beyond CI.
 - **Speed** (`benchmark/bin/fit_ef_gpu.dart`, now with categorical

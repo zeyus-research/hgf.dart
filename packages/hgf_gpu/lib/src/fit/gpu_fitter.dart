@@ -225,7 +225,10 @@ final class GpuFitter implements PassRunner {
   void dispose() {
     _disposed = true;
     for (final m in _models.values) {
-      m?.release(backend);
+      if (m == null) continue;
+      m.release(backend);
+      backend.releasePipeline(m.pipeline);
+      if (m.reversePipeline case final r?) backend.releasePipeline(r);
     }
     _models.clear();
   }

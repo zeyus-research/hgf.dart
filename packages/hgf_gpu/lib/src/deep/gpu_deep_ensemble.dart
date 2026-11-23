@@ -626,5 +626,11 @@ final class GpuDeepEnsemble {
     for (final b in [_params, _state, _uniform, _x, _y, _out, _bc]) {
       if (b != null) backend.release(b);
     }
+    for (final p in _pipelines.values) {
+      // Compiled ones release now (then() on a completed future runs in a
+      // microtask); a failed compile has nothing to release.
+      p.then(backend.releasePipeline).ignore();
+    }
+    _pipelines.clear();
   }
 }

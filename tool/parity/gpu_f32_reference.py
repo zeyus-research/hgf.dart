@@ -57,7 +57,6 @@ def fixture_worker(names: list[str]) -> None:
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
     import jax.numpy as jnp
     import numpy as np
-    from jax.lax import scan
 
     sys.path.insert(0, str(Path(__file__).parent))
     import gen_fixtures as g
@@ -75,11 +74,9 @@ def fixture_worker(names: list[str]) -> None:
         )
         steps = np.asarray([_decode(v) for v in fx["time_steps"]]) if fx.get("time_steps") else np.ones(n)
         net = g.build_jax(spec)
-        net.input_data(input_data=x[:2])
-        ins = (tuple(jnp.asarray(x[:, k]) for k in range(x.shape[1])),
-               tuple(jnp.asarray(obs[:, k]) for k in range(x.shape[1])),
-               jnp.asarray(steps), None)
-        _, traj = scan(net.scan_fn, net.attributes, ins)
+        # As gen_fixtures.run (a categorical node takes vector inputs).
+        net.input_data(input_data=x, observed=obs, time_steps=steps)
+        traj = net.node_trajectories
         kinds = [node["kind"] for node in spec["nodes"]]
         if kinds[0] == "binary-state":
             u = traj[0]["mean"]
@@ -93,7 +90,15 @@ def fixture_worker(names: list[str]) -> None:
                 d = traj[i]["mean"] - traj[i]["expected_mean"]
                 ep = traj[i]["expected_precision"]
                 s = s + 0.5 * (jnp.log(2 * jnp.pi) - jnp.log(ep) + ep * d * d)
-        result[name] = float(jnp.where(jnp.isnan(s), jnp.inf, s).sum())
+        alpha = [
+            [float(a) for a in np.asarray(traj[i]["alpha"])[-1]]
+            for i, k in enumerate(kinds)
+            if k == "categorical-state"
+        ]
+        result[name] = {
+            "total": float(jnp.where(jnp.isnan(s), jnp.inf, s).sum()),
+            "alpha": alpha,
+        }
     json.dump(result, sys.stdout)
 
 
@@ -153,12 +158,24 @@ def fixtures_main(names: list[str]) -> None:
         runs[x64] = json.loads(out.stdout)
     import math
 
-    print("| fixture | f64 total | f32 total | rel err |")
-    print("|---|--:|--:|--:|")
+    print("| fixture | f64 total | f32 total | rel err | categorical α rel err |")
+    print("|---|--:|--:|--:|--:|")
     for name in names:
-        a, b = runs["1"][name], runs["0"][name]
+        a, b = runs["1"][name]["total"], runs["0"][name]["total"]
         rel = abs(a - b) / max(abs(a), 1.0) if math.isfinite(a) and math.isfinite(b) else float("nan")
-        print(f"| {name} | {a:.6g} | {b:.6g} | {rel:.2g} |")
+        # The final α of every categorical node (what the GPU test compares
+        # as `nusRel`), relative.
+        alpha = max(
+            (
+                abs(x - y) / abs(x)
+                for na, nb in zip(runs["1"][name]["alpha"], runs["0"][name]["alpha"])
+                for x, y in zip(na, nb)
+                if math.isfinite(x) and x != 0
+            ),
+            default=None,
+        )
+        a_txt = "" if alpha is None else f"{alpha:.2g}"
+        print(f"| {name} | {a:.6g} | {b:.6g} | {rel:.2g} | {a_txt} |")
 
 
 def main() -> None:

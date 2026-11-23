@@ -89,6 +89,10 @@ abstract interface class GpuBackend {
   Future<void> idle();
 
   void release(GpuBuffer buffer);
+
+  /// Frees [pipeline] and its cached bind groups, after the queued work is
+  /// submitted. It must not be dispatched again.
+  void releasePipeline(GpuPipeline pipeline);
 }
 
 /// The workgroups `(x, y)` that cover [elements] elements at [perGroup]
@@ -427,6 +431,7 @@ final class GpuBatch {
 
   void dispose() {
     backend
+      ..releasePipeline(_pipeline)
       ..release(_initialBuffer)
       ..release(_stateBuffer)
       ..release(_paramsBuffer);
