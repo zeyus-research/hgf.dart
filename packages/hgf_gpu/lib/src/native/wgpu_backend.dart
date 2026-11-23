@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import '../batch.dart';
+import 'bundled.dart';
 import 'wgpu_bindings.g.dart';
 
 const _allowProcessEvents = 2; // WGPUCallbackMode_AllowProcessEvents
@@ -53,6 +54,11 @@ String _str(WGPUStringView v) => v.data == nullptr || v.length == 0
 List<String> _candidates(String? library) {
   final explicit = library ?? Platform.environment['WGPU_LIB'];
   if (explicit != null) return [explicit];
+  return [?bundledLibraryPath(), ..._installed()];
+}
+
+/// Where an app bundle or the system may keep the library.
+List<String> _installed() {
   final exe = File(Platform.resolvedExecutable).parent.path;
   final sep = Platform.pathSeparator;
   if (Platform.isMacOS) {

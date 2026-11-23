@@ -2019,6 +2019,13 @@ IR (GPU kernels, CPU reverse mode, exact Hessians).
     theirs on dispose, and the native backend tracks pipelines per buffer
     like the web one. `test/native_lifecycle_test.dart` (and the browser
     parity test) compiles, runs and releases in both orders.
+  - Bundled wgpu-native under `dart test` / `dart run` (2026-11-23): the
+    hook's library was never loaded there (`DynamicLibrary.open` by name
+    doesn't search the hooks' output; machines with a system wgpu-native
+    used that instead, CI had none). `bundledLibraryPath` resolves one
+    `@Native` symbol of the asset and asks the OS for its file (`dladdr`,
+    `GetModuleFileNameW`); it is tried after `$WGPU_LIB`. CI's
+    `gpu-native` job runs the native suites on Mesa's lavapipe.
   - Native categorical parity (2026-11-23): `native_parity_test` failed on
     the RX 7600 XT (not on SwiftShader) for `categorical_3`,
     `categorical_3_missing`, `categorical_mixed`: final α 1.2e-5 to 2.6e-5
