@@ -1,7 +1,9 @@
 name: CI
 
 on:
+  # Not tags: release.yml reuses (or starts) the run of the tagged commit.
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 

@@ -48,22 +48,28 @@ jobs:
             echo "- App builds: ${{ steps.parse.outputs.is_app }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # CI runs on every push, the tag's included, so a CI run of this commit
-  # either passed already (on main) or is running now: wait for it.
+  # CI doesn't run for tags: a tagged commit normally has a run from its push
+  # to main (passed or still running). Without one, start one on the tag.
   ci:
     needs: parse
     runs-on: ubuntu-latest
     permissions:
-      actions: read
+      actions: write # to start a CI run when the commit has none
     steps:
       - name: Wait for a passed CI run of this commit
         env:
           GH_TOKEN: ${{ github.token }}
           RUNS_URL: repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${{ github.sha }}&per_page=50
         run: |
+          STARTED=false
           # Up to 90 minutes (the GPU job alone may take 45).
           for _ in $(seq 90); do
             RUNS="$(gh api "$RUNS_URL" --jq '[.workflow_runs[] | {status, conclusion}]')"
+            if [ "$(echo "$RUNS" | jq 'length')" = 0 ] && [ "$STARTED" = false ]; then
+              echo "::notice::No CI run of ${{ github.sha }}; starting one on ${{ github.ref_name }}."
+              gh workflow run ci.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"
+              STARTED=true
+            fi
             if [ "$(echo "$RUNS" | jq 'any(.[]; .conclusion == "success")')" = "true" ]; then
               echo "CI passed on ${{ github.sha }}." >> "$GITHUB_STEP_SUMMARY"
               exit 0
