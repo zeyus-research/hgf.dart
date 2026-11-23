@@ -72,9 +72,11 @@ void main() {
   test('a folder: beh event tables only, a session at a time', () async {
     final dir = _dataset();
     addTearDown(() => dir.deleteSync(recursive: true));
-    final src = bidsFolder(dir.path);
+    final src = await bidsFolder(dir.uri);
     expect(src.events, hasLength(4));
     expect(src.events.every((p) => p.contains('/beh/')), isTrue);
+    expect(src.events.first, 'sub-01/beh/sub-01_task-x_events.tsv');
+    expect(src.name, dir.path.split(Platform.pathSeparator).last);
     final participants = await src.participants();
     final merged = await src.load(
       participants: participants,

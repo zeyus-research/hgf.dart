@@ -50,17 +50,17 @@ abstract class BidsSource {
   }
 }
 
-/// Lets the user pick a BIDS dataset: its folder on desktop (every
-/// `sub-*/beh/*_events.tsv`, or every `*_events.tsv` when there is no
-/// `beh` folder), the event tables and `participants.tsv` themselves on the
-/// web. Null if cancelled.
+/// Lets the user pick a BIDS dataset: its folder on desktop and Android
+/// (every `sub-*/beh/*_events.tsv`, or every `*_events.tsv` when there is
+/// no `beh` folder), the event tables and `participants.tsv` themselves on
+/// the web. Null if cancelled; throws if the picker or the folder fails.
 Future<BidsSource?> pickBids() async {
   if (!kIsWeb) {
-    final dir = await FilePicker.getDirectoryPath(
+    final dir = await FilePicker.pickDirectory(
       dialogTitle: 'A BIDS dataset (the folder with participants.tsv)',
     );
     if (dir == null) return null;
-    return io.bidsFolder(dir);
+    return await io.bidsFolder(dir);
   }
   final files = await FilePicker.pickFiles(
     dialogTitle:
