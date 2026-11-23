@@ -1,3 +1,11 @@
+## Unreleased
+
+- Choice kernels
+- Response models carry state from trial to trial. On the GPU, traces are
+  carried similar to the network state, meaning that gradients work without
+  a special case.
+- Python export: Grouped MAP runs the same method instead of NUTS.
+
 ## 0.1.0
 
 - Continuous deep networks' wiring: `DocDeep.valueChildOf`,

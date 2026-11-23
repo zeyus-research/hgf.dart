@@ -52,10 +52,14 @@ extension _PythonDocument on PythonExport {
     if (fitCode != null) {
       b
         ..writeln(switch (fit) {
-          ExportMap() when grouped =>
+          ExportMap() when grouped && group.shared.isNotEmpty =>
             'samples the joint posterior of the participants and the group '
-                'level\n(NUTS; hgf.dart fits it by empirical Bayes under MAP, '
-                'which PyMC lacks),',
+                'level\n(NUTS; shared parameters have no empirical Bayes '
+                'fit),',
+          ExportMap() when grouped =>
+            'fits the populations by empirical Bayes (Laplace-EM, as '
+                'hgf.dart\'s\nfitEmpiricalBayes) and each participant\'s '
+                'mode under them,',
           ExportMap() =>
             'finds each participant\'s MAP estimate (with Laplace intervals),',
           ExportNuts() when grouped =>
@@ -251,7 +255,7 @@ extension _PythonDocument on PythonExport {
         ..writeln()
         ..writeln('# The data the model was exported with.')
         ..writeln('EMBEDDED_CSV = """\\')
-        ..write(csv.replaceAll(r'\', r'\\').replaceAll('"""', r'\"\"\"'));
+        ..write(csv.replaceAll(r'\', r'\\').replaceAll('"""', r'"""'));
       if (!csv.endsWith('\n')) b.writeln();
       b.writeln('"""');
     }
@@ -418,7 +422,7 @@ extension _PythonDocument on PythonExport {
       ..writeln('    return log_likelihood')
       ..writeln()
       ..writeln()
-      ..writeln('def build_model(ids, subjects):')
+      ..writeln('def build_model(ids, subjects, populations=None, pool=True):')
       ..writeln(
         '    """One PyMC model over [subjects] (participants [ids]): '
         'individual',
@@ -435,7 +439,19 @@ extension _PythonDocument on PythonExport {
         '    hgf.dart), shared ones once; each participant\'s log-likelihood '
         '(JAX,',
       )
-      ..writeln('    wrapped for PyTensor) as a potential."""')
+      ..writeln(
+        '    wrapped for PyTensor) as a potential. With [populations] '
+        '(name: (mean,',
+      )
+      ..writeln(
+        '    sd), fixed) the pooled parameters have those instead of a '
+        'population',
+      )
+      ..writeln(
+        '    of their own; with pool=False they have their own priors, as '
+        'if not',
+      )
+      ..writeln('    pooled."""')
       ..writeln('    import pymc as pm')
       ..writeln()
       ..writeln('    n = len(ids)  # noqa: F841')
@@ -450,25 +466,45 @@ extension _PythonDocument on PythonExport {
       } else if (pooled[name] case final pop?) {
         final t = p['transform'] as Map<String, Object?>;
         final centered = group!.centered;
+        final init = p['initial'] == null
+            ? null
+            : 'np.full(n, ${pyFloat(readJsonDouble(p['initial']))})';
         b
-          ..writeln('        # $name varies around a population.')
-          ..writeln('        mu = ${_prior('${name}_mu', pop.mean, null)}')
-          ..writeln('        sigma = ${_prior('${name}_sigma', pop.sd, null)}');
+          ..writeln('        if not pool:')
+          ..writeln(
+            '            values[$n] = '
+            '${_prior(name, prior, null, initval: init, dims: 'participant')}',
+          )
+          ..writeln('        else:')
+          ..writeln('            # $name varies around a population.')
+          ..writeln('            if populations is not None:')
+          ..writeln('                mu, sigma = populations[$n]')
+          ..writeln(
+            '                y = pm.Normal("${name}_y", mu=mu, sigma=sigma, '
+            'dims="participant")',
+          )
+          ..writeln('            else:')
+          ..writeln(
+            '                mu = ${_prior('${name}_mu', pop.mean, null)}',
+          )
+          ..writeln(
+            '                sigma = ${_prior('${name}_sigma', pop.sd, null)}',
+          );
         if (centered) {
           b.writeln(
-            '        y = pm.Normal("${name}_y", mu=mu, sigma=sigma, '
+            '                y = pm.Normal("${name}_y", mu=mu, sigma=sigma, '
             'dims="participant")',
           );
         } else {
           b
             ..writeln(
-              '        z = pm.Normal("${name}_z", mu=0.0, sigma=1.0, '
+              '                z = pm.Normal("${name}_z", mu=0.0, sigma=1.0, '
               'dims="participant")',
             )
-            ..writeln('        y = mu + sigma * z');
+            ..writeln('                y = mu + sigma * z');
         }
         b.writeln(
-          '        values[$n] = pm.Deterministic($n, '
+          '            values[$n] = pm.Deterministic($n, '
           '${_constrained(t, 'y')}, dims="participant")',
         );
       } else {
@@ -508,13 +544,43 @@ extension _PythonDocument on PythonExport {
     for (final MapEntry(:key, :value) in transforms.entries) {
       b.writeln('    ${_pyStr(key)}: lambda y: $value,');
     }
-    b.writeln('}');
+    b
+      ..writeln('}')
+      ..writeln('TO_UNCONSTRAINED = {');
+    for (final p in params) {
+      b.writeln(
+        '    ${_pyStr(p['name'] as String)}: lambda x: '
+        '${_unconstrained(p['transform'] as Map<String, Object?>, 'x')},',
+      );
+    }
+    final (restarts, seed) = switch (fit) {
+      ExportMap(:final restarts, :final seed) => (restarts, seed),
+      ExportNuts(:final restarts) => (restarts, 1),
+    };
+    b
+      ..writeln('}')
+      ..writeln()
+      ..writeln(
+        '# MAP: from the starting values and RESTARTS more starts drawn '
+        'from the',
+      )
+      ..writeln('# priors (seeded by SEED); the best run is kept.')
+      ..writeln('RESTARTS = $restarts')
+      ..writeln('SEED = $seed')
+      ..writeln()
+      ..writeln()
+      ..write(_optimiseHelpers);
     switch (fit) {
       case ExportMap() when !grouped:
         b
           ..writeln()
           ..writeln()
           ..write(_fitMapCode(fit));
+      case ExportMap() when shared.isEmpty:
+        b
+          ..writeln()
+          ..writeln()
+          ..write(_fitEmpiricalBayesCode);
       case ExportMap():
       case ExportNuts():
         final nuts = fit is ExportNuts ? fit : const ExportNuts();
@@ -532,72 +598,262 @@ extension _PythonDocument on PythonExport {
 
   String _fitMapCode(ExportMap fit) => '''
 def fit(ids, subjects):
-    """Each participant's MAP estimate (PyMC's find_MAP, as hgf.dart without a
-    Jacobian), then 95 % intervals from the curvature there on the
-    unconstrained scale (Laplace; central differences of the gradient)."""
-    import pymc as pm
-    from pymc.blocking import DictToArrayBijection, RaveledVars
-
+    """Each participant's MAP estimate (as hgf.dart, without a Jacobian),
+    then 95 % intervals from the curvature there on the unconstrained scale
+    (Laplace; central differences of the gradient)."""
     out = {"participants": {}, "group": []}
     for pid, data in zip(ids, subjects):
         model = build_model([pid], [data])
-        point = pm.find_MAP(model=model, include_transformed=True, progressbar=False)
-        start = {v.name: point[v.name] for v in model.value_vars}
-        x0 = DictToArrayBijection.map(start)
-        dlogp = model.compile_dlogp(jacobian=False)
+        x, info, _ = optimise(model, starts(model), jacobian=False)
+        cov = laplace_covariance(model, x, info, jacobian=False)
+        out["participants"][pid] = estimates_at(model, x, info, cov)
+    return out
+''';
 
-        def grad(x, info=x0.point_map_info, dlogp=dlogp):
-            return np.asarray(
-                dlogp(DictToArrayBijection.rmap(RaveledVars(x, info))), dtype=float
+  /// `fit(ids, subjects)` by empirical Bayes, as hgf_fit's
+  /// `fitEmpiricalBayes` (pooled parameters only).
+  static const _fitEmpiricalBayesCode = r'''
+def fit(ids, subjects, max_iterations=200, tolerance=1e-4, min_sd=1e-3):
+    """Empirical Bayes (Laplace-EM, as hgf.dart's fitEmpiricalBayes): each
+    participant's mode under the current populations (density on the
+    unconstrained scale), the Laplace covariance there, then each population
+    set to the moments of the participants' approximate posteriors (mean of
+    the modes; variance of the modes plus the mean posterior variance),
+    until the summed Laplace log evidence changes by less than [tolerance].
+    The populations start from each participant's MAP estimate under the
+    parameters' own priors. No group-level intervals (type-II maximum
+    likelihood)."""
+    import pytensor
+
+    n = len(ids)
+    # Each participant's MAP estimate under the parameters' own priors.
+    first = []
+    for pid, data in zip(ids, subjects):
+        model = build_model([pid], [data], pool=False)
+        x, info, nlp = optimise(model, starts(model), jacobian=False)
+        first.append(estimates_at(model, x, info)["estimate"] if np.isfinite(nlp) else None)
+    populations = {}
+    for p in POOLED:
+        ys = np.array([TO_UNCONSTRAINED[p](e[p]) for e in first if e is not None])
+        mu = float(np.mean(ys)) if len(ys) else 0.0
+        sd = max(float(np.std(ys, ddof=1)), 0.1) if len(ys) > 1 else 1.0
+        populations[p] = (pytensor.shared(mu), pytensor.shared(sd))
+
+    models = [
+        build_model([pid], [data], populations=populations)
+        for pid, data in zip(ids, subjects)
+    ]
+    # Warm starts: the first estimates, pooled ones on their y scale.
+    points = []
+    for model, e in zip(models, first):
+        if e is None:
+            points.append(model.initial_point())
+            continue
+        overrides = {}
+        for p in PARAMETERS:
+            if p in POOLED:
+                overrides[p + "_y"] = np.full(1, TO_UNCONSTRAINED[p](e[p]))
+            else:
+                overrides[p] = np.full(1, e[p])
+        points.append(initial_point(model, overrides))
+
+    history = []
+    for _ in range(max_iterations):
+        found = [optimise(m, [pt], jacobian=True) for m, pt in zip(models, points)]
+        points = [to_point(x, info) for x, info, _ in found]
+        covs, total = [], 0.0
+        for m, (x, info, nlp) in zip(models, found):
+            h = negative_hessian(m, x, info, jacobian=True)
+            try:
+                c = np.linalg.cholesky(h)
+            except np.linalg.LinAlgError:
+                covs.append(None)
+                continue
+            covs.append(np.linalg.inv(h))
+            total += -nlp + len(x) * math.log(2 * math.pi) / 2 - np.sum(np.log(np.diag(c)))
+        history.append(total)
+        for p in POOLED:
+            ys, var = [], []
+            for (x, info, _), cov in zip(found, covs):
+                at = position(info, p + "_y")
+                ys.append(x[at])
+                var.append(0.0 if cov is None else cov[at, at])
+            ys = np.array(ys)
+            mu = float(np.mean(ys))
+            sd = max(math.sqrt(float(np.mean((ys - mu) ** 2 + np.array(var)))), min_sd)
+            populations[p][0].set_value(mu)
+            populations[p][1].set_value(sd)
+        if len(history) >= 2 and abs(history[-1] - history[-2]) < tolerance:
+            break
+    print(
+        f"empirical Bayes: {len(history)} iterations, log evidence {history[-1]:.3f}"
+        f"{'' if len(history) >= 2 and abs(history[-1] - history[-2]) < tolerance else ' (not converged)'}"
+    )
+
+    out = {"participants": {}, "group": []}
+    for pid, m, (x, info, _), cov in zip(ids, models, found, covs):
+        out["participants"][pid] = estimates_at(m, x, info, cov)
+    for p in PARAMETERS:
+        if p in POOLED:
+            mu, sd = (float(v.get_value()) for v in populations[p])
+            out["group"].append((p + "_typical", TO_CONSTRAINED[p](mu), np.nan, np.nan))
+            out["group"].append((p + "_spread", sd, np.nan, np.nan))
+    return out
+''';
+
+  /// The optimiser and Laplace helpers the MAP and empirical Bayes fits
+  /// share.
+  static const _optimiseHelpers = r'''
+_COMPILED = {}
+
+
+def compiled(model, jacobian):
+    """The model's log density and its gradient, compiled once per model."""
+    key = (id(model), jacobian)
+    if key not in _COMPILED:
+        _COMPILED[key] = (
+            model,
+            model.compile_logp(jacobian=jacobian),
+            model.compile_dlogp(jacobian=jacobian),
+        )
+    return _COMPILED[key][1:]
+
+
+def to_point(x, info):
+    from pymc.blocking import DictToArrayBijection, RaveledVars
+
+    return DictToArrayBijection.rmap(RaveledVars(x, info))
+
+
+def position(info, name):
+    """Where the value variable [name] starts in a raveled point."""
+    at = 0
+    for entry in info:
+        if entry[0] == name:
+            return at
+        at += int(np.prod(entry[1]))
+    raise KeyError(name)
+
+
+def initial_point(model, overrides=None, rng=None):
+    """The model's starting point on the value variables' scale, with
+    [overrides] (natural values by variable name)."""
+    from pymc.initial_point import make_initial_point_fn
+
+    fn = make_initial_point_fn(
+        model=model, overrides=overrides or {}, jitter_rvs=set(), return_transformed=True
+    )
+    return fn(0 if rng is None else rng)
+
+
+def starts(model):
+    """The starting values, then RESTARTS draws from the priors."""
+    import pymc as pm
+
+    out = [model.initial_point()]
+    rng = np.random.default_rng(SEED)
+    for _ in range(RESTARTS):
+        draws = pm.draw(model.free_RVs, random_seed=rng)
+        out.append(initial_point(model, {rv.name: d for rv, d in zip(model.free_RVs, draws)}))
+    return out
+
+
+def optimise(model, points, jacobian):
+    """L-BFGS-B on the model's value variables from each of [points]; the
+    best run as (x, info, negative log density)."""
+    from pymc.blocking import DictToArrayBijection
+    from scipy.optimize import minimize
+
+    logp, dlogp = compiled(model, jacobian)
+    best = None
+    for start in points:
+        x0 = DictToArrayBijection.map({v.name: start[v.name] for v in model.value_vars})
+        info = x0.point_map_info
+
+        def f(x, info=info):
+            v = float(logp(to_point(x, info)))
+            return -v if np.isfinite(v) else np.inf
+
+        def g(x, info=info):
+            return -np.asarray(dlogp(to_point(x, info)), dtype=float)
+
+        if not np.isfinite(f(x0.data)):
+            continue
+        r = minimize(f, x0.data, jac=g, method="L-BFGS-B", options={"maxiter": 1000})
+        if best is None or r.fun < best[2]:
+            best = (np.asarray(r.x, dtype=float), info, float(r.fun))
+    if best is None:
+        x0 = DictToArrayBijection.map({v.name: points[0][v.name] for v in model.value_vars})
+        best = (x0.data, x0.point_map_info, np.inf)
+    return best
+
+
+def negative_hessian(model, x, info, jacobian):
+    """The Hessian of the negative log density at [x] (central differences of
+    the gradient), symmetrised."""
+    _, dlogp = compiled(model, jacobian)
+
+    def grad(x):
+        return np.asarray(dlogp(to_point(x, info)), dtype=float)
+
+    k = len(x)
+    h = 1e-5 * np.maximum(1.0, np.abs(x))
+    hess = np.zeros((k, k))
+    for j in range(k):
+        e = np.zeros(k)
+        e[j] = h[j]
+        hess[:, j] = -(grad(x + e) - grad(x - e)) / (2 * h[j])
+    return 0.5 * (hess + hess.T)
+
+
+def laplace_covariance(model, x, info, jacobian):
+    """The Laplace covariance at [x], or None without a positive definite
+    Hessian."""
+    h = negative_hessian(model, x, info, jacobian)
+    try:
+        np.linalg.cholesky(h)
+    except np.linalg.LinAlgError:
+        return None
+    return np.linalg.inv(h)
+
+
+def estimates_at(model, x, info, cov=None):
+    """Each parameter at [x] on its natural scale, with 95 % intervals from
+    [cov] (the value variables' covariance) mapped through its transform."""
+    import pytensor.tensor as pt
+
+    point = to_point(x, info)
+    sd = np.sqrt(np.diag(cov)) if cov is not None else np.full(len(x), np.nan)
+    estimate, lower, upper = {}, {}, {}
+    for rv in model.free_RVs:
+        v = model.rvs_to_values[rv].name
+        transform = model.rvs_to_transforms.get(rv)
+        at = position(info, v)
+        y, s = float(np.ravel(point[v])[0]), float(sd[at])
+
+        def natural(y, rv=rv, transform=transform):
+            if transform is None:
+                return float(y)
+            return float(
+                transform.backward(pt.as_tensor(np.asarray(y)), *rv.owner.inputs).eval()
             )
 
-        k = len(x0.data)
-        h = 1e-5 * np.maximum(1.0, np.abs(x0.data))
-        hess = np.zeros((k, k))
-        for j in range(k):
-            e = np.zeros(k)
-            e[j] = h[j]
-            hess[:, j] = (grad(x0.data + e) - grad(x0.data - e)) / (2 * h[j])
-        hess = 0.5 * (hess + hess.T)
-        try:
-            sd = np.sqrt(np.diag(np.linalg.inv(-hess)))
-        except np.linalg.LinAlgError:
-            sd = np.full(k, np.nan)
-        # Each parameter's unconstrained value and sd, in the raveled order.
-        at, ys, sds = 0, {}, {}
-        for v in model.value_vars:
-            size = int(np.size(start[v.name]))
-            ys[v.name] = float(np.ravel(x0.data[at : at + size])[0])
-            sds[v.name] = float(sd[at]) if np.isfinite(sd[at]) else np.nan
-            at += size
-        estimate, lower, upper = {}, {}, {}
-        for rv in model.free_RVs:
-            name = rv.name
-            v = model.rvs_to_values[rv].name
-            estimate[name] = float(np.ravel(point[name])[0])
-            transform = model.rvs_to_transforms.get(rv)
-            y, s = ys[v], sds[v]
-
-            def natural(y, rv=rv, transform=transform):
-                if transform is None:
-                    return float(y)
-                import pytensor.tensor as pt
-
-                return float(
-                    transform.backward(pt.as_tensor(np.asarray(y)), *rv.owner.inputs).eval()
-                )
-
-            if np.isfinite(s) and s > 0:
-                lower[name] = natural(y - 1.959963984540054 * s)
-                upper[name] = natural(y + 1.959963984540054 * s)
-            else:
-                lower[name] = upper[name] = np.nan
-        out["participants"][pid] = dict(
-            estimate={p: estimate[p] for p in PARAMETERS},
-            lower={p: lower[p] for p in PARAMETERS},
-            upper={p: upper[p] for p in PARAMETERS},
-        )
-    return out
+        if rv.name.endswith("_y") and rv.name[:-2] in POOLED:
+            # A pooled parameter's y, on hgf.dart's unconstrained scale.
+            name, to = rv.name[:-2], TO_CONSTRAINED[rv.name[:-2]]
+        else:
+            name, to = rv.name, natural
+        estimate[name] = float(to(y))
+        if np.isfinite(s) and s > 0:
+            lower[name] = float(to(y - 1.959963984540054 * s))
+            upper[name] = float(to(y + 1.959963984540054 * s))
+        else:
+            lower[name] = upper[name] = np.nan
+    return dict(
+        estimate={p: estimate[p] for p in PARAMETERS},
+        lower={p: lower[p] for p in PARAMETERS},
+        upper={p: upper[p] for p in PARAMETERS},
+    )
 ''';
 
   String _fitNutsCode(ExportNuts fit, bool grouped) =>
@@ -666,6 +922,20 @@ def fit(ids, subjects):
         '${d('lower')} + ${pyFloat(readJsonDouble(t['upper']) - readJsonDouble(t['lower']))} * ${numpy ? '($sigmoid)' : sigmoid}',
       final type =>
         '${_stub('${pyIdentifier('$type')}_transform', 'the transform "$type" (natural value from unconstrained y)')}($y)',
+    };
+  }
+
+  /// [t] (a `FitCodec` transform) inverted: the unconstrained value of the
+  /// natural [x], in numpy.
+  String _unconstrained(Map<String, Object?> t, String x) {
+    String d(String key) => pyFloat(readJsonDouble(t[key]));
+    return switch (t['type']) {
+      'Identity' => x,
+      'LowerBound' => 'np.log($x - ${d('lower')})',
+      'UpperBound' => 'np.log(${d('upper')} - $x)',
+      'Interval' => 'np.log(($x - ${d('lower')}) / (${d('upper')} - $x))',
+      final type =>
+        '${_stub('${pyIdentifier('$type')}_untransform', 'the inverse of the transform "$type" (unconstrained y from natural value)')}($x)',
     };
   }
 

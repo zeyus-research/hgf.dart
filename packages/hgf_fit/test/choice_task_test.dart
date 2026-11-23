@@ -287,6 +287,108 @@ void main() {
       expect(uniform, closeTo(0.2, 0.04));
     });
 
+    test('choice kernel: α = 1 is stickiness; φ > 0 repeats', () {
+      HgfModel model(SoftmaxReadout readout) => HgfModel(
+        network: IowaGamblingTask.network(),
+        response: readout,
+        parameters: [
+          Parameter.response(
+            'inverseTemperature',
+            prior: const LogNormal(0.5, 1),
+          ),
+        ],
+      );
+      const decks = [
+        {0: 1.0},
+        {1: 1.0},
+        {2: 1.0},
+        {3: 1.0},
+      ];
+      final kernel = model(
+        const SoftmaxReadout(
+          options: decks,
+          choiceKernel: 1.5,
+          choiceKernelRate: 1.0,
+        ),
+      );
+      final sticky = model(
+        const SoftmaxReadout(options: decks, stickiness: 1.5),
+      );
+      final rng = math.Random(5);
+      final sims = kernel.simulateChoices(
+        [Subject(inputs: IowaGamblingTask.outcomes(200, rng))],
+        [
+          [2.0],
+        ],
+        rng,
+        reveals: IowaGamblingTask.reveals,
+      );
+      double nll(HgfModel m) {
+        final out = Float64List(1), ll = Float64List(1);
+        m.negLogPosterior(
+          sims,
+          Int32List(1),
+          Float64List.fromList([0.7]),
+          out,
+          negLogLikelihood: ll,
+        );
+        return ll[0];
+      }
+
+      expect(nll(kernel), closeTo(nll(sticky), 1e-9));
+
+      double repeats(double phi, double rate) {
+        final m = HgfModel(
+          network: IowaGamblingTask.network(),
+          response: SoftmaxReadout(
+            options: decks,
+            inverseTemperature: 0.0,
+            choiceKernel: phi,
+            choiceKernelRate: rate,
+          ),
+          parameters: [
+            Parameter.response('choiceKernel', prior: const Normal(0, 1)),
+          ],
+        );
+        final r = math.Random(8);
+        final c = m
+            .simulateChoices(
+              [Subject(inputs: IowaGamblingTask.outcomes(2000, r))],
+              [
+                [phi],
+              ],
+              r,
+              reveals: IowaGamblingTask.reveals,
+            )
+            .single
+            .responses!;
+        var n = 0;
+        for (var t = 1; t < c.length; t++) {
+          if (c[t] == c[t - 1]) n++;
+        }
+        return n / (c.length - 1);
+      }
+
+      // β = 0: chance repeats 1/4 without a kernel.
+      expect(repeats(0, 0.3), closeTo(0.25, 0.04));
+      expect(repeats(4, 0.3), greaterThan(0.6));
+      expect(repeats(-4, 1), lessThan(0.1));
+    });
+
+    test('SoftmaxReadout needs both choice-kernel terms', () {
+      final net = IowaGamblingTask.network();
+      expect(
+        () => const SoftmaxReadout(
+          options: [
+            {0: 1.0},
+            {1: 1.0},
+          ],
+          choiceKernel: 1,
+        ).prepare(net),
+        throwsArgumentError,
+      );
+    });
+
     test('parameter recovery on simulated IGT agents (MAP)', () {
       final model = _igt();
       final rng = math.Random(11);

@@ -59,6 +59,10 @@ sealed class GpuResponse {
   /// Parameter defaults, in slot order.
   List<double> get defaults => const [];
 
+  /// Slots the response carries from trial to trial (`ckₖ`, from 0), laid
+  /// out before its parameters.
+  int get stateSlots => 0;
+
   /// Whether it scores a response per trial.
   bool get usesResponses => false;
 }
@@ -124,9 +128,11 @@ final class GpuCategoricalSoftmax extends GpuResponse {
 }
 
 /// `SoftmaxReadout`: a choice among options worth `vₖ = Σ w · belief`,
-/// option `k` with utility `uₖ = β vₖ + bₖ + κ [k = previous]` and
-/// probability `(1 − ε) softmax(u)ₖ + ε / K`. Parameters:
-/// `inverseTemperature`, then `stickiness` (κ), `lapse` (ε) and `bias_k`
+/// option `k` with utility `uₖ = β vₖ + bₖ + κ [k = previous] + φ cₖ` and
+/// probability `(1 − ε) softmax(u)ₖ + ε / K`, where the choice kernel `cₖ`
+/// (slots `ckₖ`, from 0) moves `cₖ ← cₖ + α ([k = r] − cₖ)` after each
+/// response `r`. Parameters: `inverseTemperature`, then `stickiness` (κ),
+/// `choiceKernel` (φ), `choiceKernelRate` (α), `lapse` (ε) and `bias_k`
 /// where they are set (null: left out).
 final class GpuSoftmax extends GpuResponse {
   const GpuSoftmax({
@@ -134,6 +140,8 @@ final class GpuSoftmax extends GpuResponse {
     this.field = NodeField.expectedMean,
     this.inverseTemperature = 1.0,
     this.stickiness,
+    this.choiceKernel,
+    this.choiceKernelRate,
     this.lapse,
     this.bias,
   });
@@ -142,6 +150,8 @@ final class GpuSoftmax extends GpuResponse {
   final NodeField field;
   final double inverseTemperature;
   final double? stickiness;
+  final double? choiceKernel;
+  final double? choiceKernelRate;
   final double? lapse;
   final List<double>? bias;
 
@@ -149,9 +159,13 @@ final class GpuSoftmax extends GpuResponse {
   List<double> get defaults => [
     inverseTemperature,
     ?stickiness,
+    if (choiceKernel != null) ...[choiceKernel!, choiceKernelRate!],
     ?lapse,
     ...?bias,
   ];
+
+  @override
+  int get stateSlots => choiceKernel == null ? 0 : options.length;
 
   @override
   bool get usesResponses => true;
@@ -444,6 +458,9 @@ final class TrialCompiler {
     }
     for (final i in gainNodes) {
       slotOfVar['gain$i'] = s++;
+    }
+    for (var k = 0; k < response.stateSlots; k++) {
+      slotOfVar['ck$k'] = s++;
     }
     for (var j = 0; j < response.defaults.length; j++) {
       slotOfVar['rp$j'] = s++;
@@ -767,6 +784,7 @@ final class TrialCompiler {
       }
     }
     s += gainNodes.length; // gain: written before read
+    s += response.stateSlots; // ck: from 0
     for (final d in response.defaults) {
       out[s++] = d;
     }
@@ -2278,17 +2296,24 @@ final class _Pass {
         :final options,
         :final field,
         :final stickiness,
+        :final choiceKernel,
         :final lapse,
         :final bias,
       ):
-        // log Σ exp(uₖ) − u_resp, uₖ = β vₖ + bₖ + κ [k = previous]; a
-        // response that is no option's index picks none (the CPU engine
+        // log Σ exp(uₖ) − u_resp, uₖ = β vₖ + bₖ + κ [k = previous] + φ cₖ;
+        // a response that is no option's index picks none (the CPU engine
         // rejects it). With a lapse ε: −log((1 − ε) q + ε / K).
         final present = letCond('present', Cond(source.responsePresent()));
         final resp = let('resp', Lit(source.response()));
         var j = 1;
         final kappa = stickiness == null ? null : rp(j++);
+        final phi = choiceKernel == null ? null : rp(j++);
+        final rate = choiceKernel == null ? null : rp(j++);
         final eps = lapse == null ? null : rp(j++);
+        final ck = [
+          if (phi != null)
+            for (var k = 0; k < options.length; k++) _slotRead('ck$k'),
+        ];
         final b0 = j;
         final prev = kappa == null
             ? null
@@ -2309,6 +2334,7 @@ final class _Pass {
                 if (bias != null) rp(b0 + k),
                 if (kappa != null)
                   sel(zero, kappa, eq(prev!, lit(k.toDouble()))),
+                if (phi != null) phi * ck[k],
               ]),
             ),
         ];
@@ -2331,6 +2357,14 @@ final class _Pass {
           );
         }
         s = sel(zero, nll, present);
+        // cₖ ← cₖ + α ([k = r] − cₖ) after a response; kept after a miss.
+        for (var k = 0; k < ck.length; k++) {
+          final hit = sel(zero, one, eq(resp, lit(k.toDouble())));
+          _slotWrite(
+            'ck$k',
+            sel(ck[k], ck[k] + rate! * (hit - ck[k]), present),
+          );
+        }
       case GpuExprReadout(
         :final kind,
         :final expressions,

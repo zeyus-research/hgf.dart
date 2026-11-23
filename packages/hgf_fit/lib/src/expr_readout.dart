@@ -321,8 +321,10 @@ final class ExprReadout extends ResponseModel {
     double response,
     double previous,
     Float64List params,
-    int offset,
-  ) {
+    int offset, {
+    Float64List? state,
+    int stateAt = 0,
+  }) {
     if (response.isNaN) return 0.0;
     _load(network, element, response, previous, params, offset);
     final double s;
@@ -367,8 +369,10 @@ final class ExprReadout extends ResponseModel {
     double previous,
     Float64List params,
     int offset,
-    ResponsePartials partials,
-  ) {
+    ResponsePartials partials, {
+    Float64List? state,
+    int stateAt = 0,
+  }) {
     if (response.isNaN) return 0.0;
     _load(network, element, response, previous, params, offset);
     // ∂S/∂(each expression's value).
@@ -429,8 +433,10 @@ final class ExprReadout extends ResponseModel {
     double previous,
     Float64List params,
     int offset,
-    math.Random rng,
-  ) {
+    math.Random rng, {
+    Float64List? state,
+    int stateAt = 0,
+  }) {
     _load(network, element, double.nan, previous, params, offset);
     switch (kind) {
       case ExprReadoutKind.choice:

@@ -204,6 +204,12 @@ final class FitCodec {
         stickiness: json['stickiness'] == null
             ? null
             : readJsonDouble(json['stickiness']),
+        choiceKernel: json['choiceKernel'] == null
+            ? null
+            : readJsonDouble(json['choiceKernel']),
+        choiceKernelRate: json['choiceKernelRate'] == null
+            ? null
+            : readJsonDouble(json['choiceKernelRate']),
         lapse: json['lapse'] == null ? null : readJsonDouble(json['lapse']),
         bias: (json['bias'] as List?)?.map(readJsonDouble).toList(),
       ),

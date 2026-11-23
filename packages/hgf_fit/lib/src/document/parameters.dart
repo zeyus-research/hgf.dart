@@ -81,8 +81,10 @@ String _symbol(String field) => switch (field) {
 /// - means, drifts, value couplings: normal around the value;
 /// - precisions, α, ν, volatility couplings, the inverse temperature and
 ///   a Gaussian readout's precision: log-normal with the value as median;
-/// - the autoconnection strength and a lapse rate: truncated to [0, 1];
-/// - stickiness and option biases: `N(value, 1²)` and `N(value, 2²)`.
+/// - the autoconnection strength, a lapse rate and a choice-kernel rate:
+///   truncated to [0, 1];
+/// - stickiness, a choice-kernel weight and option biases: `N(value, 1²)`,
+///   `N(value, 2²)` and `N(value, 2²)`.
 Prior suggestPrior(DocTarget target, double current) {
   final c = current.isFinite ? current : 0.0;
   double logOf(double v) => v > 0 ? _r(math.log(v)) : 0;
@@ -97,6 +99,13 @@ Prior suggestPrior(DocTarget target, double current) {
         'inverseTemperature' => LogNormal(logOf(c), 1),
         'precision' => LogNormal(logOf(c), 2),
         'stickiness' => Normal(_r(c), 1),
+        'choiceKernel' => Normal(_r(c), 2),
+        'choiceKernelRate' => TruncatedNormal(
+          c > 0 && c < 1 ? _r(c) : 0.3,
+          0.3,
+          lower: 0,
+          upper: 1,
+        ),
         'lapse' => TruncatedNormal(
           c > 0 && c < 1 ? _r(c) : 0.05,
           0.1,

@@ -420,6 +420,62 @@ List<FitCase> fitCases() {
     ));
   }
   {
+    // The Iowa Gambling Task with a decaying choice kernel (φ, α) and a
+    // missed choice (the kernel holds across it).
+    final model = HgfModel(
+      network: IowaGamblingTask.network(),
+      response: const SoftmaxReadout(
+        options: [
+          {0: 1.0},
+          {1: 1.0},
+          {2: 1.0},
+          {3: 1.0},
+        ],
+        choiceKernel: 1.0,
+        choiceKernelRate: 0.3,
+      ),
+      parameters: [
+        Parameter(
+          'omega',
+          targets: [
+            for (final n in IowaGamblingTask.valueNodes)
+              NodeTarget(n, NodeField.tonicVolatility),
+          ],
+          prior: const Normal(-2, 1.5),
+        ),
+        Parameter.response(
+          'inverseTemperature',
+          prior: const LogNormal(0.5, 1),
+        ),
+        Parameter.response('choiceKernel', prior: const Normal(0, 2)),
+        Parameter.response('choiceKernelRate', prior: const Uniform(0, 1)),
+      ],
+    );
+    final rng = math.Random(12);
+    final sims = model.simulateChoices(
+      [
+        Subject(inputs: IowaGamblingTask.outcomes(120, rng)),
+        Subject(inputs: IowaGamblingTask.outcomes(120, rng)),
+      ],
+      [
+        [-2.0, 1.5, 2.0, 0.3],
+        [-3.0, 3.0, -1.0, 0.6],
+      ],
+      rng,
+      reveals: IowaGamblingTask.reveals,
+    );
+    sims[0].responses![40] = double.nan;
+    cases.add((
+      name: 'choice kernel: IGT, decaying trace (φ, α), missed choice',
+      model: model,
+      subjects: sims,
+      points: [
+        [-2.0, 1.5, 2.0, 0.3],
+        [-1.0, 3.0, -0.8, 0.7],
+      ],
+    ));
+  }
+  {
     // pyhgf's two-armed bandit: arm values W − L from four binary branches.
     final net = Network()..addNodes(kind: NodeKind.binaryState, nNodes: 4);
     for (var i = 0; i < 4; i++) {

@@ -98,10 +98,9 @@ ModelDocument _choice({DocFit fit = const DocFit(), DocGroup? group}) =>
       group: group,
     );
 
-String _choiceData() {
+String _choiceData({int nT = 80}) {
   final c = _choice().compile();
   final rng = math.Random(4);
-  const nT = 80;
   final subjects = <Subject>[
     for (var s = 0; s < 3; s++)
       () {
@@ -368,6 +367,72 @@ void main() {
     },
     skip: skip,
     timeout: const Timeout(Duration(minutes: 5)),
+  );
+
+  test(
+    'MAP with a pooled parameter: hgf_fit\'s empirical Bayes fit',
+    () async {
+      final csv = _choiceData(nT: 400);
+      final data = CsvData.parse(csv);
+      final c = _choice(
+        group: DocGroup(
+          pooled: {'omega': DocPopulation.around(const Normal(-3, 1))},
+        ),
+      ).compile();
+      final model = c.model!;
+      final subjects = c.subjects(data);
+      final map = fitMap(model, subjects, restarts: 3, random: math.Random(1));
+      final eb = fitEmpiricalBayes(
+        c.hierarchical!,
+        subjects,
+        start: [
+          for (final r in map.results)
+            r.negLogPosterior.isFinite ? r.x : model.start(),
+        ],
+      );
+      final want = ParticipantEstimates.fromEmpiricalBayes(
+        eb,
+        participants: [for (final s in subjects) '${s.id}'],
+      );
+      final out = await _runPython(
+        'eb',
+        PythonExport(c.exportSpec(csv: csv)).script(),
+      );
+      expect(out, contains('empirical Bayes:'));
+      expect(out, isNot(contains('not converged')));
+      final text = File('${_dir.path}/data_estimates.csv').readAsStringSync();
+      final tables = text.trim().split('\n\n');
+      expect(tables, hasLength(2));
+      final got = CsvData.parse(tables[0]);
+      for (final (k, row) in got.rows.indexed) {
+        expect(row.first, want.participants[k]);
+        for (var i = 0; i < want.names.length; i++) {
+          final name = want.names[i];
+          expect(
+            double.parse(row[1 + 3 * i]),
+            closeTo(want.estimate[k][i], 1e-3),
+            reason: '$name of ${row.first}',
+          );
+          expect(
+            double.parse(row[2 + 3 * i]),
+            closeTo(want.lower[k][i], 1e-2),
+            reason: '$name lower of ${row.first}',
+          );
+          expect(
+            double.parse(row[3 + 3 * i]),
+            closeTo(want.upper[k][i], 1e-2),
+            reason: '$name upper of ${row.first}',
+          );
+        }
+      }
+      final group = CsvData.parse(tables[1]);
+      expect(group.rows.map((r) => r.first), ['omega_typical', 'omega_spread']);
+      final pop = eb.populations['omega']!;
+      expect(double.parse(group.rows[0][1]), closeTo(pop.mean, 1e-3));
+      expect(double.parse(group.rows[1][1]), closeTo(pop.sd, 1e-3));
+    },
+    skip: skip,
+    timeout: const Timeout(Duration(minutes: 8)),
   );
 
   test(

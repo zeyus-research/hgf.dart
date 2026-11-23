@@ -116,9 +116,8 @@ jobs:
     name: GPU kernels on wgpu-native (lavapipe)
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # New (2026-11-23), not yet seen green on a runner: it doesn't block CI
-    # until it has. Remove once it passes.
-    continue-on-error: true
+    # Works fine now
+    # continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: subosito/flutter-action@v2

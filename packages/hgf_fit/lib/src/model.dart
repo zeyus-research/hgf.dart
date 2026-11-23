@@ -691,6 +691,8 @@ final class HgfModel {
       final rowObs = observed == null ? null : Float64List(flags);
       batch.reset();
       final p = _responseNames.length;
+      final ns = response.stateSize;
+      final state = Float64List(b * ns);
       for (var t = 0; t < g.nTime; t++) {
         row.setRange(0, width, data, t * width);
         rowObs?.setRange(0, flags, observed!, t * flags);
@@ -710,7 +712,10 @@ final class HgfModel {
             params,
             j * p,
             rng,
+            state: state,
+            stateAt: j * ns,
           );
+          if (ns > 0) response.advanceState(state, j * ns, o[t], params, j * p);
         }
       }
     }
@@ -772,6 +777,8 @@ final class HgfModel {
       final row = Float64List(nCols * b), rowObs = Float64List(nIn * b);
       batch.reset();
       final p = _responseNames.length;
+      final ns = response.stateSize;
+      final state = Float64List(b * ns);
       for (var t = 0; t < g.nTime; t++) {
         final dt = g.timeSteps?[t] ?? 1.0;
         batch.predict(timeStep: dt);
@@ -791,7 +798,12 @@ final class HgfModel {
             params,
             j * p,
             rng,
+            state: state,
+            stateAt: j * ns,
           );
+          if (ns > 0) {
+            response.advanceState(state, j * ns, choice, params, j * p);
+          }
           choices[s][t] = choice;
           if (choice.isNaN) continue;
           final ci = choice.toInt();
@@ -888,6 +900,8 @@ final class HgfModel {
       for (var s = 0; s < n; s++) s,
     ], flat);
     final p = _responseNames.length;
+    final ns = response.stateSize;
+    final state = Float64List(n * ns);
     final choices = [for (var s = 0; s < n; s++) Float64List(nTime)];
     final inputs = [for (var s = 0; s < n; s++) Float64List(nTime * nCols)];
     final seen = [for (var s = 0; s < n; s++) Float64List(nTime * nIn)];
@@ -907,7 +921,10 @@ final class HgfModel {
           params,
           s * p,
           rng,
+          state: state,
+          stateAt: s * ns,
         );
+        if (ns > 0) response.advanceState(state, s * ns, now[s], params, s * p);
         u.setRange(s * nCols, (s + 1) * nCols, subjects[s].inputs, t * nCols);
         final o = subjects[s].observed;
         for (var i = 0; i < nIn; i++) {
@@ -1189,6 +1206,35 @@ final class _BoundResponse extends ResponseFunction {
 
   ResponsePartials? _partials;
 
+  /// [ResponseModel.stateSize] values per element, and the trial each
+  /// element's state is at.
+  late final Float64List _state = Float64List(
+    responses.length * model.stateSize,
+  );
+  late final Int32List _at = Int32List(responses.length);
+
+  /// Brings [element]'s state to trial [t] (trials come in order).
+  void _stateFor(int element, int t) {
+    final n = model.stateSize;
+    if (t == 0) {
+      _state.fillRange(element * n, (element + 1) * n, 0.0);
+    } else if (_at[element] != t) {
+      throw StateError(
+        '${model.runtimeType} carries state: trials must come in order '
+        '(element $element at ${_at[element]}, got $t)',
+      );
+    }
+    _at[element] = t + 1;
+  }
+
+  void _advance(int element, double response) => model.advanceState(
+    _state,
+    element * model.stateSize,
+    response,
+    params,
+    element * nParams,
+  );
+
   @override
   bool get supportsGradients => model.supportsGradients;
 
@@ -1208,16 +1254,34 @@ final class _BoundResponse extends ResponseFunction {
       offset,
       network.tangents,
     );
-    return model.surprisePartialsAfter(
+    final response = r == null ? double.nan : r[t];
+    if (model.stateSize == 0) {
+      return model.surprisePartialsAfter(
+        network,
+        element,
+        t,
+        response,
+        r == null || t == 0 ? double.nan : r[t - 1],
+        params,
+        offset,
+        p,
+      );
+    }
+    _stateFor(element, t);
+    final s = model.surprisePartialsAfter(
       network,
       element,
       t,
-      r == null ? double.nan : r[t],
+      response,
       r == null || t == 0 ? double.nan : r[t - 1],
       params,
       offset,
       p,
+      state: _state,
+      stateAt: element * model.stateSize,
     );
+    _advance(element, response);
+    return s;
   }
 
   @override
@@ -1227,15 +1291,32 @@ final class _BoundResponse extends ResponseFunction {
   @override
   double batchSurprise(BatchNetwork network, int t, int element) {
     final r = responses[element];
-    return model.surpriseAfter(
+    final response = r == null ? double.nan : r[t];
+    if (model.stateSize == 0) {
+      return model.surpriseAfter(
+        network,
+        element,
+        t,
+        response,
+        r == null || t == 0 ? double.nan : r[t - 1],
+        params,
+        element * nParams,
+      );
+    }
+    _stateFor(element, t);
+    final s = model.surpriseAfter(
       network,
       element,
       t,
-      r == null ? double.nan : r[t],
+      response,
       r == null || t == 0 ? double.nan : r[t - 1],
       params,
       element * nParams,
+      state: _state,
+      stateAt: element * model.stateSize,
     );
+    _advance(element, response);
+    return s;
   }
 }
 

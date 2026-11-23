@@ -194,7 +194,8 @@ void main() {
         for (final c in fitCases())
           if (c.name.startsWith('Expr') ||
               c.name.startsWith('expression') ||
-              c.name.startsWith('choice extras'))
+              c.name.startsWith('choice extras') ||
+              c.name.startsWith('choice kernel'))
             c,
       ];
       final want = <List<double>>[];

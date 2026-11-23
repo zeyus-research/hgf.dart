@@ -116,8 +116,26 @@ abstract class ResponseModel {
   /// such a model overrides; the others ignore `previous`.
   bool get readsPreviousResponse => false;
 
+  /// How many values the model carries from trial to trial for each
+  /// element (e.g. [SoftmaxReadout.choiceKernel]'s trace), or 0. The
+  /// callers keep them: zeros before the first trial, [state] from
+  /// `stateAt` in the `…After` methods, and [advanceState] after each
+  /// trial.
+  int get stateSize => 0;
+
+  /// Moves [state] (from [stateAt]) past a trial whose response was
+  /// [response] (NaN: missed). Called after that trial's `surpriseAfter`,
+  /// `surprisePartialsAfter` or `sampleAfter` (with the draw).
+  void advanceState(
+    Float64List state,
+    int stateAt,
+    double response,
+    Float64List params,
+    int offset,
+  ) {}
+
   /// [surprise], given the response on trial `t − 1` ([previous]; NaN on the
-  /// first trial and after a missed one).
+  /// first trial and after a missed one) and the carried [state].
   double surpriseAfter(
     BatchNetwork network,
     int element,
@@ -125,10 +143,13 @@ abstract class ResponseModel {
     double response,
     double previous,
     Float64List params,
-    int offset,
-  ) => surprise(network, element, t, response, params, offset);
+    int offset, {
+    Float64List? state,
+    int stateAt = 0,
+  }) => surprise(network, element, t, response, params, offset);
 
-  /// [surprisePartials], given the response on trial `t − 1`.
+  /// [surprisePartials], given the response on trial `t − 1` and the
+  /// carried [state].
   double surprisePartialsAfter(
     BatchNetwork network,
     int element,
@@ -137,12 +158,14 @@ abstract class ResponseModel {
     double previous,
     Float64List params,
     int offset,
-    ResponsePartials partials,
-  ) =>
+    ResponsePartials partials, {
+    Float64List? state,
+    int stateAt = 0,
+  }) =>
       surprisePartials(network, element, t, response, params, offset, partials);
 
   /// [sample], given the response on trial `t − 1` (the previous draw when
-  /// simulating).
+  /// simulating) and the carried [state].
   double sampleAfter(
     BatchNetwork network,
     int element,
@@ -150,8 +173,10 @@ abstract class ResponseModel {
     double previous,
     Float64List params,
     int offset,
-    math.Random rng,
-  ) => sample(network, element, t, params, offset, rng);
+    math.Random rng, {
+    Float64List? state,
+    int stateAt = 0,
+  }) => sample(network, element, t, params, offset, rng);
 
   /// This response model as JSON, with a `"type"` key, for `FitCodec` (e.g. to
   /// send a model to a Web Worker). The built-in ones are covered; a custom
@@ -626,7 +651,7 @@ final class CategoricalSoftmaxReadout extends ResponseModel {
 /// with `HgfModel.simulateChoices` to simulate a task where only the chosen
 /// option's outcome is seen.
 ///
-/// Three optional terms, each a parameter when set (null leaves it out):
+/// Optional terms, each a parameter when set (null leaves it out):
 ///
 /// - [bias]: a per-option intercept `bₖ` (parameters `bias_0`, `bias_1`, …),
 ///   so an option can be worth something of its own; an option with no
@@ -635,22 +660,32 @@ final class CategoricalSoftmaxReadout extends ResponseModel {
 /// - [stickiness]: `κ`, added to the option chosen on the previous trial
 ///   (perseveration for `κ > 0`, alternation for `κ < 0`). Nothing is added
 ///   on the first trial or after a missed response.
+/// - [choiceKernel] and [choiceKernelRate]: a decaying trace of past
+///   choices (the choice kernel of Wilson & Collins, 2019), `φ cₖ` added to
+///   each option, where `cₖ` starts at 0 and after each response `r` moves
+///   `cₖ ← cₖ + α ([k = r] − cₖ)` (a missed response leaves it as it is).
+///   `α = 1` is one-back stickiness; smaller rates remember further back.
+///   Set both or neither; give the rate a prior on (0, 1).
 /// - [lapse]: `ε`, the probability of choosing at random:
 ///   `pₖ = (1 − ε) softmax(u)ₖ + ε / K`. Give it a prior on (0, 1).
 ///
-/// With all three, option `k`'s utility is `uₖ = β vₖ + bₖ + κ [k = prev]`
-/// (the bias and stickiness are on the utility scale, not multiplied by β).
+/// With all of them, option `k`'s utility is
+/// `uₖ = β vₖ + bₖ + κ [k = prev] + φ cₖ` (the bias, stickiness and kernel
+/// are on the utility scale, not multiplied by β).
 ///
 /// A response is the chosen option's index (`0`, `1`, …; NaN: no
 /// response). Parameters: `inverseTemperature` (default
 /// [inverseTemperature]; `β = 0` chooses at random, large `β` the option
-/// of highest value), then `stickiness`, `lapse` and `bias_k` where set.
+/// of highest value), then `stickiness`, `choiceKernel` (φ),
+/// `choiceKernelRate` (α), `lapse` and `bias_k` where set.
 final class SoftmaxReadout extends ResponseModel {
   const SoftmaxReadout({
     required this.options,
     this.field = NodeField.expectedMean,
     this.inverseTemperature = 1.0,
     this.stickiness,
+    this.choiceKernel,
+    this.choiceKernelRate,
     this.lapse,
     this.bias,
   });
@@ -661,6 +696,8 @@ final class SoftmaxReadout extends ResponseModel {
     NodeField field = NodeField.expectedMean,
     double inverseTemperature = 1.0,
     double? stickiness,
+    double? choiceKernel,
+    double? choiceKernelRate,
     double? lapse,
     List<double>? bias,
   }) : this(
@@ -670,6 +707,8 @@ final class SoftmaxReadout extends ResponseModel {
          field: field,
          inverseTemperature: inverseTemperature,
          stickiness: stickiness,
+         choiceKernel: choiceKernel,
+         choiceKernelRate: choiceKernelRate,
          lapse: lapse,
          bias: bias,
        );
@@ -687,19 +726,29 @@ final class SoftmaxReadout extends ResponseModel {
   /// Default stickiness `κ`, or null for none.
   final double? stickiness;
 
+  /// Default choice-kernel weight `φ`, or null for no choice kernel.
+  final double? choiceKernel;
+
+  /// Default choice-kernel rate `α` (set with [choiceKernel]).
+  final double? choiceKernelRate;
+
   /// Default lapse rate `ε`, or null for none.
   final double? lapse;
 
   /// Default per-option biases (one per option), or null for none.
   final List<double>? bias;
 
-  int get _iLapse => stickiness == null ? 1 : 2;
+  bool get _kernel => choiceKernel != null;
+  int get _iKernel => stickiness == null ? 1 : 2;
+  int get _iLapse => _iKernel + (_kernel ? 2 : 0);
   int get _iBias => _iLapse + (lapse == null ? 0 : 1);
 
   @override
   Map<String, double> get parameters => {
     'inverseTemperature': inverseTemperature,
     'stickiness': ?stickiness,
+    'choiceKernel': ?choiceKernel,
+    'choiceKernelRate': ?choiceKernelRate,
     'lapse': ?lapse,
     if (bias case final b?)
       for (var k = 0; k < b.length; k++) 'bias_$k': b[k],
@@ -707,6 +756,31 @@ final class SoftmaxReadout extends ResponseModel {
 
   @override
   bool get readsPreviousResponse => stickiness != null;
+
+  /// The trace `cₖ`, then `∂cₖ/∂α` (for the gradient).
+  @override
+  int get stateSize => _kernel ? 2 * options.length : 0;
+
+  @override
+  void advanceState(
+    Float64List state,
+    int stateAt,
+    double response,
+    Float64List params,
+    int offset,
+  ) {
+    if (!_kernel || response.isNaN) return;
+    final r = _choice(response);
+    final rate = params[offset + _iKernel + 1];
+    final n = options.length;
+    for (var k = 0; k < n; k++) {
+      final c = state[stateAt + k];
+      final e = (k == r ? 1.0 : 0.0) - c;
+      // ∂c′/∂α = (1 − α) ∂c/∂α + ([k = r] − c).
+      state[stateAt + n + k] = (1 - rate) * state[stateAt + n + k] + e;
+      state[stateAt + k] = c + rate * e;
+    }
+  }
 
   @override
   Map<String, Object?> toJson() => {
@@ -721,6 +795,8 @@ final class SoftmaxReadout extends ResponseModel {
     'field': field.pyhgfName,
     'inverseTemperature': jsonDouble(inverseTemperature),
     if (stickiness case final k?) 'stickiness': jsonDouble(k),
+    if (choiceKernel case final k?) 'choiceKernel': jsonDouble(k),
+    if (choiceKernelRate case final k?) 'choiceKernelRate': jsonDouble(k),
     if (lapse case final e?) 'lapse': jsonDouble(e),
     if (bias case final b?) 'bias': [for (final x in b) jsonDouble(x)],
   };
@@ -732,6 +808,11 @@ final class SoftmaxReadout extends ResponseModel {
     }
     if (bias case final b? when b.length != options.length) {
       throw ArgumentError.value(b, 'bias', 'Needs one per option');
+    }
+    if ((choiceKernel == null) != (choiceKernelRate == null)) {
+      throw ArgumentError(
+        'choiceKernel and choiceKernelRate: set both or neither',
+      );
     }
     for (final o in options) {
       for (final n in o.keys) {
@@ -748,7 +829,17 @@ final class SoftmaxReadout extends ResponseModel {
     return v;
   }
 
-  /// `uₖ = β vₖ + bₖ + κ [k = previous]`.
+  Float64List _state(Float64List? state) {
+    if (state == null) {
+      throw StateError(
+        'SoftmaxReadout with a choice kernel needs its carried state '
+        '(stateSize values per element)',
+      );
+    }
+    return state;
+  }
+
+  /// `uₖ = β vₖ + bₖ + κ [k = previous] + φ cₖ`.
   double _utility(
     BatchNetwork network,
     int element,
@@ -756,10 +847,15 @@ final class SoftmaxReadout extends ResponseModel {
     double previous,
     Float64List params,
     int offset,
+    Float64List? state,
+    int stateAt,
   ) {
     var u = params[offset] * _value(network, element, k);
     if (bias != null) u += params[offset + _iBias + k];
     if (stickiness != null && previous == k) u += params[offset + 1];
+    if (_kernel) {
+      u += params[offset + _iKernel] * _state(state)[stateAt + k];
+    }
     return u;
   }
 
@@ -770,17 +866,38 @@ final class SoftmaxReadout extends ResponseModel {
     double previous,
     Float64List params,
     int offset,
+    Float64List? state,
+    int stateAt,
   ) {
     var top = double.negativeInfinity;
     for (var k = 0; k < options.length; k++) {
-      final z = _utility(network, element, k, previous, params, offset);
+      final z = _utility(
+        network,
+        element,
+        k,
+        previous,
+        params,
+        offset,
+        state,
+        stateAt,
+      );
       if (z > top) top = z;
     }
     if (!top.isFinite) return top;
     var sum = 0.0;
     for (var k = 0; k < options.length; k++) {
       sum += math.exp(
-        _utility(network, element, k, previous, params, offset) - top,
+        _utility(
+              network,
+              element,
+              k,
+              previous,
+              params,
+              offset,
+              state,
+              stateAt,
+            ) -
+            top,
       );
     }
     return top + math.log(sum);
@@ -827,12 +944,31 @@ final class SoftmaxReadout extends ResponseModel {
     double response,
     double previous,
     Float64List params,
-    int offset,
-  ) {
+    int offset, {
+    Float64List? state,
+    int stateAt = 0,
+  }) {
     if (response.isNaN) return 0.0;
     final r = _choice(response);
-    final z = _logNormaliser(network, element, previous, params, offset);
-    final ur = _utility(network, element, r, previous, params, offset);
+    final z = _logNormaliser(
+      network,
+      element,
+      previous,
+      params,
+      offset,
+      state,
+      stateAt,
+    );
+    final ur = _utility(
+      network,
+      element,
+      r,
+      previous,
+      params,
+      offset,
+      state,
+      stateAt,
+    );
     return _nanToInf(_nll(ur - z, params, offset));
   }
 
@@ -868,18 +1004,39 @@ final class SoftmaxReadout extends ResponseModel {
     double previous,
     Float64List params,
     int offset,
-    ResponsePartials partials,
-  ) {
+    ResponsePartials partials, {
+    Float64List? state,
+    int stateAt = 0,
+  }) {
     if (response.isNaN) return 0.0;
     final beta = params[offset];
     final r = _choice(response);
-    final z = _logNormaliser(network, element, previous, params, offset);
-    final logq = _utility(network, element, r, previous, params, offset) - z;
+    final z = _logNormaliser(
+      network,
+      element,
+      previous,
+      params,
+      offset,
+      state,
+      stateAt,
+    );
+    final logq =
+        _utility(
+          network,
+          element,
+          r,
+          previous,
+          params,
+          offset,
+          state,
+          stateAt,
+        ) -
+        z;
     final s = _nll(logq, params, offset);
     // S = −log p_r, p_r = (1 − ε) q_r + ε / K, q = softmax(u):
     // ∂S/∂uₖ = w (qₖ − [k = r]) with w = (1 − ε) q_r / p_r (1 without a
-    // lapse), ∂S/∂ε = (q_r − 1/K) / p_r; uₖ = β vₖ + bₖ + κ [k = prev], each
-    // vₖ linear in the beliefs.
+    // lapse), ∂S/∂ε = (q_r − 1/K) / p_r; uₖ = β vₖ + bₖ + κ [k = prev] +
+    // φ cₖ, each vₖ linear in the beliefs, cₖ depending on α alone.
     var w = 1.0;
     if (lapse != null) {
       final eps = params[offset + _iLapse];
@@ -887,11 +1044,23 @@ final class SoftmaxReadout extends ResponseModel {
       w = (1 - eps) * qr * pInv;
       partials.addParameter(_iLapse, (qr - 1 / options.length) * pInv);
     }
-    var dBeta = 0.0;
-    for (var k = 0; k < options.length; k++) {
+    final n = options.length;
+    final phi = _kernel ? params[offset + _iKernel] : 0.0;
+    var dBeta = 0.0, dPhi = 0.0, dRate = 0.0;
+    for (var k = 0; k < n; k++) {
       final v = _value(network, element, k);
       final q = math.exp(
-        _utility(network, element, k, previous, params, offset) - z,
+        _utility(
+              network,
+              element,
+              k,
+              previous,
+              params,
+              offset,
+              state,
+              stateAt,
+            ) -
+            z,
       );
       final du = w * (q - (k == r ? 1.0 : 0.0));
       dBeta += du * v;
@@ -901,8 +1070,16 @@ final class SoftmaxReadout extends ResponseModel {
       }
       if (bias != null) partials.addParameter(_iBias + k, du);
       if (stickiness != null && previous == k) partials.addParameter(1, du);
+      if (_kernel) {
+        dPhi += du * state![stateAt + k];
+        dRate += du * phi * state[stateAt + n + k];
+      }
     }
     partials.addParameter(0, dBeta);
+    if (_kernel) {
+      partials.addParameter(_iKernel, dPhi);
+      partials.addParameter(_iKernel + 1, dRate);
+    }
     return _nanToInf(s);
   }
 
@@ -924,16 +1101,36 @@ final class SoftmaxReadout extends ResponseModel {
     double previous,
     Float64List params,
     int offset,
-    math.Random rng,
-  ) {
-    final z = _logNormaliser(network, element, previous, params, offset);
+    math.Random rng, {
+    Float64List? state,
+    int stateAt = 0,
+  }) {
+    final z = _logNormaliser(
+      network,
+      element,
+      previous,
+      params,
+      offset,
+      state,
+      stateAt,
+    );
     if (!z.isFinite) return double.nan;
     final eps = lapse == null ? 0.0 : params[offset + _iLapse];
     final n = options.length;
     var u = rng.nextDouble();
     for (var k = 0; k < n - 1; k++) {
       final q = math.exp(
-        _utility(network, element, k, previous, params, offset) - z,
+        _utility(
+              network,
+              element,
+              k,
+              previous,
+              params,
+              offset,
+              state,
+              stateAt,
+            ) -
+            z,
       );
       u -= (1 - eps) * q + eps / n;
       if (u < 0) return k.toDouble();

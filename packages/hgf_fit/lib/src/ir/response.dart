@@ -20,6 +20,8 @@ GpuResponse irResponseOf(ResponseModel response) => switch (response) {
     :final field,
     :final inverseTemperature,
     :final stickiness,
+    :final choiceKernel,
+    :final choiceKernelRate,
     :final lapse,
     :final bias,
   ) =>
@@ -28,6 +30,8 @@ GpuResponse irResponseOf(ResponseModel response) => switch (response) {
       field: field,
       inverseTemperature: inverseTemperature,
       stickiness: stickiness,
+      choiceKernel: choiceKernel,
+      choiceKernelRate: choiceKernelRate,
       lapse: lapse,
       bias: bias,
     ),

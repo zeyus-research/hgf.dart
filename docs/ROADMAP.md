@@ -1352,11 +1352,12 @@ rest is the sampler's own host work per chain and leapfrog step.
     wgpu-native (Apple M3 Pro through Metal: measured 2026-11-12, see
     "macOS / Apple silicon");
   - Firefox and Safari WebGPU.
-- [~] CI: run `test/gpu_parity_test.dart` on SwiftShader (2026-11-18:
+- [x] CI: run `test/gpu_parity_test.dart` on SwiftShader (2026-11-18:
   the `gpu-web` job; `CHROME_EXECUTABLE` overrides `chrome-gpu`'s
   `chromium`, since package:test keeps the parent platform's environment
   override). It fails if Chrome offers no adapter (the tests would skip).
-  `continue-on-error` until it has passed on a runner once.
+  Both GPU jobs (`gpu-web` on SwiftShader, `gpu-native` on lavapipe) pass
+  on the runners and block CI since 2026-11-23 (no `continue-on-error`).
 - [ ] Tuning not tried yet: the workgroup size (64 is used), the memory
   layout at very large B, and a kernel variant whose state is in
   registers only, without a store between dispatches.
@@ -2684,6 +2685,64 @@ fitting, export) reads it.
 In parallel (not blocking): dp-state on the GPU (ef-state and
 categorical run there since 2026-11-18), a faster dp candidate search.
 
+#### Choice kernel (2026-11-23): done
+
+- **`SoftmaxReadout.choiceKernel` / `choiceKernelRate`** (φ, α; set both
+  or neither): a decaying trace of past choices (Wilson & Collins 2019),
+  `uₖ += φ cₖ`, `cₖ` from 0 and `cₖ ← cₖ + α ([k = r] − cₖ)` after each
+  response (held after a miss). `α = 1` is one-back stickiness (same
+  likelihood, tested). Parameters in the order `inverseTemperature`,
+  `stickiness`, `choiceKernel`, `choiceKernelRate`, `lapse`, `bias_k`.
+- **Carried response state.** `ResponseModel.stateSize` /
+  `advanceState`, and `state`/`stateAt` on the `…After` methods: the
+  callers (the bound response of every fit pass, `simulate`,
+  `simulateChoices`, coupled simulation) keep it per element. Softmax
+  carries `c` and `∂c/∂α`, so the forward-mode gradient stays exact
+  without the generic tangent machinery (c depends on α and the data
+  alone).
+- **IR / GPU:** the trace lives in response slots `ckₖ` (before the
+  response parameters, initial 0), written at the end of the response
+  block, so forward tangents, reverse mode, exact Hessians, the CPU IR
+  evaluator and every GPU kernel (also split over dispatches) get it
+  without special cases. GPU vs f64: value 3e-7, gradient 4e-7.
+- `FitCodec`, the Dart export, the pyhgf export (`softmax_surprise(…,
+  choice_kernel=, choice_kernel_rate=)`, a `lax.scan`), default priors in
+  the document (`N(φ, 2²)`, rate truncated to [0, 1]), and the builder's
+  readout inspector (the rate appears once φ is set).
+- Tests: a fit case (IGT, φ and α free, a missed choice) through the CPU
+  gradients, reverse mode, Hessians, GPU fit tests and both exports;
+  `α = 1` gives stickiness's likelihood; φ > 0 raises the repeat rate,
+  φ < 0 lowers it.
+
+#### Python export: empirical Bayes and MAP restarts (2026-11-23): done
+
+- **Grouped MAP** (pooled parameters only) no longer falls back to NUTS:
+  the script runs hgf_fit's `fitEmpiricalBayes` in Python. Each
+  participant's MAP under the parameters' own priors (`build_model(…,
+  pool=False)`) gives the starting populations; then, per iteration, each
+  participant's mode under fixed populations (`build_model(…,
+  populations=…)`, the population mean and sd as PyTensor shared
+  variables, so nothing recompiles), with the Laplace covariance from
+  central differences of the gradient (Jacobian included, as hgf.dart),
+  and the M-step and summed Laplace evidence as in Dart (tolerance 1e-4,
+  sd ≥ 1e-3). Group rows are `_typical` / `_spread` without intervals,
+  as `ParticipantEstimates.fromEmpiricalBayes`. With shared parameters it
+  still samples (hgf.dart's EB has none either). Test: 3 participants ×
+  400 steps match hgf_fit's EB (estimates 1e-3, intervals 1e-2,
+  population mean and sd 1e-3). On 80 steps both drift along a flat
+  ridge in ω for ~190 iterations (log evidence agrees to 1e-3).
+- **MAP restarts:** the document script's MAP (`optimise`: scipy
+  L-BFGS-B on PyMC's compiled log density, compiled once per model)
+  starts from the starting values and `RESTARTS` draws from the priors
+  (`SEED`), keeping the best, as `fitMap(restarts:)`. The single-model
+  script does the same around `pm.find_MAP`. Not the same draws as
+  Dart's `Random`, so only the optimum is comparable.
+- Found: calling `compile_logp` per optimisation made an EM iteration take
+  seconds (minutes over a fit); cached, an iteration takes ~20 ms on 3
+  participants.
+- Left: transforms printed as pandas (the script's own `Transforms` class
+  works and matches hgf.dart; pandas would only be cosmetic).
+
 #### Builder: performance and usability (2026-11-18): done
 
 Four reports from use: dragging a node feels slow in a browser; the
@@ -3175,8 +3234,8 @@ list).
   Hessians, the GPU fit tests and both exports; simulated choices show
   the repeat rate rising with `κ > 0` and falling with `κ < 0`, a large "pass" bias
   passing, and a lapse of 1 choosing uniformly.
-- Left for later: a decaying choice trace (choice kernel, Wilson &
-  Collins 2019) instead of one-back stickiness, which needs carried
+- ~~Left for later: a decaying choice trace (choice kernel, Wilson &
+  Collins 2019)~~ (done 2026-11-23, see "Choice kernel") instead of one-back stickiness, which needs carried
   state; the playground presets don't expose the new terms yet (the
   builder's readout node will).
 
@@ -3420,9 +3479,10 @@ list).
   ([P7](upstream/README.md#p7)); the Python tests put it first.
 - Left for later: generated data for inputs that read transforms (the
   simulated CSV then holds the derived column, and the script's transform
-  would clash with it), Laplace intervals for pooled parameters under MAP
+  would clash with it), ~~Laplace intervals for pooled parameters under MAP
   in Python (it samples instead), MAP restarts in the Python export (PyMC
-  starts from the initial values only).
+  starts from the initial values only)~~ (both done 2026-11-23, see
+  "Python export: empirical Bayes and MAP restarts").
 
 #### Relative bindings (2026-11-17): done
 
@@ -3776,7 +3836,10 @@ ef preset that can be fitted. 2026-11-19: dp-state runs on the GPU too
 (one cooperative workgroup per element sharing the candidate search), so
 every node kind has a kernel and the playground's dp fits run there.
 Phase 7b's open items: sampler ensembles on worker isolates, tuning, and
-hardware coverage.
+hardware coverage. 2026-11-23: both GPU CI jobs block; `SoftmaxReadout` has a decaying
+choice kernel (carried response state, CPU/IR/GPU/exports/builder); the
+Python export fits pooled groups under MAP by empirical Bayes and restarts
+MAP from prior draws.
 
 ```sh
 cd hgf.dart

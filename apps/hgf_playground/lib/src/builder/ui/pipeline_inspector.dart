@@ -1380,6 +1380,25 @@ class _ResponsePanel extends StatelessWidget {
         return [
           number('inverseTemperature', 'β (inverse temperature)'),
           number('stickiness', 'Stickiness κ (empty: none)', optional: true),
+          // The choice kernel's weight and rate come and go together.
+          NumberField(
+            key: ValueKey('choiceKernel ${ro['choiceKernel']}'),
+            label: 'Choice kernel φ (empty: none)',
+            value: ro['choiceKernel'] == null ? null : num_('choiceKernel', 0),
+            onSubmitted: (v) => _set(
+              readout: v == null
+                  ? ({...ro}
+                      ..remove('choiceKernel')
+                      ..remove('choiceKernelRate'))
+                  : {
+                      ...ro,
+                      'choiceKernel': v,
+                      'choiceKernelRate': ro['choiceKernelRate'] ?? 0.3,
+                    },
+            ),
+          ),
+          if (ro['choiceKernel'] != null)
+            number('choiceKernelRate', 'Choice-kernel rate α (0–1)'),
           number('lapse', 'Lapse ε (empty: none)', optional: true),
           const SizedBox(height: 8),
           for (final (j, terms) in opts.indexed)

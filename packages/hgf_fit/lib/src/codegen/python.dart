@@ -429,7 +429,7 @@ final class PythonExport {
         'data)',
       )
       ..writeln()
-      ..writeln('    with pm.Model():')
+      ..writeln('    with pm.Model() as model:')
       ..writeln('        values = [');
     for (final p in params) {
       b.writeln(
@@ -442,7 +442,45 @@ final class PythonExport {
     switch (fit) {
       case ExportMap():
         b
-          ..writeln('        estimate = pm.find_MAP()')
+          ..writeln(
+            '        # From the starting values and ${fit.restarts} more starts '
+            'drawn from the',
+          )
+          ..writeln('        # priors; the best run is kept.')
+          ..writeln(
+            '        from pymc.initial_point import make_initial_point_fn',
+          )
+          ..writeln()
+          ..writeln('        point_logp = model.compile_logp(jacobian=False)')
+          ..writeln()
+          ..writeln('        def logp(point):')
+          ..writeln(
+            '            return float(point_logp({v.name: point[v.name] for v in '
+            'model.value_vars}))',
+          )
+          ..writeln()
+          ..writeln('        rng = np.random.default_rng(${fit.seed})')
+          ..writeln('        estimate = pm.find_MAP(progressbar=False)')
+          ..writeln('        for _ in range(${fit.restarts}):')
+          ..writeln(
+            '            draws = pm.draw(model.free_RVs, random_seed=rng)',
+          )
+          ..writeln('            start = make_initial_point_fn(')
+          ..writeln('                model=model,')
+          ..writeln(
+            '                overrides={rv.name: d for rv, d in '
+            'zip(model.free_RVs, draws)},',
+          )
+          ..writeln('                jitter_rvs=set(),')
+          ..writeln('            )(0)')
+          ..writeln(
+            '            run = pm.find_MAP(initvals=start, progressbar=False)',
+          )
+          ..writeln(
+            '            if logp(run) > logp(estimate) or not '
+            'np.isfinite(logp(estimate)):',
+          )
+          ..writeln('                estimate = run')
           ..writeln('    for name in names:')
           ..writeln('        print(f"{name} = {float(estimate[name]):.6g}")');
       case ExportNuts():
@@ -498,6 +536,10 @@ final class PythonExport {
         ];
         final extra = [
           if (j['stickiness'] != null) 'stickiness=${values['stickiness']}',
+          if (j['choiceKernel'] != null) ...[
+            'choice_kernel=${values['choiceKernel']}',
+            'choice_kernel_rate=${values['choiceKernelRate']}',
+          ],
           if (j['lapse'] != null) 'lapse=${values['lapse']}',
           if (j['bias'] != null)
             'bias=[${[for (var k = 0; k < options.length; k++) values['bias_$k']].join(', ')}]',
@@ -877,12 +919,23 @@ def categorical_softmax_surprise(net, responses, node, beta):
 
 
 def softmax_surprise(
-    net, responses, options, field, beta, stickiness=None, lapse=None, bias=None
+    net,
+    responses,
+    options,
+    field,
+    beta,
+    stickiness=None,
+    lapse=None,
+    bias=None,
+    choice_kernel=None,
+    choice_kernel_rate=None,
 ):
     """Option k chosen with probability ∝ exp(uₖ), uₖ = β vₖ + biasₖ +
-    stickiness · [k = previous response], vₖ = Σ weight · belief over its
-    nodes; with a lapse ε, (1 − ε) softmax(u)ₖ + ε / K (hgf_fit's
-    SoftmaxReadout)."""
+    stickiness · [k = previous response] + choice_kernel · cₖ, vₖ = Σ
+    weight · belief over its nodes, cₖ a trace of past choices (from 0,
+    cₖ += choice_kernel_rate · ([k = response] − cₖ) after each response,
+    held after a missed one); with a lapse ε, (1 − ε) softmax(u)ₖ + ε / K
+    (hgf_fit's SoftmaxReadout)."""
     zero = jnp.zeros(responses.shape[0])
     values = jnp.stack(
         [
@@ -900,6 +953,19 @@ def softmax_surprise(
     if stickiness is not None:
         prev = jnp.concatenate([jnp.full(1, jnp.nan), responses[:-1]])
         u = u + stickiness * (prev[:, None] == jnp.arange(len(options)))
+    if choice_kernel is not None:
+        hits = (responses[:, None] == jnp.arange(len(options))).astype(u.dtype)
+
+        def kernel_step(c, x):
+            hit, seen = x
+            return jnp.where(seen, c + choice_kernel_rate * (hit - c), c), c
+
+        _, trace = jax.lax.scan(
+            kernel_step,
+            jnp.zeros(len(options), u.dtype),
+            (hits, ~jnp.isnan(responses)),
+        )
+        u = u + choice_kernel * trace
     logp = jax.nn.log_softmax(u, axis=1)
     if lapse is not None:
         logp = jnp.logaddexp(
