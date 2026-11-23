@@ -1,4 +1,4 @@
-## Unreleased
+## 0.1.0
 
 - Zoom and pan on the time axis: `PlotViewport`, a visible x window shared
   by linked `TrajectoryPlot`s (`viewport:`), as `hover` is. Ctrl/⌘ +

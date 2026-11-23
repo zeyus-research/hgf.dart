@@ -1,4 +1,4 @@
-## Unreleased
+## 0.1.0
 
 - `checkLearningRequest` (and `sweepsReachTop`) are public, so hgf_gpu
   checks learning calls as `DeepNetwork` does.

@@ -1,0 +1,235 @@
+name: Release
+
+# Started by pushing a `<package>-v<version>` tag (tool/release_tags.sh):
+#
+#   parse ─┬→ CI passed on this commit → pub.dev (unless publish_to: none)
+#          │                               └→ GitHub release (CHANGELOG section)
+#          └→ app builds (apps/ only) ──────────────┴→ attached to the release
+#
+# The tag's commit must pass CI (ci.yml, which also runs on the tag push).
+# Tags whose version doesn't match the pubspec, or whose CHANGELOG has no
+# section for it, fail in `parse`.
+
+on:
+  push:
+    tags: [ '*-v[0-9]*' ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.parse.outputs.package }}
+      version: ${{ steps.parse.outputs.version }}
+      path: ${{ steps.parse.outputs.path }}
+      is_app: ${{ steps.parse.outputs.is_app }}
+      publishable: ${{ steps.parse.outputs.publishable }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Parse and check tag
+        id: parse
+        run: .github/scripts/parse_release_tag.sh "${{ github.ref_name }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Releasing \`${{ steps.parse.outputs.package }}\` ${{ steps.parse.outputs.version }}"
+            echo ""
+            echo "- Path: \`${{ steps.parse.outputs.path }}\`"
+            echo "- Publish to pub.dev: ${{ steps.parse.outputs.publishable }}"
+            echo "- App builds: ${{ steps.parse.outputs.is_app }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # CI runs on every push, the tag's included, so a CI run of this commit
+  # either passed already (on main) or is running now: wait for it.
+  ci:
+    needs: parse
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for a passed CI run of this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNS_URL: repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${{ github.sha }}&per_page=50
+        run: |
+          # Up to 90 minutes (the GPU job alone may take 45).
+          for _ in $(seq 90); do
+            RUNS="$(gh api "$RUNS_URL" --jq '[.workflow_runs[] | {status, conclusion}]')"
+            if [ "$(echo "$RUNS" | jq 'any(.[]; .conclusion == "success")')" = "true" ]; then
+              echo "CI passed on ${{ github.sha }}." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            if [ "$(echo "$RUNS" | jq 'length > 0 and all(.[]; .status == "completed")')" = "true" ]; then
+              echo "::error::CI did not pass on ${{ github.sha }}; fix it and re-tag (or re-run CI, then this workflow)."
+              exit 1
+            fi
+            sleep 60
+          done
+          echo "::error::No passed CI run of ${{ github.sha }} within 90 minutes."
+          exit 1
+
+  # Builds run alongside the CI wait but are only attached once it passed.
+  build-app:
+    needs: parse
+    if: needs.parse.outputs.is_app == 'true'
+    uses: ./.github/workflows/build-app.yml
+    with:
+      app: ${{ needs.parse.outputs.package }}
+      version: ${{ needs.parse.outputs.version }}
+    secrets: inherit
+
+  pub-publish:
+    needs: [parse, ci]
+    if: needs.parse.outputs.publishable == 'true'
+    runs-on: ubuntu-latest
+    # Optional protection: pub.dev can require this environment, and GitHub can
+    # require a reviewer for it (Settings → Environments → pub.dev).
+    environment: pub.dev
+    permissions:
+      contents: read
+      id-token: write # pub.dev automated publishing (OIDC)
+    steps:
+      # A version uploaded by hand (a package's first must be, as pub.dev
+      # only enables automated publishing for existing packages) or by an
+      # earlier attempt is not published again; its tag still gets a release.
+      - name: Check pub.dev for this version
+        id: pubdev
+        env:
+          PACKAGE: ${{ needs.parse.outputs.package }}
+          VERSION: ${{ needs.parse.outputs.version }}
+        run: |
+          STATUS="$(curl -s -o /dev/null -w '%{http_code}' "https://pub.dev/api/packages/$PACKAGE/versions/$VERSION")"
+          case "$STATUS" in
+            200)
+              echo "::notice::$PACKAGE $VERSION is already on pub.dev; not publishing it again."
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::pub.dev answered HTTP $STATUS for $PACKAGE $VERSION"
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/checkout@v7
+        if: steps.pubdev.outputs.published != 'true'
+
+      # The workspace includes Flutter packages, so it resolves with Flutter.
+      - uses: subosito/flutter-action@v2
+        if: steps.pubdev.outputs.published != 'true'
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        if: steps.pubdev.outputs.published != 'true'
+        run: flutter pub get
+
+      # Tags of a release train are pushed together; a package whose
+      # workspace dependency is released with it waits until that one is up.
+      - name: Wait for workspace dependencies on pub.dev
+        if: steps.pubdev.outputs.published != 'true'
+        run: .github/scripts/wait_workspace_deps.sh "${{ needs.parse.outputs.package }}"
+
+      # As dart-lang/setup-dart's publish workflow does; that workflow can't
+      # be used, as the workspace needs Flutter to resolve.
+      - name: Get pub.dev token
+        if: steps.pubdev.outputs.published != 'true'
+        run: |
+          TOKEN="$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://pub.dev" | jq -r '.value')"
+          echo "::add-mask::$TOKEN"
+          echo "PUB_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          dart pub token add https://pub.dev --env-var PUB_TOKEN
+
+      # `flutter pub publish` handles pure Dart and Flutter (hgf_widgets)
+      # packages alike.
+      - name: Dry run
+        if: steps.pubdev.outputs.published != 'true'
+        working-directory: ${{ needs.parse.outputs.path }}
+        run: flutter pub publish --dry-run
+
+      - name: Publish
+        if: steps.pubdev.outputs.published != 'true'
+        working-directory: ${{ needs.parse.outputs.path }}
+        run: flutter pub publish --force
+
+  github-release:
+    needs: [parse, ci, pub-publish]
+    # pub-publish is skipped for publish_to: none packages; that's fine, a
+    # failure isn't.
+    if: >-
+      !cancelled()
+      && needs.parse.result == 'success'
+      && needs.ci.result == 'success'
+      && (needs.pub-publish.result == 'success' || needs.pub-publish.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Release notes from CHANGELOG
+        env:
+          PACKAGE: ${{ needs.parse.outputs.package }}
+          VERSION: ${{ needs.parse.outputs.version }}
+          PKG_PATH: ${{ needs.parse.outputs.path }}
+          PUBLISHABLE: ${{ needs.parse.outputs.publishable }}
+        run: |
+          {
+            .github/scripts/changelog_section.sh "$PKG_PATH/CHANGELOG.md" "$VERSION"
+            echo ""
+            if [ "$PUBLISHABLE" = "true" ]; then
+              echo "Published on pub.dev: https://pub.dev/packages/$PACKAGE/versions/$VERSION"
+              echo ""
+            fi
+            echo "Full changelog: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/$PKG_PATH/CHANGELOG.md"
+          } > release_notes.md
+          cat release_notes.md
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ needs.parse.outputs.package }} ${{ needs.parse.outputs.version }}
+          body_path: release_notes.md
+          prerelease: ${{ needs.parse.outputs.prerelease == 'true' }}
+
+  app-assets:
+    needs: [parse, github-release, build-app]
+    if: >-
+      !cancelled()
+      && needs.parse.outputs.is_app == 'true'
+      && needs.github-release.result == 'success'
+      && needs.build-app.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download builds
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ${{ needs.parse.outputs.package }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Attach builds to the GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.apk
+          fail_on_unmatched_files: true

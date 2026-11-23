@@ -79,6 +79,35 @@ melos run bench:playground-fit   # its fitting view: times, frames, recovery
 Fixtures and benchmarks expect a pyhgf checkout next to this repository
 (`../pyhgf`). See [tool/parity/README.md](tool/parity/README.md).
 
+### Releasing
+
+Each package is released by its own `<package>-v<version>` tag, which starts
+[release.yml](.github/workflows/release.yml): it waits for CI to pass on the
+tagged commit, publishes to pub.dev (packages without `publish_to: none`),
+then creates a GitHub release from the version's CHANGELOG section. An app's
+tag (`hgf_playground-v1.0.0`) builds it for Linux, Windows, macOS, Android
+(APKs per ABI) and the web (zipped Wasm build) and attaches the builds to its
+release; [build-app.yml](.github/workflows/build-app.yml) can also be run by
+hand to try them. APKs are signed with the debug key unless the
+`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and
+`ANDROID_KEY_PASSWORD` secrets are set. The Pages site is still deployed from
+main by pages.yml.
+
+1. Bump `version:` in the pubspec (and dependents' constraints) and rename the
+   CHANGELOG's `## Unreleased` heading to the version. Commit and push to main.
+2. `melos run release:tag` tags every publishable package and app whose
+   version isn't tagged yet. `tool/release_tags.sh --push` tags and pushes them one at a
+   time, since GitHub
+   starts no workflows for a push of more than three tags. Packages wait on
+   pub.dev for the workspace packages they depend on.
+
+pub.dev publishes through GitHub's OIDC, so a package's first version must be
+uploaded by hand (`flutter pub publish`). After that, enable automated
+publishing on its pub.dev admin page: repository `zeyus-research/hgf.dart`,
+tag pattern `<package>-v{{version}}`, and optionally the `pub.dev`
+environment. Pushing the tag of a version that is already on pub.dev just
+creates the GitHub release.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

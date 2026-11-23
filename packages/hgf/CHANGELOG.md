@@ -1,4 +1,4 @@
-## Unreleased
+## 0.1.0
 
 - `DpProposals` (with `dpProposalCount`, `dpCandidatesKept`) is exported,
   its derived columns (`sigma2`, `logNorm`, `selfDensity`, `spread`)

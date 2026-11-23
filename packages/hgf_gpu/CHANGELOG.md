@@ -1,4 +1,4 @@
-## Unreleased
+## 0.1.0
 
 - dp-state nodes in the kernels (`HgfKernel`, `FitKernel`, so `GpuFitter`
   runs `DpSurprise` fits on the GPU; Nelder–Mead, as the likelihood has no

@@ -1,13 +1,9 @@
 name: hgf_deep
-description: >-
-  Deep HGF networks (layers of volatile, binary and categorical nodes with
-  learned weights) in pure Dart: a port of pyhgf's vectorised DeepNetwork,
-  numerically checked against it.
-version: 0.1.0-dev.1
-publish_to: none
+description: Deep HGF networks. Port of pyhgf's vectorised DeepNetwork
+version: 0.1.0
 homepage: https://zeyus.com/
-repository: https://github.com/NexusDynamic/hgf.dart
-issue_tracker: https://github.com/NexusDynamic/hgf.dart/issues
+repository: https://github.com/zeyus-research/hgf.dart
+issue_tracker: https://github.com/zeyus-research/hgf.dart/issues
 
 resolution: workspace
 
@@ -15,7 +11,7 @@ environment:
   sdk: ^3.10.0
 
 dependencies:
-  hgf: ^0.1.0-dev.1
+  hgf: ^0.1.0
 
 dev_dependencies:
   lints: ^6.0.0

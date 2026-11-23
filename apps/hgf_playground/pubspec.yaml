@@ -3,7 +3,7 @@ description: >-
   An interactive playground for Hierarchical Gaussian Filters: build a network,
   move its parameters and watch the beliefs re-filter live.
 publish_to: 'none'
-version: 0.1.0+1
+version: 1.0.0+0
 
 resolution: workspace
 
@@ -15,11 +15,11 @@ dependencies:
   file_picker: ^13.3.2
   flutter:
     sdk: flutter
-  hgf: ^0.1.0-dev.1
-  hgf_deep: ^0.1.0-dev.1
-  hgf_fit: ^0.1.0-dev.1
-  hgf_gpu: ^0.1.0-dev.1
-  hgf_widgets: ^0.1.0-dev.1
+  hgf: ^0.1.0
+  hgf_deep: ^0.1.0
+  hgf_fit: ^0.1.0
+  hgf_gpu: ^0.1.0
+  hgf_widgets: ^0.1.0
   material_ui: ^1.11.0
   meta: ^1.16.0
   saf_stream: ^4.0.3

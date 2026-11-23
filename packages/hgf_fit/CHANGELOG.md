@@ -1,4 +1,4 @@
-## Unreleased
+## 0.1.0
 
 - Continuous deep networks' wiring: `DocDeep.valueChildOf`,
   `volatilityChildOf` and `parentOf` resolve hgf_deep's default children;

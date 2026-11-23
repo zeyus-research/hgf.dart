@@ -467,7 +467,7 @@ final class DartExport {
         '// Run it in a Dart package that depends on hgf'
         '${model == null ? '' : ' and hgf_fit'}',
       )
-      ..writeln('// (https://github.com/NexusDynamic/hgf.dart):')
+      ..writeln('// (https://github.com/zeyus-research/hgf.dart):')
       ..writeln('//')
       ..writeln(
         spec.dataFile != null

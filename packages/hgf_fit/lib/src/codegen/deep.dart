@@ -214,7 +214,7 @@ final class DeepDartExport {
       ..writeln(
         '// Run it in a Dart package that depends on hgf, hgf_deep and hgf_fit',
       )
-      ..writeln('// (https://github.com/NexusDynamic/hgf.dart):')
+      ..writeln('// (https://github.com/zeyus-research/hgf.dart):')
       ..writeln('//')
       ..writeln(
         dataFile == null
