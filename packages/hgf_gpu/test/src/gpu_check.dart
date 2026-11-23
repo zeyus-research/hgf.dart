@@ -75,6 +75,29 @@ typedef FixtureResult = ({
 /// error is absolute, a few ulp of ln Γ(Σα).
 const klTolerance = 1e-5;
 
+/// The most dp clusters a fixture may have on SwiftShader (Chrome's software
+/// WebGPU, CI's `gpu-web` job). Its compile time and memory grow
+/// exponentially with the cluster count in the cooperative dp kernel (whose
+/// workgroup barriers are what it chokes on: without them ten clusters
+/// compile in 2 s): 6 clusters 6 s, 8 clusters 59 s, 10 (pyhgf's default)
+/// past 5 GB and minutes, which loses the GPU process on a CI runner and
+/// fails every later test. Hardware WebGPU and wgpu-native are fine.
+const swiftShaderDpClusters = 6;
+
+/// A fixture's dp-state clusters (pyhgf's `batch_size`, default 10).
+int _dpClusters(Map<String, Object?> fixture) {
+  var most = 0;
+  final spec = fixture['spec']! as Map<String, Object?>;
+  for (final n
+      in (spec['nodes']! as List<Object?>).cast<Map<String, Object?>>()) {
+    if (n['kind'] != 'dp-state') continue;
+    final params = n['params'] as Map<String, Object?>? ?? const {};
+    final b = (params['batch_size'] as num?)?.toInt() ?? 10;
+    if (b > most) most = b;
+  }
+  return most;
+}
+
 Future<FixtureResult?> checkFixture(
   GpuBackend backend,
   Map<String, Object?> fixture,
@@ -118,6 +141,13 @@ Future<FixtureResult?> checkFixture(
   } on ArgumentError catch (e) {
     skipped[name] = '${e.message}'; // custom coupling names
     return null;
+  }
+  if (dp && backend.description.toLowerCase().contains('swiftshader')) {
+    final clusters = _dpClusters(fixture);
+    if (clusters > swiftShaderDpClusters) {
+      skipped[name] = 'SwiftShader: $clusters dp clusters';
+      return null;
+    }
   }
   final data = _flatten(fixture['inputs']);
   final cpu = BatchNetwork(net, _elements);

@@ -76,6 +76,7 @@ void main() {
       return;
     }
     final fitter = GpuFitter(backend!);
+    addTearDown(fitter.dispose);
     final failures = await checkFitCases(fitter, log: print);
     expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
     expect(failures, isEmpty, reason: failures.take(20).join('\n'));
@@ -92,9 +93,12 @@ void main() {
       gradientMode: GpuGradientMode.reverse,
       trialsPerDispatch: 37,
     );
+    addTearDown(fitter.dispose);
     // SwiftShader (CI) loses its GPU process compiling the categorical
     // cases' reverse sweeps (under any update; ROADMAP, "categorical-state
-    // on the GPU"); hardware WebGPU and the native suites run them.
+    // on the GPU") and the binary 3-level one (51 KiB: past 5 GB and
+    // minutes, where its forward kernel takes 170 ms); hardware WebGPU and
+    // the native suites run them.
     final swiftShader = backend!.description.toLowerCase().contains(
       'swiftshader',
     );
@@ -102,7 +106,10 @@ void main() {
     final failures = await checkFitCases(
       fitter,
       log: print,
-      skip: (name) => swiftShader && name.startsWith('categorical'),
+      skip: (name) =>
+          swiftShader &&
+          (name.startsWith('categorical') ||
+              name.startsWith('binary 3-level perceptual')),
     );
     expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);
     expect(failures, isEmpty, reason: failures.take(20).join('\n'));
@@ -114,6 +121,7 @@ void main() {
       return;
     }
     final fitter = GpuFitter(backend!, trialsPerDispatch: 37);
+    addTearDown(fitter.dispose);
     final err = await checkDpPasses(fitter, nTime: 60);
     print('dp passes: max error $err');
     expect(fitter.cpuPasses, 0, reason: fitter.fallbackReason);

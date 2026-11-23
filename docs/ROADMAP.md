@@ -1994,6 +1994,28 @@ IR (GPU kernels, CPU reverse mode, exact Hessians).
   categorical cases only when the adapter is SwiftShader. Still open, as
   under "ef-state on the GPU": what SwiftShader chokes on. Firefox wasn't
   installed to check.
+- **SwiftShader on CI (2026-11-23):** the `gpu-web` job never passed: the
+  GPU process died in the first test, at `dp_default`, and every later
+  test failed with "Instance dropped". Two causes, probed one kernel at a
+  time on Chromium 157 (2 cores, like a runner):
+  - The batch dp kernel's compile grows exponentially with the cluster
+    count (3: 1.6 s, 6: 5.8 s, 8: 59 s, 10 = pyhgf's default: past 5 GB,
+    never done). It's the cooperative part's workgroup barriers: without
+    `dpMax`/`dpFinish` ten clusters compile in 1.9 s. Not the fix: runtime
+    loop bounds, a select-free argmax, a loop over clusters, spilling
+    main's state to storage around the call. The browser parity test skips
+    dp fixtures over 6 clusters on SwiftShader.
+  - The binary 3-level fit case's reverse sweep (51 KiB, forward 170 ms)
+    behaves the same way; every other reverse sweep compiles in under 1 s
+    except ExprReadout gaussian's (68 s). Skipped on SwiftShader with the
+    categorical ones. Not an rlimit (all unlimited); not a codegen change
+    (the kernel is identical before eb255c3).
+  - Also fixed: `WebGpuBackend` kept every pipeline that ever had a bind
+    group in a set, so none was ever collected; buffers now track their
+    pipelines instead. The fit tests dispose their `GpuFitter`s. The native
+    backend never releases pipelines (no `wgpuComputePipelineRelease`).
+  Open: a dp kernel that keeps the barrier part out of the per-trial loop
+  (its own dispatch), if SwiftShader matters beyond CI.
 - **Speed** (`benchmark/bin/fit_ef_gpu.dart`, now with categorical
   cases; M3 Pro, 320 trials, two ω parameters, the CPU on one isolate in
   f64): three categories (8 nodes) at 2000 elements 437 → 2.5 ms per

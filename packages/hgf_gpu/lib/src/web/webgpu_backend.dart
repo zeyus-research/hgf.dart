@@ -127,6 +127,12 @@ final class _WebBuffer implements GpuBuffer {
   final _Buffer buffer;
   @override
   final int bytes;
+
+  /// The pipelines with cached bind groups on this buffer. Kept here rather
+  /// than in the backend so nothing but their owners holds pipelines:
+  /// WebGPU has no destroy() for them, they are freed when collected
+  /// (SwiftShader's compiled kernels otherwise pile up in the GPU process).
+  final users = <_WebPipeline>{};
 }
 
 final class _WebPipeline implements GpuPipeline {
@@ -349,9 +355,6 @@ final class WebGpuBackend implements GpuBackend {
     _counted();
   }
 
-  /// Pipelines with cached bind groups (to drop those of released buffers).
-  final _pipelines = <_WebPipeline>{};
-
   JSObject _bindGroup(_WebPipeline p, List<GpuBuffer?> bindings) {
     final ids = [for (final b in bindings) (b as _WebBuffer?)?.id ?? -1];
     final key = ids.join(',');
@@ -376,7 +379,9 @@ final class WebGpuBackend implements GpuBackend {
         ..setProperty('entries'.toJS, entries),
     );
     p.groups[key] = (ids, group);
-    _pipelines.add(p);
+    for (final b in bindings) {
+      (b as _WebBuffer?)?.users.add(p);
+    }
     return group;
   }
 
@@ -514,9 +519,10 @@ final class WebGpuBackend implements GpuBackend {
   void release(GpuBuffer buffer) {
     _flush();
     final b = buffer as _WebBuffer;
-    for (final p in _pipelines) {
+    for (final p in b.users) {
       p.groups.removeWhere((_, v) => v.$1.contains(b.id));
     }
+    b.users.clear();
     b.buffer.destroy();
   }
 }
